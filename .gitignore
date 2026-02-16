@@ -1,0 +1,15 @@
+# Node
+node_modules/
+dist/
+coverage/
+npm-debug.log
+yarn-error.log
+package-lock.json
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp

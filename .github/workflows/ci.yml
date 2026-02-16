@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install
+      - name: Ensure ast-grep binary
+        run: |
+          # @ast-grep/cli ships a placeholder `sg` file unless postinstall runs.
+          # Verify the binary actually executes, not just that the file is executable.
+          if ! node_modules/.bin/sg --version >/dev/null 2>&1; then
+            rm -f node_modules/@ast-grep/cli/sg node_modules/@ast-grep/cli/ast-grep
+            node node_modules/@ast-grep/cli/postinstall.js
+          fi
+          # Add to GITHUB_PATH to ensure it's available for sub-processes
+          echo "$(pwd)/node_modules/.bin" >> $GITHUB_PATH
+      - run: bun run check:ci
+      - run: bun run test
