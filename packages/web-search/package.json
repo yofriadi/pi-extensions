@@ -1,6 +1,6 @@
 {
   "name": "@yofriadi/pi-web-search",
-  "version": "1.16.10",
+  "version": "1.16.11",
   "description": "Web search extension package for pi",
   "type": "module",
   "files": [
@@ -23,6 +23,6 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "^0.52.10"
   }
 }

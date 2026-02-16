@@ -41,7 +41,8 @@ export async function exec(command: string[], options: { cwd?: string } = {}): P
 	}
 
 	const pathSeparator = process.platform === "win32" ? ";" : ":";
-	env.PATH = [...binPaths, env.PATH].join(pathSeparator);
+	const existingPath = env.PATH ?? "";
+	env.PATH = [existingPath, ...binPaths].filter((value) => value && value.length > 0).join(pathSeparator);
 
 	// Try Bun first
 	const bun = (globalThis as Record<string, unknown>).Bun as BunInterface | undefined;

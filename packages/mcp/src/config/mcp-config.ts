@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DISCOVERY_ADAPTERS_ENV_KEY = "PI_MCP_DISCOVERY_ADAPTERS";
@@ -225,7 +225,17 @@ function extractAdapterConfigObjects(rawConfig: JsonObject, adapter: McpDiscover
 function pathMatchesCwd(configPath: string, cwd: string): boolean {
 	const resolvedConfig = resolve(configPath);
 	const resolvedCwd = resolve(cwd);
-	return resolvedCwd === resolvedConfig || resolvedCwd.startsWith(`${resolvedConfig}/`);
+
+	if (resolvedConfig === resolvedCwd) {
+		return true;
+	}
+
+	const relation = relative(resolvedConfig, resolvedCwd);
+	if (!relation || relation.startsWith("..") || isAbsolute(relation)) {
+		return false;
+	}
+
+	return true;
 }
 
 function resolveConfigPath(inputPath: string, cwd: string): string {

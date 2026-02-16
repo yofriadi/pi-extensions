@@ -1,14 +1,14 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createLspClientRuntime } from "./client/runtime.js";
+import { createLspRuntimeRegistry } from "./client/registry.js";
 import { createLspConfigResolver } from "./config/resolver.js";
 import { createWriteThroughHooks } from "./hooks/writethrough.js";
 import { createLspToolRouter } from "./tools/lsp-tool.js";
 
 export default function lspExtension(pi: ExtensionAPI): void {
-	const runtime = createLspClientRuntime();
+	const runtime = createLspRuntimeRegistry();
 	const configResolver = createLspConfigResolver();
 	const toolRouter = createLspToolRouter(runtime, {
-		getServerCommand: () => configResolver.resolve().serverCommand,
+		getResolvedConfig: () => configResolver.resolve(),
 	});
 	const writeThroughHooks = createWriteThroughHooks(runtime);
 
@@ -17,7 +17,7 @@ export default function lspExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const config = configResolver.resolve();
-		await runtime.start(config.serverCommand);
+		await runtime.start(config);
 		const status = runtime.getStatus();
 		if (status.state === "error") {
 			ctx.ui.notify(`LSP startup failed: ${status.reason}`, "warning");
@@ -31,17 +31,27 @@ export default function lspExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("lsp-status", {
 		description: "Show health information for the LSP extension scaffold",
 		handler: async (_args, ctx) => {
-			const config = configResolver.resolve();
 			const status = runtime.getStatus();
-			const configured = config.serverCommand?.join(" ") ?? "not configured";
-			const active = status.activeCommand?.join(" ") ?? "not running";
-			const transport = status.transport ?? "n/a";
-			const fallback = status.fallbackReason ? ` fallback: ${status.fallbackReason}` : "";
+			const lines = [
+				`LSP registry: ${status.state}`,
+				`Reason: ${status.reason}`,
+				`Configured servers: ${status.configuredServers}`,
+				`Active servers: ${status.activeServers}`,
+			];
 
-			ctx.ui.notify(
-				`LSP ${status.state} via ${transport}; configured: ${configured}; active: ${active}; reason: ${status.reason}${fallback}`,
-				status.state === "error" ? "warning" : "info",
-			);
+			if (status.servers.length > 0) {
+				lines.push("Servers:");
+				for (const server of status.servers) {
+					const command =
+						server.status.activeCommand?.join(" ") ?? server.status.configuredCommand?.join(" ") ?? "not configured";
+					const fileTypes = server.fileTypes && server.fileTypes.length > 0 ? server.fileTypes.join(",") : "*";
+					lines.push(
+						`- ${server.name} [${fileTypes}] -> ${server.status.state}; transport=${server.status.transport ?? "n/a"}; command=${command}; reason=${server.status.reason}`,
+					);
+				}
+			}
+
+			ctx.ui.notify(lines.join("\n"), status.state === "error" ? "warning" : "info");
 		},
 	});
 }

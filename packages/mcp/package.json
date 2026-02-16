@@ -1,6 +1,6 @@
 {
   "name": "@yofriadi/pi-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Standalone MCP extension package for pi installs",
   "type": "module",
   "files": [
@@ -22,6 +22,6 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "^0.52.10"
   }
 }

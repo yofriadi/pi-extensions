@@ -13,21 +13,48 @@ const DEFAULT_SERVER_CANDIDATES = [
 ];
 
 const CONFIG_FILENAMES = ["lsp.json", "lsp.yaml", "lsp.yml"];
+const DEFAULT_SERVER_NAME = "default";
+
+interface LspConfigServerFile {
+	name?: string;
+	command?: string | string[];
+	serverCommand?: string | string[];
+	server?: string;
+	args?: string[];
+	fileTypes?: string[];
+	disabled?: boolean;
+}
 
 interface LspConfigFile {
 	serverCommand?: string | string[];
 	server?: string;
 	args?: string[];
 	serverCandidates?: string[];
+	servers?: Record<string, LspConfigServerFile> | LspConfigServerFile[];
+}
+
+interface NormalizedLspServerConfig {
+	name: string;
+	command?: string[];
+	fileTypes?: string[];
+	disabled?: boolean;
 }
 
 interface NormalizedLspConfig {
 	serverCommand?: string[];
 	serverCandidates?: string[];
+	servers?: NormalizedLspServerConfig[];
+}
+
+export interface ResolvedLspServerConfig {
+	name: string;
+	command: string[];
+	fileTypes?: string[];
 }
 
 export interface ResolvedLspConfig {
 	serverCommand: string[] | undefined;
+	servers: ResolvedLspServerConfig[];
 }
 
 export interface LspConfigResolver {
@@ -54,10 +81,20 @@ export function createLspConfigResolver(options: LspConfigResolverOptions = {}):
 			const config = mergeConfig(userConfig, projectConfig);
 
 			const searchDirs = getSearchDirs(homeDir, env);
+			const resolvedServers = resolveServers(config.servers, searchDirs, cwd, homeDir);
+			if (resolvedServers.length > 0) {
+				return {
+					serverCommand: resolvedServers[0]?.command,
+					servers: resolvedServers,
+				};
+			}
 
 			const explicitCommand = resolveCommand(config.serverCommand, searchDirs, cwd, homeDir);
 			if (explicitCommand) {
-				return { serverCommand: explicitCommand };
+				return {
+					serverCommand: explicitCommand,
+					servers: [{ name: DEFAULT_SERVER_NAME, command: explicitCommand }],
+				};
 			}
 
 			const candidates =
@@ -68,11 +105,17 @@ export function createLspConfigResolver(options: LspConfigResolverOptions = {}):
 			for (const candidate of candidates) {
 				const resolvedCandidate = resolveCommand([candidate], searchDirs, cwd, homeDir);
 				if (resolvedCandidate) {
-					return { serverCommand: resolvedCandidate };
+					return {
+						serverCommand: resolvedCandidate,
+						servers: [{ name: DEFAULT_SERVER_NAME, command: resolvedCandidate }],
+					};
 				}
 			}
 
-			return { serverCommand: undefined };
+			return {
+				serverCommand: undefined,
+				servers: [],
+			};
 		},
 	};
 }
@@ -119,10 +162,12 @@ function parseConfigFile(filePath: string, warn: (message: string) => void): Lsp
 function normalizeConfig(config: LspConfigFile): NormalizedLspConfig {
 	const normalizedServerCommand = normalizeCommand(config.serverCommand) ?? normalizeServerWithArgs(config);
 	const normalizedCandidates = normalizeStringList(config.serverCandidates);
+	const normalizedServers = normalizeServers(config.servers);
 
 	return {
 		serverCommand: normalizedServerCommand,
 		serverCandidates: normalizedCandidates,
+		servers: normalizedServers,
 	};
 }
 
@@ -142,7 +187,7 @@ function normalizeServerWithArgs(config: LspConfigFile): string[] | undefined {
 
 function normalizeCommand(raw: string | string[] | undefined): string[] | undefined {
 	if (typeof raw === "string") {
-		const normalized = raw.trim().split(/\s+/).filter(Boolean);
+		const normalized = splitCommandString(raw);
 		return normalized.length > 0 ? normalized : undefined;
 	}
 
@@ -154,6 +199,59 @@ function normalizeCommand(raw: string | string[] | undefined): string[] | undefi
 	return normalized.length > 0 ? normalized : undefined;
 }
 
+function splitCommandString(raw: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | undefined;
+	let escaped = false;
+
+	for (let index = 0; index < raw.length; index += 1) {
+		const char = raw[index];
+
+		if (escaped) {
+			current += char;
+			escaped = false;
+			continue;
+		}
+
+		if (char === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+
+		if (char === '"' || char === "'") {
+			if (!quote) {
+				quote = char;
+				continue;
+			}
+			if (quote === char) {
+				quote = undefined;
+				continue;
+			}
+		}
+
+		if (!quote && /\s/.test(char)) {
+			if (current.length > 0) {
+				tokens.push(current);
+				current = "";
+			}
+			continue;
+		}
+
+		current += char;
+	}
+
+	if (escaped) {
+		current += "\\";
+	}
+
+	if (current.length > 0) {
+		tokens.push(current);
+	}
+
+	return tokens;
+}
+
 function normalizeStringList(raw: string[] | undefined): string[] | undefined {
 	if (!Array.isArray(raw)) {
 		return undefined;
@@ -162,11 +260,139 @@ function normalizeStringList(raw: string[] | undefined): string[] | undefined {
 	return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeServers(
+	raw: Record<string, LspConfigServerFile> | LspConfigServerFile[] | undefined,
+): NormalizedLspServerConfig[] | undefined {
+	if (!raw) {
+		return undefined;
+	}
+
+	const normalized: NormalizedLspServerConfig[] = [];
+	if (Array.isArray(raw)) {
+		for (const [index, server] of raw.entries()) {
+			const parsed = normalizeServerEntry(server, undefined, index);
+			if (parsed) {
+				normalized.push(parsed);
+			}
+		}
+		return normalized.length > 0 ? normalized : undefined;
+	}
+
+	for (const [name, server] of Object.entries(raw)) {
+		const parsed = normalizeServerEntry(server, name, normalized.length);
+		if (parsed) {
+			normalized.push(parsed);
+		}
+	}
+	return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeServerEntry(
+	server: LspConfigServerFile,
+	nameHint: string | undefined,
+	index: number,
+): NormalizedLspServerConfig | undefined {
+	if (!server || typeof server !== "object" || Array.isArray(server)) {
+		return undefined;
+	}
+
+	const nameCandidate = typeof server.name === "string" ? server.name.trim() : "";
+	const name = nameCandidate || nameHint?.trim() || `server-${index + 1}`;
+	const command =
+		normalizeCommand(server.command) ?? normalizeCommand(server.serverCommand) ?? normalizeServerEntryWithArgs(server);
+	const fileTypes = normalizeStringList(server.fileTypes);
+
+	return {
+		name,
+		command,
+		fileTypes,
+		disabled: typeof server.disabled === "boolean" ? server.disabled : undefined,
+	};
+}
+
+function normalizeServerEntryWithArgs(server: LspConfigServerFile): string[] | undefined {
+	if (typeof server.server !== "string") {
+		return undefined;
+	}
+
+	const binary = server.server.trim();
+	if (!binary) {
+		return undefined;
+	}
+
+	const args = normalizeStringList(server.args) ?? [];
+	return [binary, ...args];
+}
+
 function mergeConfig(base: NormalizedLspConfig, override: NormalizedLspConfig): NormalizedLspConfig {
 	return {
 		serverCommand: override.serverCommand ?? base.serverCommand,
 		serverCandidates: override.serverCandidates ?? base.serverCandidates,
+		servers: mergeServers(base.servers, override.servers),
 	};
+}
+
+function mergeServers(
+	base: NormalizedLspServerConfig[] | undefined,
+	override: NormalizedLspServerConfig[] | undefined,
+): NormalizedLspServerConfig[] | undefined {
+	if (!base && !override) {
+		return undefined;
+	}
+
+	const merged = base ? [...base] : [];
+	if (!override) {
+		return merged.length > 0 ? merged : undefined;
+	}
+
+	for (const entry of override) {
+		const existingIndex = merged.findIndex((candidate) => candidate.name === entry.name);
+		if (existingIndex === -1) {
+			merged.push(entry);
+			continue;
+		}
+
+		const previous = merged[existingIndex];
+		merged[existingIndex] = {
+			name: entry.name,
+			command: entry.command ?? previous.command,
+			fileTypes: entry.fileTypes ?? previous.fileTypes,
+			disabled: entry.disabled ?? previous.disabled,
+		};
+	}
+
+	return merged.length > 0 ? merged : undefined;
+}
+
+function resolveServers(
+	servers: NormalizedLspServerConfig[] | undefined,
+	searchDirs: string[],
+	cwd: string,
+	homeDir: string,
+): ResolvedLspServerConfig[] {
+	if (!servers) {
+		return [];
+	}
+
+	const resolved: ResolvedLspServerConfig[] = [];
+	for (const server of servers) {
+		if (server.disabled === true || !server.command || server.command.length === 0) {
+			continue;
+		}
+
+		const command = resolveCommand(server.command, searchDirs, cwd, homeDir);
+		if (!command) {
+			continue;
+		}
+
+		resolved.push({
+			name: server.name,
+			command,
+			fileTypes: server.fileTypes,
+		});
+	}
+
+	return resolved;
 }
 
 function getSearchDirs(homeDir: string, env: NodeJS.ProcessEnv): string[] {

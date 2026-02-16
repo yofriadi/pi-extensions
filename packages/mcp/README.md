@@ -6,6 +6,7 @@ This package provides:
 
 - MCP config discovery and validation
 - MCP runtime with stdio and HTTP JSON-RPC transport support
+- HTTP session header propagation (`Mcp-Session-Id`) and SSE response parsing for streamable MCP endpoints
 - MCP manager lifecycle orchestration (startup/reload/shutdown)
 - MCP command/tool utilities and discovered-tool bridge registration
 

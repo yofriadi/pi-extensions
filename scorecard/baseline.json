@@ -1,0 +1,40 @@
+{
+  "minimums": {
+    "ast": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    },
+    "lsp": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    },
+    "mcp": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    },
+    "web-search": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    },
+    "fuzzy-match": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    },
+    "hashline-edit": {
+      "tests": 1,
+      "docs": 1,
+      "hardening": 1,
+      "total": 3
+    }
+  }
+}

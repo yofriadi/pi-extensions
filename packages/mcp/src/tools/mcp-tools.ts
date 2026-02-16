@@ -15,6 +15,8 @@ const MCP_LIST_TOOLS_PARAMS = Type.Object({
 	timeoutMs: Type.Optional(Type.Number({ minimum: 1_000, maximum: 120_000 })),
 });
 
+const MAX_JSON_RESULT_CHARS = 40_000;
+
 export function registerMcpTools(pi: ExtensionAPI, manager: McpManager): McpToolBridge {
 	const bridge = createMcpToolBridge(pi, manager);
 
@@ -250,7 +252,22 @@ function parseCommandArgs(input: string): { server: string; method: string; para
 }
 
 function formatJsonResult(prefix: string, payload: unknown): string {
-	return `${prefix}:\n${JSON.stringify(payload, null, 2)}`;
+	return `${prefix}:\n${safeJsonStringify(payload, MAX_JSON_RESULT_CHARS)}`;
+}
+
+function safeJsonStringify(payload: unknown, maxChars: number): string {
+	let rendered: string;
+	try {
+		rendered = JSON.stringify(payload, null, 2) ?? "";
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		rendered = `"<unserializable payload: ${message}>"`;
+	}
+
+	if (rendered.length <= maxChars) {
+		return rendered;
+	}
+	return `${rendered.slice(0, maxChars)}\n... (truncated at ${maxChars} chars)`;
 }
 
 function formatError(error: unknown): string {

@@ -2,6 +2,7 @@ import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent
 import type { McpManager, McpManagerState } from "../runtime/mcp-manager.js";
 
 const BRIDGED_TOOL_NAME_MAX_LENGTH = 64;
+const MAX_JSON_RESULT_CHARS = 40_000;
 const FALLBACK_PARAMETERS_SCHEMA = {
 	type: "object",
 	additionalProperties: true,
@@ -169,7 +170,7 @@ function createBridgedToolDefinition(input: {
 		name: registeredName,
 		label: `MCP ${discovered.name}`,
 		description: discovered.description?.trim() || `Bridged MCP tool "${discovered.name}" from server "${serverName}".`,
-		parameters: schema as any,
+		parameters: schema as unknown as ToolDefinition["parameters"],
 		async execute(_toolCallId, params, signal) {
 			const argumentsPayload = normalizeToolArguments(params);
 			try {
@@ -300,7 +301,22 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function formatJsonResult(prefix: string, payload: unknown): string {
-	return `${prefix}:\n${JSON.stringify(payload, null, 2)}`;
+	return `${prefix}:\n${safeJsonStringify(payload, MAX_JSON_RESULT_CHARS)}`;
+}
+
+function safeJsonStringify(payload: unknown, maxChars: number): string {
+	let rendered: string;
+	try {
+		rendered = JSON.stringify(payload, null, 2) ?? "";
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		rendered = `"<unserializable payload: ${message}>"`;
+	}
+
+	if (rendered.length <= maxChars) {
+		return rendered;
+	}
+	return `${rendered.slice(0, maxChars)}\n... (truncated at ${maxChars} chars)`;
 }
 
 function formatError(error: unknown): string {

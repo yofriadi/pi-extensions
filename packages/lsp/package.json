@@ -1,6 +1,6 @@
 {
   "name": "@yofriadi/pi-lsp",
-  "version": "1.16.10",
+  "version": "1.16.11",
   "type": "module",
   "files": [
     "src",
@@ -21,8 +21,8 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@sinclair/typebox": "*"
+    "@mariozechner/pi-coding-agent": "^0.52.10",
+    "@sinclair/typebox": "^0.34.0"
   },
   "dependencies": {
     "yaml": "^2.8.2"

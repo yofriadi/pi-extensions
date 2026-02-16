@@ -95,6 +95,8 @@ export interface LspClientRuntime {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
+const MAX_OUTPUT_BUFFER_BYTES = 8 * 1024 * 1024;
+const MAX_FRAME_CONTENT_LENGTH = 4 * 1024 * 1024;
 const LSPMUX_BINARY = "lspmux";
 
 export function createLspClientRuntime(options: LspClientRuntimeOptions = {}): LspClientRuntime {
@@ -311,7 +313,17 @@ export function createLspClientRuntime(options: LspClientRuntimeOptions = {}): L
 	}
 
 	function handleRpcOutput(chunk: Uint8Array): void {
-		outputBuffer = Buffer.concat([outputBuffer, Buffer.from(chunk)]);
+		if (outputBuffer.length + chunk.length > MAX_OUTPUT_BUFFER_BYTES) {
+			rejectPendingRequests(new Error("LSP response buffer overflow."));
+			void terminateProcess();
+			status.state = "error";
+			status.reason = `LSP response buffer exceeded ${MAX_OUTPUT_BUFFER_BYTES} bytes.`;
+			outputBuffer = Buffer.alloc(0);
+			return;
+		}
+
+		const nextChunk = Buffer.from(chunk);
+		outputBuffer = outputBuffer.length === 0 ? nextChunk : Buffer.concat([outputBuffer, nextChunk]);
 
 		while (true) {
 			const headerEnd = outputBuffer.indexOf("\r\n\r\n");
@@ -327,6 +339,15 @@ export function createLspClientRuntime(options: LspClientRuntimeOptions = {}): L
 			}
 
 			const contentLength = Number.parseInt(lengthMatch[1], 10);
+			if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > MAX_FRAME_CONTENT_LENGTH) {
+				rejectPendingRequests(new Error(`Invalid LSP frame length: ${lengthMatch[1]}`));
+				void terminateProcess();
+				status.state = "error";
+				status.reason = `Invalid LSP frame length ${lengthMatch[1]}.`;
+				outputBuffer = Buffer.alloc(0);
+				return;
+			}
+
 			const frameEnd = headerEnd + 4 + contentLength;
 			if (outputBuffer.length < frameEnd) {
 				return;
@@ -356,17 +377,18 @@ export function createLspClientRuntime(options: LspClientRuntimeOptions = {}): L
 			return;
 		}
 
-		if (typeof parsed.id !== "number") {
+		const requestId = normalizeRequestId(parsed.id);
+		if (requestId === undefined) {
 			return;
 		}
 
-		const pending = pendingRequests.get(parsed.id);
+		const pending = pendingRequests.get(requestId);
 		if (!pending) {
 			return;
 		}
 
 		clearTimeout(pending.timeout);
-		pendingRequests.delete(parsed.id);
+		pendingRequests.delete(requestId);
 
 		if (parsed.error) {
 			pending.reject(new Error(typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error)));
@@ -446,8 +468,8 @@ function createDefaultSpawn(): LspSpawn {
 		return {
 			pid: child.pid ?? undefined,
 			stdin: child.stdin,
-			stdout: Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-			stderr: Readable.toWeb(child.stderr) as ReadableStream<Uint8Array>,
+			stdout: toWebReadable(child.stdout),
+			stderr: toWebReadable(child.stderr),
 			exited: new Promise<number | null>((resolve, reject) => {
 				child.once("error", (error) => reject(error));
 				child.once("exit", (code) => resolve(code));
@@ -628,6 +650,17 @@ function normalizePosition(rawPosition: unknown): LspDiagnosticPosition | undefi
 	};
 }
 
+function normalizeRequestId(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isSafeInteger(value)) {
+		return value;
+	}
+	if (typeof value === "string" && /^\d+$/.test(value)) {
+		const parsed = Number.parseInt(value, 10);
+		return Number.isSafeInteger(parsed) ? parsed : undefined;
+	}
+	return undefined;
+}
+
 function countDiagnostics(diagnosticsByUri: Map<string, LspDiagnostic[]>): number {
 	let total = 0;
 	for (const diagnostics of diagnosticsByUri.values()) {
@@ -638,6 +671,10 @@ function countDiagnostics(diagnosticsByUri: Map<string, LspDiagnostic[]>): numbe
 
 function cloneCommand(command: string[] | undefined): string[] | undefined {
 	return command ? [...command] : undefined;
+}
+
+function toWebReadable(stream: Readable): ReadableStream<Uint8Array> {
+	return Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
 }
 
 async function readStream(

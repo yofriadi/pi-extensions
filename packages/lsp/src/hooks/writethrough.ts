@@ -2,7 +2,8 @@ import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promis
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@mariozechner/pi-coding-agent";
-import type { LspClientRuntime, LspDiagnostic } from "../client/runtime.js";
+import type { LspRuntimeRegistry } from "../client/registry.js";
+import type { LspDiagnostic } from "../client/runtime.js";
 
 interface LspPosition {
 	line: number;
@@ -34,7 +35,7 @@ export interface WriteThroughOptions {
 }
 
 export function createWriteThroughHooks(
-	runtime: LspClientRuntime,
+	runtime: LspRuntimeRegistry,
 	options: WriteThroughOptions = {},
 ): WriteThroughHooks {
 	const cwd = options.cwd ?? process.cwd();
@@ -66,9 +67,12 @@ export function createWriteThroughHooks(
 			return;
 		}
 
-		const status = runtime.getStatus();
-		if (status.state !== "ready") {
-			ctx.ui.notify(`LSP write-through skipped for ${filePath}: runtime not ready.`, "warning");
+		const pathStatus = runtime.getStatusForPath(filePath);
+		if (!pathStatus || pathStatus.state !== "ready") {
+			ctx.ui.notify(
+				`LSP write-through skipped for ${filePath}: ${pathStatus ? pathStatus.reason : "no matching server"}.`,
+				"warning",
+			);
 			return;
 		}
 
@@ -77,10 +81,14 @@ export function createWriteThroughHooks(
 
 		if (formatOnWrite) {
 			try {
-				const rawEdits = await runtime.request("textDocument/formatting", {
-					textDocument: { uri },
-					options: formattingOptions,
-				});
+				const rawEdits = await runtime.request(
+					"textDocument/formatting",
+					{
+						textDocument: { uri },
+						options: formattingOptions,
+					},
+					{ path: filePath },
+				);
 				const edits = normalizeTextEdits(rawEdits);
 				const applied = await applyFormattingEdits(filePath, edits, cwd);
 				summaries.push(applied > 0 ? `formatted (${applied} edits)` : "no formatting changes");
@@ -91,9 +99,13 @@ export function createWriteThroughHooks(
 
 		if (diagnosticsOnWrite) {
 			try {
-				const diagnosticPayload = await runtime.request("textDocument/diagnostic", {
-					textDocument: { uri },
-				});
+				const diagnosticPayload = await runtime.request(
+					"textDocument/diagnostic",
+					{
+						textDocument: { uri },
+					},
+					{ path: filePath },
+				);
 				const diagnostics = extractDiagnostics(diagnosticPayload, runtime.getPublishedDiagnostics(filePath));
 				summaries.push(summarizeDiagnostics(diagnostics));
 			} catch {
@@ -180,38 +192,64 @@ async function applyFormattingEdits(filePath: string, edits: LspTextEdit[], cwd:
 }
 
 function applyTextEdits(text: string, edits: LspTextEdit[]): string {
-	const normalized = [...edits].sort((left, right) => {
-		if (left.range.start.line !== right.range.start.line) {
-			return right.range.start.line - left.range.start.line;
-		}
-		return right.range.start.character - left.range.start.character;
-	});
+	const lineStarts = computeLineStarts(text);
+	const normalized = edits
+		.map((edit) => {
+			const start = positionToOffset(lineStarts, text.length, edit.range.start);
+			const end = positionToOffset(lineStarts, text.length, edit.range.end);
+			return {
+				start,
+				end,
+				newText: edit.newText,
+			};
+		})
+		.filter((edit) => edit.start <= edit.end)
+		.sort((left, right) => {
+			if (left.start !== right.start) {
+				return right.start - left.start;
+			}
+			return right.end - left.end;
+		});
 
-	let output = text;
-	for (const edit of normalized) {
-		const start = positionToOffset(output, edit.range.start);
-		const end = positionToOffset(output, edit.range.end);
-		output = `${output.slice(0, start)}${edit.newText}${output.slice(end)}`;
+	if (normalized.length === 0) {
+		return text;
 	}
-	return output;
+
+	const parts: string[] = [];
+	let cursor = text.length;
+	for (const edit of normalized) {
+		if (edit.end > cursor) {
+			// Defensive fallback for malformed/overlapping edit ranges.
+			let output = text;
+			for (const fallbackEdit of normalized) {
+				output = `${output.slice(0, fallbackEdit.start)}${fallbackEdit.newText}${output.slice(fallbackEdit.end)}`;
+			}
+			return output;
+		}
+
+		parts.push(text.slice(edit.end, cursor));
+		parts.push(edit.newText);
+		cursor = edit.start;
+	}
+	parts.push(text.slice(0, cursor));
+	return parts.reverse().join("");
 }
 
-function positionToOffset(text: string, position: LspPosition): number {
+function computeLineStarts(text: string): number[] {
+	const lineStarts = [0];
+	for (let index = 0; index < text.length; index += 1) {
+		if (text[index] === "\n") {
+			lineStarts.push(index + 1);
+		}
+	}
+	return lineStarts;
+}
+
+function positionToOffset(lineStarts: number[], textLength: number, position: LspPosition): number {
 	const safeLine = Math.max(0, position.line);
 	const safeChar = Math.max(0, position.character);
-	let line = 0;
-	let offset = 0;
-
-	while (line < safeLine && offset < text.length) {
-		const nextNewline = text.indexOf("\n", offset);
-		if (nextNewline === -1) {
-			return text.length;
-		}
-		offset = nextNewline + 1;
-		line += 1;
-	}
-
-	return Math.min(text.length, offset + safeChar);
+	const lineStart = safeLine < lineStarts.length ? lineStarts[safeLine] : textLength;
+	return Math.min(textLength, lineStart + safeChar);
 }
 
 function extractDiagnostics(payload: unknown, fallback: LspDiagnostic[]): LspDiagnostic[] {

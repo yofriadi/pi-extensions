@@ -23,5 +23,8 @@ jobs:
           fi
           # Add to GITHUB_PATH to ensure it's available for sub-processes
           echo "$(pwd)/node_modules/.bin" >> $GITHUB_PATH
+      - run: bun run deps:check
       - run: bun run check:ci
       - run: bun run test
+      - run: bun run scorecard:check
+      - run: bun run audit

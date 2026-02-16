@@ -9,7 +9,11 @@
     "lint:fix": "biome check --write .",
     "check": "bun run lint && bun run typecheck",
     "check:ci": "biome ci . && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "scorecard": "bun scripts/scorecard.ts report",
+    "scorecard:check": "bun scripts/scorecard.ts check",
+    "deps:check": "bun scripts/dependency-audit.ts",
+    "audit": "bun audit --json"
   },
   "workspaces": [
     "packages/*"
@@ -28,17 +32,20 @@
   "pi": {
     "extensions": [
       "./packages/ast/src/index.ts",
+      "./packages/fuzzy-match/src/index.ts",
+      "./packages/hashline-edit/src/index.ts",
       "./packages/lsp/src/index.ts",
       "./packages/mcp/src/index.ts",
-      "./packages/web-access/src/index.ts"
+      "./packages/web-search/src/index.ts"
     ]
   },
   "devDependencies": {
     "@ast-grep/cli": "^0.40.5",
     "@biomejs/biome": "^2.3.5",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "^0.52.10",
+    "@mariozechner/pi-coding-agent": "^0.52.10",
     "@sinclair/typebox": "^0.34.0",
+    "@types/bun": "*",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.1.8"
@@ -46,5 +53,8 @@
   "trustedDependencies": [
     "@ast-grep/cli"
   ],
+  "overrides": {
+    "esbuild": "^0.25.0"
+  },
   "license": "MIT"
 }

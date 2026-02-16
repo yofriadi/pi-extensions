@@ -1,10 +1,11 @@
 {
-  "name": "@yofriadi/pi-ast",
+  "name": "@yofriadi/pi-fuzzy-match",
   "version": "0.1.1",
   "type": "module",
   "keywords": [
     "pi-package",
-    "ast"
+    "fuzzy",
+    "edit"
   ],
   "pi": {
     "extensions": [

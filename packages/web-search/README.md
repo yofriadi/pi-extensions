@@ -66,6 +66,8 @@ Nested provider form is also accepted:
 
 Fetches web content using a scraper registry with Jina Reader as first fallback.
 
+For safety, `fetch_content` blocks private/loopback/local-network hosts (for example `localhost`, `127.0.0.1`, `10.x.x.x`, `192.168.x.x`, `172.16-31.x.x`, and link-local/private IPv6 ranges).
+
 Example parameters:
 
 ```json
@@ -94,6 +96,8 @@ Example parameters:
 
 Provider routing behavior:
 
-- `mode=resources`: prefers Exa, falls back to Perplexity
-- `mode=answer`: prefers Perplexity, falls back to Exa
-- `provider=exa|perplexity`: force a provider
+- `mode=resources`: prefers Exa, then Perplexity
+- `mode=answer`: prefers Perplexity, then Exa
+- `provider=exa|perplexity`: force a provider (no fallback)
+- when provider selection is automatic, runtime failures (including `429` rate limits) fall through to the next configured provider
+- `Retry-After` hints from provider `429` responses are surfaced in failure/fallback messages

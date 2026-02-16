@@ -4,8 +4,11 @@ import type { McpResolvedConfig, McpServerConfig } from "../config/mcp-config.js
 
 const JSON_RPC_VERSION = "2.0";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const PROCESS_EXIT_GRACE_MS = 250;
+const MCP_SESSION_ID_HEADER = "mcp-session-id";
+const HTTP_STOP_TIMEOUT_MS = 3_000;
 
-type JsonRpcId = number;
+type JsonRpcId = number | string;
 
 interface JsonRpcResponse {
 	jsonrpc: string;
@@ -40,7 +43,7 @@ export type McpSpawn = (command: string[], options: McpSpawnOptions) => McpSubpr
 export interface McpRuntimeServerStatus {
 	name: string;
 	transport: "stdio" | "http";
-	state: "ready" | "error" | "inactive";
+	state: "starting" | "ready" | "error" | "inactive";
 	reason: string;
 	pid?: number;
 	command?: string[];
@@ -91,11 +94,10 @@ interface McpClient {
 
 class McpStdioClient implements McpClient {
 	private process: McpSubprocess | undefined;
-	private lineBuffer = "";
+	private outputBuffer = Buffer.alloc(0);
 	private nextId = 1;
 	private readonly pending = new Map<number, PendingRequest>();
 	private status: McpRuntimeServerStatus;
-	private readonly textDecoder = new TextDecoder();
 
 	constructor(
 		private readonly server: McpServerConfig,
@@ -122,24 +124,42 @@ class McpStdioClient implements McpClient {
 		};
 
 		const command = [this.server.command, ...this.server.args];
-		this.process = this.spawn(command, {
+		this.outputBuffer = Buffer.alloc(0);
+		const processHandle = this.spawn(command, {
 			env: mergedEnv,
 		});
+		this.process = processHandle;
 		this.status = {
 			...this.status,
-			state: "ready",
-			reason: "process started",
-			pid: this.process.pid,
+			state: "starting",
+			reason: "process started, waiting for initialize response",
+			pid: processHandle.pid,
 			command,
 		};
 
-		void this.consumeStream(this.process.stdout, false);
-		if (this.process.stderr) {
-			void this.consumeStream(this.process.stderr, true);
+		void this.consumeStream(processHandle.stdout, false);
+		if (processHandle.stderr) {
+			void this.consumeStream(processHandle.stderr, true);
 		}
-		void this.watchExit(this.process.exited);
+		void this.watchExit(processHandle.exited);
 
-		await this.initializeHandshake();
+		try {
+			await this.initializeHandshake();
+			this.status = {
+				...this.status,
+				state: "ready",
+				reason: "initialize handshake completed",
+			};
+		} catch (error) {
+			await this.terminateProcess(processHandle, "initialize failed");
+			this.status = {
+				...this.status,
+				state: "error",
+				reason: `initialize failed: ${formatError(error)}`,
+				pid: undefined,
+			};
+			throw error;
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -152,8 +172,6 @@ class McpStdioClient implements McpClient {
 			};
 			return;
 		}
-
-		this.process = undefined;
 
 		try {
 			await this.request("shutdown", null, {
@@ -169,26 +187,7 @@ class McpStdioClient implements McpClient {
 			// Ignore notify failures while shutting down.
 		}
 
-		try {
-			proc.stdin.end();
-		} catch {
-			// Ignore end errors.
-		}
-
-		if (proc.kill) {
-			try {
-				proc.kill("SIGTERM");
-			} catch {
-				// Ignore kill errors.
-			}
-		}
-
-		for (const pending of this.pending.values()) {
-			clearTimeout(pending.timeoutId);
-			pending.reject(new Error(`Server ${this.server.name} stopped before responding`));
-		}
-		this.pending.clear();
-
+		await this.terminateProcess(proc, "stopped");
 		this.status = {
 			...this.status,
 			state: "inactive",
@@ -289,7 +288,8 @@ class McpStdioClient implements McpClient {
 		}
 
 		const serialized = JSON.stringify(payload);
-		proc.stdin.write(`${serialized}\n`);
+		const framed = `Content-Length: ${Buffer.byteLength(serialized, "utf8")}\r\n\r\n${serialized}`;
+		proc.stdin.write(framed);
 	}
 
 	private async consumeStream(stream: ReadableStream<Uint8Array>, isStdErr: boolean): Promise<void> {
@@ -300,51 +300,77 @@ class McpStdioClient implements McpClient {
 				if (done) {
 					break;
 				}
-				if (!value) {
+				if (!value || isStdErr) {
 					continue;
 				}
-				if (isStdErr) {
-					continue;
-				}
-				this.lineBuffer += this.textDecoder.decode(value, { stream: true });
-				this.drainLines();
+				this.outputBuffer =
+					this.outputBuffer.length === 0 ? Buffer.from(value) : Buffer.concat([this.outputBuffer, Buffer.from(value)]);
+				this.drainFrames();
 			}
 		} finally {
 			reader.releaseLock();
 		}
 	}
 
-	private drainLines(): void {
+	private drainFrames(): void {
 		while (true) {
-			const newlineIndex = this.lineBuffer.indexOf("\n");
+			const headerEnd = this.outputBuffer.indexOf("\r\n\r\n");
+			if (headerEnd !== -1) {
+				const header = this.outputBuffer.slice(0, headerEnd).toString("utf8");
+				const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
+				if (lengthMatch) {
+					const contentLength = Number.parseInt(lengthMatch[1], 10);
+					if (!Number.isFinite(contentLength) || contentLength < 0) {
+						this.outputBuffer = this.outputBuffer.slice(headerEnd + 4);
+						continue;
+					}
+					const frameEnd = headerEnd + 4 + contentLength;
+					if (this.outputBuffer.length < frameEnd) {
+						return;
+					}
+
+					const payload = this.outputBuffer.slice(headerEnd + 4, frameEnd).toString("utf8");
+					this.outputBuffer = this.outputBuffer.slice(frameEnd);
+					this.handleSerializedMessage(payload);
+					continue;
+				}
+			}
+
+			const newlineIndex = this.outputBuffer.indexOf(0x0a);
 			if (newlineIndex === -1) {
 				return;
 			}
-			const payload = this.lineBuffer.slice(0, newlineIndex).trim();
-			this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
-			if (!payload) {
-				continue;
-			}
-			if (payload.startsWith("Content-Length:")) {
-				continue;
-			}
 
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(payload);
-			} catch {
+			const payload = this.outputBuffer.slice(0, newlineIndex).toString("utf8").trim();
+			this.outputBuffer = this.outputBuffer.slice(newlineIndex + 1);
+			if (!payload || payload.startsWith("Content-Length:")) {
 				continue;
 			}
-			this.handleMessage(parsed);
+			this.handleSerializedMessage(payload);
 		}
 	}
 
+	private handleSerializedMessage(payload: string): void {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(payload);
+		} catch {
+			return;
+		}
+		this.handleMessage(parsed);
+	}
+
 	private handleMessage(payload: unknown): void {
-		if (!isObject(payload) || typeof payload.id !== "number") {
+		if (!isObject(payload)) {
 			return;
 		}
 		const response = payload as unknown as JsonRpcResponse;
-		const pending = this.pending.get(response.id);
+		const responseId = normalizeJsonRpcId(response.id);
+		if (responseId === undefined) {
+			return;
+		}
+
+		const pending = this.pending.get(responseId);
 		if (!pending) {
 			return;
 		}
@@ -355,6 +381,45 @@ class McpStdioClient implements McpClient {
 		}
 
 		pending.resolve(response.result);
+	}
+
+	private async terminateProcess(proc: McpSubprocess, reason: string): Promise<void> {
+		if (this.process === proc) {
+			this.process = undefined;
+		}
+
+		for (const pending of this.pending.values()) {
+			clearTimeout(pending.timeoutId);
+			pending.reject(new Error(`Server ${this.server.name} ${reason} before responding`));
+		}
+		this.pending.clear();
+
+		try {
+			proc.stdin.end();
+		} catch {
+			// Ignore end errors.
+		}
+
+		if (proc.kill) {
+			try {
+				proc.kill("SIGTERM");
+			} catch {
+				// Ignore kill errors.
+			}
+		}
+
+		const exited = await Promise.race([
+			proc.exited,
+			new Promise<null>((resolve) => setTimeout(() => resolve(null), PROCESS_EXIT_GRACE_MS)),
+		]);
+		if (exited === null && proc.kill) {
+			try {
+				proc.kill("SIGKILL");
+			} catch {
+				// Ignore kill errors.
+			}
+		}
+		this.outputBuffer = Buffer.alloc(0);
 	}
 
 	private async watchExit(exited: Promise<number | null>): Promise<void> {
@@ -382,6 +447,7 @@ class McpStdioClient implements McpClient {
 class McpHttpClient implements McpClient {
 	private status: McpRuntimeServerStatus;
 	private nextId = 1;
+	private sessionId: string | undefined;
 
 	constructor(
 		private readonly server: McpServerConfig,
@@ -401,10 +467,11 @@ class McpHttpClient implements McpClient {
 			throw new Error(`Server ${this.server.name} is missing URL`);
 		}
 
+		this.sessionId = undefined;
 		this.status = {
 			...this.status,
-			state: "ready",
-			reason: "http endpoint configured",
+			state: "starting",
+			reason: "http endpoint configured, waiting for initialize response",
 		};
 
 		try {
@@ -420,6 +487,11 @@ class McpHttpClient implements McpClient {
 				},
 				{ timeoutMs: this.server.timeoutMs },
 			);
+			this.status = {
+				...this.status,
+				state: "ready",
+				reason: "initialize handshake completed",
+			};
 		} catch (error) {
 			this.status = {
 				...this.status,
@@ -431,6 +503,8 @@ class McpHttpClient implements McpClient {
 	}
 
 	async stop(): Promise<void> {
+		await this.terminateSession().catch(() => undefined);
+		this.sessionId = undefined;
 		this.status = {
 			...this.status,
 			state: "inactive",
@@ -455,11 +529,7 @@ class McpHttpClient implements McpClient {
 		try {
 			const response = await this.fetchImpl(this.server.url, {
 				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					accept: "application/json, text/event-stream",
-					...this.server.headers,
-				},
+				headers: this.buildRequestHeaders(),
 				body: JSON.stringify({
 					jsonrpc: JSON_RPC_VERSION,
 					id,
@@ -469,9 +539,20 @@ class McpHttpClient implements McpClient {
 				signal: controller.signal,
 			});
 
+			const responseSessionId = readSessionIdFromHeaders(response.headers);
+			if (responseSessionId) {
+				this.sessionId = responseSessionId;
+			}
+
 			if (!response.ok) {
 				const body = await response.text().catch(() => "");
-				throw new Error(`HTTP ${response.status} ${response.statusText}${body ? `: ${body.slice(0, 300)}` : ""}`);
+				const authHints = [response.headers.get("www-authenticate"), response.headers.get("mcp-auth-server")]
+					.filter(Boolean)
+					.join("; ");
+				const hintSuffix = authHints ? ` [${authHints}]` : "";
+				throw new Error(
+					`HTTP ${response.status} ${response.statusText}${body ? `: ${body.slice(0, 300)}` : ""}${hintSuffix}`,
+				);
 			}
 
 			const contentType = response.headers.get("content-type") ?? "";
@@ -483,10 +564,10 @@ class McpHttpClient implements McpClient {
 				throw new Error("Failed to parse JSON response from MCP HTTP server");
 			}
 
-			if (json?.error) {
+			if (json.error) {
 				throw new Error(`MCP ${this.server.name} error ${json.error.code}: ${json.error.message}`);
 			}
-			return json?.result;
+			return json.result;
 		} finally {
 			clearTimeout(timeout);
 			cleanAbort();
@@ -495,6 +576,42 @@ class McpHttpClient implements McpClient {
 
 	getStatus(): McpRuntimeServerStatus {
 		return { ...this.status };
+	}
+
+	private buildRequestHeaders(): Record<string, string> {
+		const headers: Record<string, string> = {
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			...this.server.headers,
+		};
+		if (this.sessionId) {
+			headers[MCP_SESSION_ID_HEADER] = this.sessionId;
+		}
+		return headers;
+	}
+
+	private async terminateSession(): Promise<void> {
+		if (!this.server.url || !this.sessionId) {
+			return;
+		}
+
+		const controller = new AbortController();
+		const timeout = setTimeout(() => {
+			controller.abort(new Error(`MCP HTTP session stop timed out for ${this.server.name}`));
+		}, HTTP_STOP_TIMEOUT_MS);
+
+		try {
+			await this.fetchImpl(this.server.url, {
+				method: "DELETE",
+				headers: {
+					...this.server.headers,
+					[MCP_SESSION_ID_HEADER]: this.sessionId,
+				},
+				signal: controller.signal,
+			});
+		} finally {
+			clearTimeout(timeout);
+		}
 	}
 }
 
@@ -566,10 +683,12 @@ export function createMcpRuntime(options: McpRuntimeOptions = {}): McpRuntime {
 
 				const client: McpClient =
 					server.transport === "http" ? new McpHttpClient(server, fetchImpl) : new McpStdioClient(server, spawn, env);
-				clients.set(server.name, client);
 				try {
 					await client.start();
+					clients.set(server.name, client);
+					status.servers.push(client.getStatus());
 				} catch (error) {
+					await client.stop().catch(() => undefined);
 					status.servers.push({
 						name: server.name,
 						transport: server.transport,
@@ -578,9 +697,7 @@ export function createMcpRuntime(options: McpRuntimeOptions = {}): McpRuntime {
 						command: server.command ? [server.command, ...server.args] : undefined,
 						url: server.url,
 					});
-					continue;
 				}
-				status.servers.push(client.getStatus());
 			}
 
 			status.activeServers = status.servers.filter((entry) => entry.state === "ready").length;
@@ -668,7 +785,7 @@ function createDefaultSpawn(): McpSpawn {
 				stdout: processHandle.stdout,
 				stderr: processHandle.stderr,
 				exited: processHandle.exited,
-				kill: (signal?: string | number): unknown => processHandle.kill(signal as any),
+				kill: (signal?: string | number): unknown => processHandle.kill(normalizeKillSignal(signal)),
 			};
 		};
 	}
@@ -687,12 +804,12 @@ function createDefaultSpawn(): McpSpawn {
 		return {
 			pid: child.pid ?? undefined,
 			stdin: child.stdin,
-			stdout: Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-			stderr: child.stderr ? (Readable.toWeb(child.stderr) as ReadableStream<Uint8Array>) : null,
+			stdout: toWebReadable(child.stdout),
+			stderr: child.stderr ? toWebReadable(child.stderr) : null,
 			exited: new Promise<number | null>((resolve) => {
 				child.once("exit", (code) => resolve(code));
 			}),
-			kill: (signal?: string | number): unknown => child.kill(signal as any),
+			kill: (signal?: string | number): unknown => child.kill(normalizeKillSignal(signal)),
 		};
 	};
 }
@@ -751,6 +868,31 @@ function getBunRuntime():
 	};
 }
 
+function normalizeJsonRpcId(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isSafeInteger(value)) {
+		return value;
+	}
+	if (typeof value === "string" && /^\d+$/.test(value)) {
+		const parsed = Number.parseInt(value, 10);
+		return Number.isSafeInteger(parsed) ? parsed : undefined;
+	}
+	return undefined;
+}
+
+function toWebReadable(stream: Readable): ReadableStream<Uint8Array> {
+	return Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
+}
+
+function normalizeKillSignal(signal?: string | number): NodeJS.Signals | number | undefined {
+	if (typeof signal === "number") {
+		return signal;
+	}
+	if (typeof signal === "string") {
+		return signal as NodeJS.Signals;
+	}
+	return undefined;
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object";
 }
@@ -790,27 +932,54 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal, message: string)
 	});
 }
 
+function readSessionIdFromHeaders(headers: Headers): string | undefined {
+	const raw = headers.get(MCP_SESSION_ID_HEADER);
+	if (!raw) {
+		return undefined;
+	}
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function parseSseJsonRpcResponse(payload: string, requestId: number): JsonRpcResponse | undefined {
-	const lines = payload.split("\n");
-	for (const rawLine of lines) {
-		const line = rawLine.trim();
-		if (!line.startsWith("data:")) {
-			continue;
+	const lines = payload.split(/\r?\n/u);
+	let dataLines: string[] = [];
+
+	const tryParseEvent = (): JsonRpcResponse | undefined => {
+		if (dataLines.length === 0) {
+			return undefined;
 		}
-		const jsonPayload = line.slice(5).trim();
+		const jsonPayload = dataLines.join("\n").trim();
+		dataLines = [];
 		if (!jsonPayload || jsonPayload === "[DONE]") {
-			continue;
+			return undefined;
 		}
 		try {
 			const parsed = JSON.parse(jsonPayload) as JsonRpcResponse;
-			if (parsed?.id === requestId) {
+			if (normalizeJsonRpcId(parsed?.id) === requestId) {
 				return parsed;
 			}
 		} catch {
 			// Ignore malformed SSE chunks and continue searching.
 		}
+		return undefined;
+	};
+
+	for (const rawLine of lines) {
+		if (rawLine.length === 0) {
+			const parsed = tryParseEvent();
+			if (parsed) {
+				return parsed;
+			}
+			continue;
+		}
+
+		if (rawLine.startsWith("data:")) {
+			dataLines.push(rawLine.slice(5).trimStart());
+		}
 	}
-	return undefined;
+
+	return tryParseEvent();
 }
 
 function cloneServerStatus(status: McpRuntimeServerStatus): McpRuntimeServerStatus {

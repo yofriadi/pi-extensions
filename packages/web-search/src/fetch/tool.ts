@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -313,16 +314,17 @@ function createPkgGoDevScraper(): Scraper {
 		name: "pkg-go-dev-redirect",
 		canHandle: (url) => url.hostname.toLowerCase() === "pkg.go.dev",
 		async scrape(url, options): Promise<ScrapeResult> {
-			const response = await withTimeout(
-				options.fetchImpl(url.toString(), {
+			const response = await fetchWithTimeout(
+				options.fetchImpl,
+				url.toString(),
+				{
 					headers: {
 						"user-agent": WEB_ACCESS_USER_AGENT,
 						accept: "text/html;q=0.9, */*;q=0.8",
 					},
 					signal: options.signal,
-				}),
+				},
 				options.timeoutMs,
-				options.signal,
 				"pkg.go.dev request timed out",
 			);
 			if (!response.ok) {
@@ -368,16 +370,17 @@ function createGitHubRawScraper(): Scraper {
 				throw new Error("Unable to transform GitHub URL to raw content URL");
 			}
 
-			const response = await withTimeout(
-				options.fetchImpl(rawUrl, {
+			const response = await fetchWithTimeout(
+				options.fetchImpl,
+				rawUrl,
+				{
 					headers: {
 						"user-agent": WEB_ACCESS_USER_AGENT,
 						accept: "text/plain, text/markdown;q=0.9, */*;q=0.8",
 					},
 					signal: options.signal,
-				}),
+				},
 				options.timeoutMs,
-				options.signal,
 				"GitHub raw request timed out",
 			);
 			if (!response.ok) {
@@ -582,16 +585,17 @@ async function fetchOptionalCratesReadme(
 	options: ScrapeOptions,
 ): Promise<string | undefined> {
 	const readmeUrl = `https://crates.io/api/v1/crates/${encodeURIComponent(crateName)}/${encodeURIComponent(version)}/readme`;
-	const response = await withTimeout(
-		options.fetchImpl(readmeUrl, {
+	const response = await fetchWithTimeout(
+		options.fetchImpl,
+		readmeUrl,
+		{
 			headers: {
 				"user-agent": WEB_ACCESS_USER_AGENT,
 				accept: "text/plain, text/markdown;q=0.9, */*;q=0.8",
 			},
 			signal: options.signal,
-		}),
+		},
 		options.timeoutMs,
-		options.signal,
 		"crates.io readme request timed out",
 	);
 
@@ -641,16 +645,17 @@ async function fetchOptionalGitHubReadme(repositoryUrl: string, options: ScrapeO
 
 	const candidates = toGitHubReadmeCandidates(parsed.url);
 	for (const candidate of candidates) {
-		const response = await withTimeout(
-			options.fetchImpl(candidate, {
+		const response = await fetchWithTimeout(
+			options.fetchImpl,
+			candidate,
+			{
 				headers: {
 					"user-agent": WEB_ACCESS_USER_AGENT,
 					accept: "text/plain, text/markdown;q=0.9, */*;q=0.8",
 				},
 				signal: options.signal,
-			}),
+			},
 			options.timeoutMs,
-			options.signal,
 			"GitHub readme request timed out",
 		);
 		if (response.status === 404) {
@@ -726,16 +731,17 @@ async function fetchJson(
 	options: ScrapeOptions,
 	timeoutMessage: string,
 ): Promise<{ response: Response; data: unknown }> {
-	const response = await withTimeout(
-		options.fetchImpl(url, {
+	const response = await fetchWithTimeout(
+		options.fetchImpl,
+		url,
+		{
 			headers: {
 				"user-agent": WEB_ACCESS_USER_AGENT,
 				accept: "application/json, text/plain;q=0.9, */*;q=0.8",
 			},
 			signal: options.signal,
-		}),
+		},
 		options.timeoutMs,
-		options.signal,
 		timeoutMessage,
 	);
 	if (!response.ok) {
@@ -921,16 +927,17 @@ function createJinaReaderScraper(): Scraper {
 		canHandle: (url) => url.protocol === "http:" || url.protocol === "https:",
 		async scrape(url, options): Promise<ScrapeResult> {
 			const readerUrl = `https://r.jina.ai/${url.toString()}`;
-			const response = await withTimeout(
-				options.fetchImpl(readerUrl, {
+			const response = await fetchWithTimeout(
+				options.fetchImpl,
+				readerUrl,
+				{
 					headers: {
 						"user-agent": WEB_ACCESS_USER_AGENT,
 						accept: "text/plain, text/markdown;q=0.9, */*;q=0.8",
 					},
 					signal: options.signal,
-				}),
+				},
 				options.timeoutMs,
-				options.signal,
 				"Jina Reader request timed out",
 			);
 
@@ -958,16 +965,17 @@ function createDirectFetchScraper(): Scraper {
 		name: "direct-fetch",
 		canHandle: (url) => url.protocol === "http:" || url.protocol === "https:",
 		async scrape(url, options): Promise<ScrapeResult> {
-			const response = await withTimeout(
-				options.fetchImpl(url.toString(), {
+			const response = await fetchWithTimeout(
+				options.fetchImpl,
+				url.toString(),
+				{
 					headers: {
 						"user-agent": WEB_ACCESS_USER_AGENT,
 						accept: "text/plain, text/html;q=0.9, application/json;q=0.8, */*;q=0.5",
 					},
 					signal: options.signal,
-				}),
+				},
 				options.timeoutMs,
-				options.signal,
 				"Direct fetch request timed out",
 			);
 
@@ -1009,6 +1017,14 @@ function parseUrl(raw: string): { ok: true; url: URL } | { ok: false; error: str
 				error: `Unsupported URL protocol: ${parsed.protocol}. Only http:// and https:// are supported.`,
 			};
 		}
+
+		if (isPrivateOrLocalHost(parsed.hostname)) {
+			return {
+				ok: false,
+				error: `Blocked URL host: ${parsed.hostname}. Private, loopback, and local network addresses are not allowed.`,
+			};
+		}
+
 		return { ok: true, url: parsed };
 	} catch {
 		return {
@@ -1016,6 +1032,42 @@ function parseUrl(raw: string): { ok: true; url: URL } | { ok: false; error: str
 			error: `Invalid URL: ${raw}`,
 		};
 	}
+}
+
+function isPrivateOrLocalHost(hostname: string): boolean {
+	const lower = hostname.toLowerCase();
+	const canonical = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+	if (canonical === "localhost" || canonical.endsWith(".localhost") || canonical.endsWith(".local")) {
+		return true;
+	}
+
+	const ipVersion = isIP(canonical);
+	if (ipVersion === 6) {
+		return (
+			canonical === "::1" ||
+			canonical === "::" ||
+			canonical.startsWith("fe80:") ||
+			canonical.startsWith("fc") ||
+			canonical.startsWith("fd")
+		);
+	}
+	if (ipVersion !== 4) {
+		return false;
+	}
+
+	const parts = canonical.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) {
+		return true;
+	}
+
+	const [a, b] = parts;
+	if (a === 0 || a === 10 || a === 127) return true;
+	if (a === 169 && b === 254) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 100 && b >= 64 && b <= 127) return true;
+	if (a >= 224) return true;
+	return false;
 }
 
 function stripHtml(html: string): string {
@@ -1034,43 +1086,44 @@ function formatError(error: unknown): string {
 	return String(error);
 }
 
-async function withTimeout<T>(
-	promise: Promise<T>,
+async function fetchWithTimeout(
+	fetchImpl: typeof fetch,
+	url: string,
+	init: RequestInit,
 	timeoutMs: number,
-	signal: AbortSignal | undefined,
 	message: string,
-): Promise<T> {
-	if (signal?.aborted) {
-		throw new Error("Request aborted");
-	}
-
+): Promise<Response> {
 	const controller = new AbortController();
-	const abortListener = () => controller.abort();
-	if (signal) {
-		signal.addEventListener("abort", abortListener, { once: true });
-	}
-
+	const cleanup = bindAbortSignal(init.signal, controller);
 	const timeout = setTimeout(() => {
-		controller.abort();
+		controller.abort(new Error(message));
 	}, timeoutMs);
 
 	try {
-		return await Promise.race([
-			promise,
-			new Promise<T>((_, reject) => {
-				controller.signal.addEventListener(
-					"abort",
-					() => {
-						reject(new Error(message));
-					},
-					{ once: true },
-				);
-			}),
-		]);
+		return await fetchImpl(url, {
+			...init,
+			signal: controller.signal,
+		});
+	} catch (error) {
+		if (controller.signal.aborted) {
+			throw new Error(message);
+		}
+		throw error;
 	} finally {
 		clearTimeout(timeout);
-		if (signal) {
-			signal.removeEventListener("abort", abortListener);
-		}
+		cleanup();
 	}
+}
+
+function bindAbortSignal(signal: AbortSignal | null | undefined, controller: AbortController): () => void {
+	if (!signal) {
+		return () => {};
+	}
+	if (signal.aborted) {
+		controller.abort(signal.reason ?? new Error("Request aborted"));
+		return () => {};
+	}
+	const onAbort = () => controller.abort(signal.reason ?? new Error("Request aborted"));
+	signal.addEventListener("abort", onAbort, { once: true });
+	return () => signal.removeEventListener("abort", onAbort);
 }
