@@ -1,4 +1,22 @@
 # @yofriadi/pi-hashline-edit
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@hashline-edit-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@hashline-edit-v<version>",
+      "extensions": ["packages/hashline-edit/src/index.ts"]
+    }
+  ]
+}
+```
 
 Hashline edit mode for pi — a line-addressable edit format using content hashes.
 

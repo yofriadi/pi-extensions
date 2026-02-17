@@ -1,7 +1,7 @@
 {
-  "name": "@yofriadi/pi-mcp",
-  "version": "0.1.1",
-  "description": "Standalone MCP extension package for pi installs",
+  "name": "@yofriadi/pi-review",
+  "version": "1.0.0",
+  "description": "Interactive code review extension package for pi",
   "type": "module",
   "files": [
     "src",
@@ -9,7 +9,8 @@
   ],
   "keywords": [
     "pi-package",
-    "mcp"
+    "review",
+    "code-review"
   ],
   "scripts": {
     "clean": "echo 'nothing to clean'",
@@ -27,7 +28,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yofriadi/pi-extensions.git",
-    "directory": "packages/mcp"
+    "directory": "packages/review"
   },
-  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/mcp"
+  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/review"
 }

@@ -17,5 +17,11 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "^0.52.10"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yofriadi/pi-extensions.git",
+    "directory": "packages/ast"
+  },
+  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/ast"
 }

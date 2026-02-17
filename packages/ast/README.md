@@ -1,4 +1,22 @@
 # AST Extension
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@ast-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@ast-v<version>",
+      "extensions": ["packages/ast/src/index.ts"]
+    }
+  ]
+}
+```
 
 This extension provides integration with `ast-grep` (sg).
 

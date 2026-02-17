@@ -18,5 +18,11 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "^0.52.10"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yofriadi/pi-extensions.git",
+    "directory": "packages/fuzzy-match"
+  },
+  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/fuzzy-match"
 }

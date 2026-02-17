@@ -1,7 +1,7 @@
 {
-  "name": "@yofriadi/pi-mcp",
-  "version": "0.1.1",
-  "description": "Standalone MCP extension package for pi installs",
+  "name": "@yofriadi/pi-commit",
+  "version": "1.0.0",
+  "description": "AI-powered conventional commit extension for pi",
   "type": "module",
   "files": [
     "src",
@@ -9,7 +9,9 @@
   ],
   "keywords": [
     "pi-package",
-    "mcp"
+    "commit",
+    "git",
+    "conventional-commits"
   ],
   "scripts": {
     "clean": "echo 'nothing to clean'",
@@ -22,12 +24,13 @@
     ]
   },
   "peerDependencies": {
+    "@mariozechner/pi-ai": "^0.52.10",
     "@mariozechner/pi-coding-agent": "^0.52.10"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yofriadi/pi-extensions.git",
-    "directory": "packages/mcp"
+    "directory": "packages/commit"
   },
-  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/mcp"
+  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/commit"
 }

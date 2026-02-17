@@ -1,4 +1,22 @@
 # Web-Access Extension
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@web-search-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@web-search-v<version>",
+      "extensions": ["packages/web-search/src/index.ts"]
+    }
+  ]
+}
+```
 
 Standalone package extension for web fetching and search.
 

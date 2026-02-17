@@ -1,4 +1,22 @@
 # MCP Extension
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@mcp-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@mcp-v<version>",
+      "extensions": ["packages/mcp/src/index.ts"]
+    }
+  ]
+}
+```
 
 Standalone MCP extension package for `pi` and the Bun fork workflow.
 

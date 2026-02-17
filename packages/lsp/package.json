@@ -26,5 +26,11 @@
   },
   "dependencies": {
     "yaml": "^2.8.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yofriadi/pi-extensions.git",
+    "directory": "packages/lsp"
+  },
+  "homepage": "https://github.com/yofriadi/pi-extensions/tree/main/packages/lsp"
 }

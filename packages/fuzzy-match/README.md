@@ -1,4 +1,22 @@
 # @yofriadi/pi-fuzzy-match
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@fuzzy-match-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@fuzzy-match-v<version>",
+      "extensions": ["packages/fuzzy-match/src/index.ts"]
+    }
+  ]
+}
+```
 
 Fuzzy matching utilities for pi — progressive matching strategies for finding text in files.
 

@@ -1,4 +1,22 @@
 # LSP Extension Scaffold
+## Install from git URL
+
+```bash
+pi install git:github.com/yofriadi/pi-extensions@lsp-v<version>
+```
+
+To load only this extension from the monorepo package source, use package filtering in settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@lsp-v<version>",
+      "extensions": ["packages/lsp/src/index.ts"]
+    }
+  ]
+}
+```
 
 Standalone package scaffold for pi LSP integration work.
 

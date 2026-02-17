@@ -1,6 +1,6 @@
-# Releasing Packages (npm Trusted Publisher / OIDC)
+# Releasing Packages (Git Tags + GitHub Releases)
 
-This repository publishes workspace packages independently via GitHub Actions using npm Trusted Publisher (OIDC), without `NPM_TOKEN`.
+This repository distributes workspace packages through git (not npm).
 
 Workflow file:
 
@@ -9,33 +9,38 @@ Workflow file:
 ## Packages
 
 - `@yofriadi/pi-ast` (`packages/ast`)
+- `@yofriadi/pi-commit` (`packages/commit`)
 - `@yofriadi/pi-fuzzy-match` (`packages/fuzzy-match`)
 - `@yofriadi/pi-hashline-edit` (`packages/hashline-edit`)
 - `@yofriadi/pi-lsp` (`packages/lsp`)
 - `@yofriadi/pi-mcp` (`packages/mcp`)
+- `@yofriadi/pi-review` (`packages/review`)
 - `@yofriadi/pi-web-search` (`packages/web-search`)
 
-## One-time npm setup (per package)
+## Distribution outputs
 
-In npm package settings, configure **Trusted Publisher**:
+For each released package version, the workflow can create:
 
-- Provider: GitHub Actions
-- Repository: this repository
-- Workflow file: `release-packages.yml`
-- Environment (if requested): match your Actions setup
-
-> For this repo, all listed packages are already published, so Trusted Publisher can be configured directly.
+1. **Git tag** (install pin):
+   - `<pkg>-v<version>`
+   - examples: `lsp-v1.16.11`, `mcp-v0.1.1`
+2. **GitHub release** on that tag with assets:
+   - `<pkg>-<version>.tar.gz`
+   - `<pkg>-<version>.sha256`
+3. **Release title** for human readability:
+   - `<npm-name>@<version>`
 
 ## Standard release flow
 
-1. Bump package version in the target package directory.
+1. Bump package version in `packages/<pkg>/package.json`.
 2. Commit and push to `main`.
-3. Run GitHub Actions workflow **Release Packages** with inputs:
+3. Run GitHub Actions workflow **Release Packages (Git)** with inputs:
    - `package`: one package or `all`
    - `run_checks`: `true` (recommended)
    - `dry_run`: `true` first, then `false`
    - `create_tags`: `true` (recommended)
-4. Verify npm published version and tag creation.
+   - `create_releases`: `true` (recommended)
+4. Verify pushed git tag and GitHub release assets.
 
 ## Pre-release checks
 
@@ -47,44 +52,49 @@ If `run_checks=true`, workflow runs:
 - `bun run scorecard:check`
 - `bun run audit`
 
-## Tag format
+## Install from git URLs
 
-On successful non-dry-run publish, the workflow creates:
+Install this package repository from git and pin to a release tag:
 
-- `<package-name>@<version>`
+```bash
+pi install git:github.com/yofriadi/pi-extensions@lsp-v1.16.11
+# or
+pi install https://github.com/yofriadi/pi-extensions@lsp-v1.16.11
+```
 
-Examples:
+Then enable the extensions you want via package filters in settings (global or project), for example:
 
-- `@yofriadi/pi-hashline-edit@0.2.0`
-- `@yofriadi/pi-lsp@1.16.11`
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yofriadi/pi-extensions@lsp-v1.16.11",
+      "extensions": ["packages/lsp/src/index.ts"]
+    }
+  ]
+}
+```
 
 ## Troubleshooting
 
-### `npm ERR! 401/403` during publish
-
-Trusted Publisher is not correctly configured for that package/repo/workflow file.
-
-- Re-check npm package settings and workflow filename.
-- Ensure the publish job has `permissions: id-token: write`.
-
-### `npm ERR! 404 Not Found` for package on publish
-
-Package name/version mismatch or package has not been created under expected scope.
-
-- Verify `name` in `packages/*/package.json`.
-- Verify scope ownership and package access.
-
-### `You cannot publish over the previously published versions`
-
-Version already exists.
-
-- Bump version and re-run.
-
 ### Tag already exists
 
-Workflow skips creating duplicate tags.
+If the target tag exists, tag creation is skipped.
+
+- Bump package version and rerun.
+
+### Release exists but assets are stale
+
+Workflow uploads with `--clobber`.
+
+- Re-run release job to replace assets.
+
+### GitHub release creation fails
+
+- Ensure workflow has `permissions: contents: write`.
+- Ensure `GITHUB_TOKEN` is available (default in GitHub-hosted runs).
 
 ## Notes
 
 - Root package is private; releases are per workspace package.
-- Workflow uses `npm publish --provenance --access public` for OIDC + provenance.
+- GitHub release tarballs are generated from tracked files under `packages/<pkg>`.

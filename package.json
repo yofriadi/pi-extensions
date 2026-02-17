@@ -32,10 +32,12 @@
   "pi": {
     "extensions": [
       "./packages/ast/src/index.ts",
+      "./packages/commit/src/index.ts",
       "./packages/fuzzy-match/src/index.ts",
       "./packages/hashline-edit/src/index.ts",
       "./packages/lsp/src/index.ts",
       "./packages/mcp/src/index.ts",
+      "./packages/review/src/index.ts",
       "./packages/web-search/src/index.ts"
     ]
   },
@@ -56,5 +58,10 @@
   "overrides": {
     "esbuild": "^0.25.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yofriadi/pi-extensions.git"
+  },
+  "homepage": "https://github.com/yofriadi/pi-extensions"
 }
