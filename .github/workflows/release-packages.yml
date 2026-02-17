@@ -102,6 +102,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
       - name: Show Node/npm versions
         run: |
           node --version
@@ -157,10 +161,9 @@ jobs:
       - name: Publish (npm trusted publisher via OIDC)
         if: ${{ !inputs.dry_run && steps.version_check.outputs.should_publish == 'true' }}
         working-directory: packages/${{ matrix.pkg }}
-        run: |
-          unset NODE_AUTH_TOKEN
-          unset NPM_CONFIG_USERCONFIG
-          npm publish --provenance --access public
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create and push tag
         if: ${{ !inputs.dry_run && inputs.create_tags && steps.version_check.outputs.should_publish == 'true' }}
         env:
