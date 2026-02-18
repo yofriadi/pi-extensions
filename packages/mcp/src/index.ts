@@ -7,20 +7,26 @@ export default function mcpExtension(pi: ExtensionAPI): void {
 	const manager = createMcpManager();
 	const bridge = registerMcpTools(pi, manager);
 
-	pi.on("session_start", async (_event, ctx) => {
-		const state = await manager.startSession({
-			cwd: ctx.cwd,
-			sessionId: ctx.sessionManager.getSessionId(),
-			sessionFile: ctx.sessionManager.getSessionFile(),
-			env: process.env,
-		});
-		notifyConfigDiagnostics(ctx.ui.notify, state.config);
-		const bridgeSync = bridge.sync();
-		notifyBridgeSync(ctx.ui.notify, bridgeSync);
+	pi.on("session_start", (_event, ctx) => {
+		void manager
+			.startSession({
+				cwd: ctx.cwd,
+				sessionId: ctx.sessionManager.getSessionId(),
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				env: process.env,
+			})
+			.then((state) => {
+				notifyConfigDiagnostics(ctx.ui.notify, state.config);
+				const bridgeSync = bridge.sync();
+				notifyBridgeSync(ctx.ui.notify, bridgeSync);
 
-		if (state.runtime.state === "error") {
-			ctx.ui.notify(`MCP startup finished with errors: ${state.runtime.reason}`, "warning");
-		}
+				if (state.runtime.state === "error") {
+					ctx.ui.notify(`MCP startup finished with errors: ${state.runtime.reason}`, "warning");
+				}
+			})
+			.catch((error) => {
+				ctx.ui.notify(`MCP startup failed: ${formatError(error)}`, "warning");
+			});
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
@@ -90,4 +96,11 @@ function notifyBridgeSync(
 			"warning",
 		);
 	}
+}
+
+function formatError(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }
