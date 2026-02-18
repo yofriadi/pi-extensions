@@ -1,6 +1,6 @@
 {
   "name": "@yofriadi/pi-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Standalone MCP extension package for pi installs",
   "type": "module",
   "files": [

@@ -236,7 +236,16 @@ class McpStdioClient implements McpClient {
 			};
 		});
 
-		this.sendRequest(id, method, params);
+		try {
+			this.sendRequest(id, method, params);
+		} catch (error) {
+			const pending = this.pending.get(id);
+			if (pending) {
+				clearTimeout(pending.timeoutId);
+				this.pending.delete(id);
+			}
+			throw error;
+		}
 		const requestPromise = Promise.race([responsePromise, timeoutPromise]);
 		if (options.signal) {
 			return withAbort(requestPromise, options.signal, `MCP request aborted: ${method}`);
