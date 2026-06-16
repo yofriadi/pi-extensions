@@ -1,0 +1,60 @@
+{
+	"name": "@yofriadi/pi-antigravity-oauth",
+	"version": "0.2.1",
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"description": "Pi extension that restores Google Cloud Code Assist (Gemini CLI) and Antigravity (Gemini 3, Claude, GPT-OSS) OAuth providers.",
+	"license": "MIT",
+	"author": {
+		"name": "Yofriadi Yahya",
+		"email": "yofriadi.yahya@proton.me"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-antigravity-oauth"
+	},
+	"bugs": {
+		"url": "https://github.com/yofriadi/pi-extensions/issues"
+	},
+	"homepage": "https://github.com/yofriadi/pi-extensions#readme",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"google",
+		"gemini",
+		"antigravity",
+		"claude",
+		"oauth"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"files": [
+		"src/**/*"
+	],
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@google/genai": "1.52.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "0.79.1",
+		"@earendil-works/pi-coding-agent": "0.79.1",
+		"vitest": "3.2.4"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	}
+}
