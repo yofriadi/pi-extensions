@@ -2,8 +2,7 @@ import type { Model, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { streamSimpleGoogleGeminiCli } from "./cloud-code-assist.ts";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity-oauth.ts";
-import { loginGeminiCli, refreshGoogleCloudToken } from "./google-gemini-cli-oauth.ts";
-import { ANTIGRAVITY_MODELS, GEMINI_CLI_MODELS } from "./models.ts";
+import { ANTIGRAVITY_MODELS } from "./models.ts";
 
 const GOOGLE_GEMINI_CLI_API = "google-gemini-cli" satisfies Model<string>["api"];
 
@@ -56,15 +55,6 @@ function streamSimpleForGoogleCli(
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerProvider("google-gemini-cli", {
-		name: "Google Cloud Code Assist (Gemini CLI)",
-		baseUrl: "https://cloudcode-pa.googleapis.com",
-		api: GOOGLE_GEMINI_CLI_API,
-		streamSimple: streamSimpleForGoogleCli,
-		oauth: makeGoogleOAuthConfig("Google Cloud Code Assist (Gemini CLI)", loginGeminiCli, refreshGoogleCloudToken),
-		models: GEMINI_CLI_MODELS,
-	});
-
 	pi.registerProvider("google-antigravity", {
 		name: "Antigravity (Gemini 3, Claude, GPT-OSS)",
 		baseUrl: "https://daily-cloudcode-pa.sandbox.googleapis.com",

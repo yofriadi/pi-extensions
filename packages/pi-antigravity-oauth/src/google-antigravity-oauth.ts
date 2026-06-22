@@ -1,7 +1,6 @@
 /**
  * Antigravity OAuth (Gemini 3, Claude, GPT-OSS via Google Cloud). Uses
- * different OAuth credentials than google-gemini-cli for access to the
- * additional Antigravity model catalog.
+ * dedicated OAuth credentials for access to the Antigravity model catalog.
  *
  * Auth flow:
  * 1. Browser-based OAuth against the Google client embedded in Antigravity

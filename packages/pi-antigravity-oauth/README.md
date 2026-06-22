@@ -1,6 +1,6 @@
 # pi-antigravity-oauth
 
-Pi extension that registers two Google OAuth providers:
+Pi extension that registers the Google OAuth provider for Antigravity:
 
 ## Install
 
@@ -14,20 +14,9 @@ pi -e /path/to/pi-extensions/packages/pi-antigravity-oauth
 
 | Provider id | Display name | Endpoint | Callback port |
 |---|---|---|---|
-| `google-gemini-cli` | `Google Cloud Code Assist (Gemini CLI)` | `https://cloudcode-pa.googleapis.com` | 8085 |
 | `google-antigravity` | `Antigravity (Gemini 3, Claude, GPT-OSS)` | `https://daily-cloudcode-pa.sandbox.googleapis.com` | 51121 |
 
 ## Models
-
-### `google-gemini-cli`
-
-- `gemini-2.0-flash`
-- `gemini-2.5-flash`
-- `gemini-2.5-pro`
-- `gemini-3-flash-preview`
-- `gemini-3-pro-preview`
-- `gemini-3.1-flash-lite-preview`
-- `gemini-3.1-pro-preview`
 
 ### `google-antigravity`
 
@@ -60,11 +49,11 @@ The extension runs a standard PKCE OAuth dance against `https://accounts.google.
 6. Resolve the user's Cloud Code Assist project ID.
 7. Persist credentials to Pi's auth storage.
 
-`/login` will list both providers. Pick one, complete the consent screen in the browser, return to the terminal. If the callback fails or you cancel, you can paste the redirect URL into the terminal prompt and the extension will pick it up from there.
+`/login` will prompt for authorization. Complete the consent screen in the browser, return to the terminal. If the callback fails or you cancel, you can paste the redirect URL into the terminal prompt and the extension will pick it up from there.
 
 ## Credentials shape
 
-Both providers encode the OAuth credentials as:
+The provider encodes the OAuth credentials as:
 
 ```json
 { "token": "<access_token>", "projectId": "<google_cloud_project_id>" }

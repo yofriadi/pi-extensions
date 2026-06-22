@@ -1,6 +1,6 @@
 /**
  * Cloud Code Assist provider.
- * Shared streaming implementation for both `google-gemini-cli` and `google-antigravity` providers.
+ * Streaming implementation for the `google-antigravity` provider.
  * Uses the Cloud Code Assist API to access Gemini, Claude, and GPT-OSS models.
  */
 

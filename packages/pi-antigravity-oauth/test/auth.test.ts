@@ -12,7 +12,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { streamSimpleGoogleGeminiCli } from "../src/cloud-code-assist.ts";
 import { discoverProject as antigravityDiscoverProject } from "../src/google-antigravity-oauth.ts";
-import { discoverProject as geminiDiscoverProject } from "../src/google-gemini-cli-oauth.ts";
 import {
 	type CallbackServerInfo,
 	loginWithGoogleOAuth,
@@ -80,21 +79,11 @@ describe("pi-antigravity-oauth extension", () => {
 		return { registry, runtime: result.runtime };
 	}
 
-	it("loads through the real loader and registers both providers", async () => {
+	it("loads through the real loader and registers the provider", async () => {
 		const { registry, runtime } = await loadPackageAndBind();
 
 		const registrations = Object.fromEntries(runtime.pendingProviderRegistrations.map((r) => [r.name, r.config]));
-		expect(Object.keys(registrations).sort()).toEqual(["google-antigravity", "google-gemini-cli"]);
-
-		// OAuth config on each registration.
-		const geminiReg = registrations["google-gemini-cli"];
-		expect(geminiReg).toBeDefined();
-		expect(geminiReg?.name).toBe("Google Cloud Code Assist (Gemini CLI)");
-		expect(geminiReg?.oauth).toBeDefined();
-		expect(geminiReg?.oauth?.name).toBe("Google Cloud Code Assist (Gemini CLI)");
-		expect(typeof geminiReg?.oauth?.login).toBe("function");
-		expect(typeof geminiReg?.oauth?.refreshToken).toBe("function");
-		expect(typeof geminiReg?.oauth?.getApiKey).toBe("function");
+		expect(Object.keys(registrations).sort()).toEqual(["google-antigravity"]);
 
 		const antigravityReg = registrations["google-antigravity"];
 		expect(antigravityReg).toBeDefined();
@@ -102,42 +91,11 @@ describe("pi-antigravity-oauth extension", () => {
 		expect(antigravityReg?.oauth).toBeDefined();
 		expect(antigravityReg?.oauth?.name).toBe("Antigravity (Gemini 3, Claude, GPT-OSS)");
 
-		// Models from both providers are bound to the registry with the right endpoints.
+		// Models are bound to the registry with the right endpoints.
 		const availableModels = registry.getAll();
-		const geminiModels = availableModels.filter((m) => m.provider === "google-gemini-cli");
 		const antigravityModels = availableModels.filter((m) => m.provider === "google-antigravity");
 
-		expect(geminiModels.length).toBeGreaterThan(0);
 		expect(antigravityModels.length).toBe(16);
-		expect(geminiModels.some((m) => m.id === "gemini-2.0-flash")).toBe(true);
-		expect(antigravityModels.map((m) => m.id).sort()).toEqual(
-			[
-				"claude-opus-4-5",
-				"claude-opus-4-6",
-				"claude-sonnet-4-5",
-				"claude-sonnet-4-6",
-				"gemini-2.5-flash",
-				"gemini-2.5-flash-lite",
-				"gemini-2.5-pro",
-				"gemini-3-flash",
-				"gemini-3-pro",
-				"gemini-3.1-flash-image",
-				"gemini-3.1-flash-lite",
-				"gemini-3.1-pro",
-				"gemini-3.5-flash",
-				"gpt-oss-120b",
-				"tab_flash_lite_preview",
-				"tab_jump_flash_lite_preview",
-			].sort(),
-		);
-		expect(geminiModels.every((m) => m.baseUrl === "https://cloudcode-pa.googleapis.com")).toBe(true);
-		expect(antigravityModels.every((m) => m.baseUrl === "https://daily-cloudcode-pa.sandbox.googleapis.com")).toBe(
-			true,
-		);
-	});
-	it("registers the upstream Antigravity catalog", async () => {
-		const { registry } = await loadPackageAndBind();
-		const antigravityModels = registry.getAll().filter((m) => m.provider === "google-antigravity");
 		expect(antigravityModels.map((m) => m.id).sort()).toEqual(
 			[
 				"claude-opus-4-5",
@@ -163,24 +121,17 @@ describe("pi-antigravity-oauth extension", () => {
 		);
 	});
 
-	it("rejects credentials missing a projectId in both getApiKey and refreshToken", async () => {
+	it("rejects credentials missing a projectId in getApiKey and refreshToken", async () => {
 		const { runtime } = await loadPackageAndBind();
-		const geminiReg = runtime.pendingProviderRegistrations.find((r) => r.name === "google-gemini-cli");
 		const antigravityReg = runtime.pendingProviderRegistrations.find((r) => r.name === "google-antigravity");
-		expect(geminiReg).toBeDefined();
 		expect(antigravityReg).toBeDefined();
 
-		const geminiGet = geminiReg?.config.oauth?.getApiKey;
 		const antigravityGet = antigravityReg?.config.oauth?.getApiKey;
-		if (typeof geminiGet !== "function" || typeof antigravityGet !== "function") {
-			throw new Error("oauth.getApiKey not registered for one of the providers");
+		if (typeof antigravityGet !== "function") {
+			throw new Error("oauth.getApiKey not registered for the provider");
 		}
 
 		// Happy path: returns { token, projectId } JSON.
-		expect(JSON.parse(geminiGet({ refresh: "r", access: "a", expires: 0, projectId: "p1" }))).toEqual({
-			token: "a",
-			projectId: "p1",
-		});
 		expect(JSON.parse(antigravityGet({ refresh: "r", access: "a", expires: 0, projectId: "p2" }))).toEqual({
 			token: "a",
 			projectId: "p2",
@@ -188,18 +139,15 @@ describe("pi-antigravity-oauth extension", () => {
 
 		// Malformed credentials throw at the boundary instead of producing a
 		// shape that violates the plan and defers failure to request time.
-		expect(() => geminiGet({ refresh: "r", access: "a", expires: 0 })).toThrow(/projectId/);
 		expect(() => antigravityGet({ refresh: "r", access: "a", expires: 0 })).toThrow(/projectId/);
 
-		const geminiRefresh = geminiReg?.config.oauth?.refreshToken;
 		const antigravityRefresh = antigravityReg?.config.oauth?.refreshToken;
-		if (typeof geminiRefresh !== "function" || typeof antigravityRefresh !== "function") {
-			throw new Error("oauth.refreshToken not registered for one of the providers");
+		if (typeof antigravityRefresh !== "function") {
+			throw new Error("oauth.refreshToken not registered for the provider");
 		}
 
 		// We don't exercise the real Google refresh here (would need a mocked
 		// fetch and a fake access token), but the guard fires before the fetch:
-		expect(() => geminiRefresh({ refresh: "r", access: "a", expires: 0 })).toThrow(/projectId/);
 		expect(() => antigravityRefresh({ refresh: "r", access: "a", expires: 0 })).toThrow(/projectId/);
 	});
 });
@@ -1170,161 +1118,5 @@ describe("google-antigravity-oauth discoverProject", () => {
 		);
 
 		expect(projectId).toBe("env-project");
-	});
-});
-
-describe("google-gemini-cli-oauth discoverProject", () => {
-	const ORIGINAL_ENV = { ...process.env };
-
-	afterEach(() => {
-		// Restore env so GOOGLE_CLOUD_PROJECT* don't leak across tests.
-		process.env = { ...ORIGINAL_ENV };
-		delete process.env.GOOGLE_CLOUD_PROJECT;
-		delete process.env.GOOGLE_CLOUD_PROJECT_ID;
-		vi.useRealTimers();
-		vi.restoreAllMocks();
-	});
-
-	/**
-	 * Build a fetch spy that stubs the gemini-cli Cloud Code Assist
-	 * endpoints. The `loadCodeAssist` / `onboardUser` / `pollOperation`
-	 * handlers may also receive the AbortSignal so they can honor the
-	 * implementation's per-fetch timeout.
-	 */
-	function makeFetchSpy(handlers: {
-		loadCodeAssist?: (signal: AbortSignal | null) => Response | Promise<Response>;
-		onboardUser?: (signal: AbortSignal | null) => Response | Promise<Response>;
-		pollOperation?: (signal: AbortSignal | null) => Response | Promise<Response>;
-	}) {
-		const originalFetch = globalThis.fetch;
-		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			const url =
-				typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
-			if (url.startsWith("http://127.0.0.1:")) {
-				return originalFetch(url, init);
-			}
-			const signal = init?.signal ?? null;
-			let handler: ((s: AbortSignal | null) => Response | Promise<Response>) | undefined;
-			if (url === "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist") {
-				handler = handlers.loadCodeAssist;
-			} else if (url === "https://cloudcode-pa.googleapis.com/v1internal:onboardUser") {
-				handler = handlers.onboardUser;
-			} else if (url.startsWith("https://cloudcode-pa.googleapis.com/v1internal/operations/")) {
-				handler = handlers.pollOperation;
-			} else {
-				throw new Error(`Unexpected fetch to ${url}`);
-			}
-			if (!handler) {
-				throw new Error(`Unexpected fetch to ${url}: no handler`);
-			}
-			return handler(signal);
-		});
-	}
-
-	function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-		return Promise.race([
-			promise,
-			new Promise<never>((_, reject) => {
-				setTimeout(() => reject(new Error(`${label} hung for ${ms}ms`)), ms);
-			}),
-		]);
-	}
-
-	it("rejects when loadCodeAssist hangs (no fetch timeout → can hang at 'Checking for existing Cloud Code Assist project...')", async () => {
-		makeFetchSpy({
-			loadCodeAssist: (signal) => {
-				if (!signal) return new Promise<Response>(() => {});
-				return new Promise<Response>((_, reject) => {
-					signal.addEventListener(
-						"abort",
-						() => {
-							const error = new Error("This operation was aborted");
-							error.name = "AbortError";
-							reject(error);
-						},
-						{ once: true },
-					);
-				});
-			},
-		});
-
-		// Race against 15s; assert on /abort/i so a hung implementation fails
-		// the assertion rather than silently passing via the withTimeout
-		// "hung for Xms" message.
-		await expect(
-			withTimeout(
-				geminiDiscoverProject("test-access-token"),
-				15_000,
-				"gemini discoverProject (loadCodeAssist hang)",
-			),
-		).rejects.toThrow(/abort/i);
-	});
-
-	it("rejects when onboardUser hangs (no fetch timeout → can hang at 'Provisioning Cloud Code Assist project...')", async () => {
-		// Drive the flow into `onboardUser`: `loadCodeAssist` returns no
-		// `currentTier` and an explicit free-tier default so the env-var
-		// short-circuit does not fire.
-		makeFetchSpy({
-			loadCodeAssist: () =>
-				new Response(JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-			onboardUser: (signal) => {
-				if (!signal) return new Promise<Response>(() => {});
-				return new Promise<Response>((_, reject) => {
-					signal.addEventListener(
-						"abort",
-						() => {
-							const error = new Error("This operation was aborted");
-							error.name = "AbortError";
-							reject(error);
-						},
-						{ once: true },
-					);
-				});
-			},
-		});
-
-		await expect(
-			withTimeout(
-				geminiDiscoverProject("test-access-token"),
-				15_000,
-				"gemini discoverProject (onboardUser hang)",
-			),
-		).rejects.toThrow(/abort/i);
-	});
-
-	it("rejects when pollOperation never returns done:true (was unbounded while (true) loop)", async () => {
-		// Drive the flow into polling: `loadCodeAssist` returns a free-tier,
-		// `onboardUser` returns a long-running operation name with
-		// `done: false`, and every subsequent poll also returns `done: false`.
-		makeFetchSpy({
-			loadCodeAssist: () =>
-				new Response(JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-			onboardUser: () =>
-				new Response(JSON.stringify({ name: "operations/abc123", done: false }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-			pollOperation: () =>
-				new Response(JSON.stringify({ done: false }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-		});
-
-		// Bound the test itself. The implementation's polling bound plus a
-		// safety margin should land well under this 60s ceiling.
-		await expect(
-			withTimeout(
-				geminiDiscoverProject("test-access-token"),
-				60_000,
-				"gemini discoverProject (pollOperation never done)",
-			),
-		).rejects.toThrow();
 	});
 });

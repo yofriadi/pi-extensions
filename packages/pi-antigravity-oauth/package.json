@@ -1,11 +1,11 @@
 {
 	"name": "@yofriadi/pi-antigravity-oauth",
-	"version": "0.2.1",
+	"version": "0.3.0",
 	"publishConfig": {
 		"access": "public"
 	},
 	"type": "module",
-	"description": "Pi extension that restores Google Cloud Code Assist (Gemini CLI) and Antigravity (Gemini 3, Claude, GPT-OSS) OAuth providers.",
+	"description": "Pi extension that restores the Antigravity (Gemini 3, Claude, GPT-OSS) OAuth provider.",
 	"license": "MIT",
 	"author": {
 		"name": "Yofriadi Yahya",

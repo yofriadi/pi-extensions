@@ -1,13 +1,10 @@
 /**
- * Shared Google OAuth helpers for the Gemini CLI and Antigravity providers.
+ * Shared Google OAuth helpers for the Antigravity provider.
  *
- * The two providers share their OAuth mechanics (PKCE, local callback server,
- * userinfo lookup, token exchange, project discovery integration, expiry
- * calculation). They differ only in the OAuth client credentials, scopes,
- * callback port/path, and how they discover the user's project ID. Those
- * provider-specific pieces live in `google-gemini-cli-oauth.ts` and
- * `google-antigravity-oauth.ts`; this file holds the cross-cutting bits and
- * the shared `loginWithGoogleOAuth` driver.
+ * PKCE, local callback server, userinfo lookup, token exchange, project
+ * discovery integration, expiry calculation. The provider-specific configuration
+ * lives in `google-antigravity-oauth.ts`; this file holds the cross-cutting bits
+ * and the shared `loginWithGoogleOAuth` driver.
  *
  * NOTE: This module uses Node.js http.createServer for the OAuth callback.
  * It is only intended for CLI use, not browser environments.
@@ -240,8 +237,7 @@ export interface LoginWithGoogleOAuthOptions {
  *  6. Fetch email, discover project, build credentials
  *
  * The caller supplies provider-specific config (client, scopes, project
- * discovery) so the same flow powers both `google-gemini-cli` and
- * `google-antigravity`.
+ * discovery) so the same flow powers the provider.
  */
 export async function loginWithGoogleOAuth(
 	config: GoogleOAuthLoginConfig,
