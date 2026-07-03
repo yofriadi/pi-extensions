@@ -1123,14 +1123,47 @@ describe("google-antigravity-oauth discoverProject", () => {
 });
 
 describe("normalizeSchemaForCCA", () => {
-	// Cloud Code Assist's `enum` keyword only accepts TYPE_STRING values.
-	// Discriminators built from `Type.Literal(true/false)` (e.g. the
-	// `attached` field in `pi-agent-browser-native`'s `qa` union, the
-	// `all` field in its `electron` union) used to be collapsed into
-	// `enum: [true]` / `enum: [false]` and rejected as TYPE_STRING
-	// mismatches by the upstream API. The normalizer must keep the
-	// discriminator intact instead.
-	it("preserves boolean const discriminators instead of collapsing to a boolean enum", () => {
+	// Cloud Code Assist's wire schema has two constraints that the
+	// normalizer must enforce on every emitted node:
+	//
+	//   1. `enum` only accepts TYPE_STRING values. A `const: true` (or
+	//      `const: false`) used as a JSON-Schema discriminator must not
+	//      be folded into `enum: [true]`, or the API rejects the request
+	//      with `(TYPE_STRING), true`.
+	//
+	//   2. The underlying Schema proto does not know the `const` keyword
+	//      at all, so emitting `const: <anything>` triggers
+	//      "Unknown name \"const\"". Non-string consts must be dropped
+	//      entirely (the surrounding `type` is still emitted so the
+	//      model can see the value shape).
+	//
+	// Discriminators built from `Type.Literal(true/false)` in
+	// `pi-agent-browser-native`'s `qa`/`electron` unions exercise both
+	// failure modes.
+
+	function collectIssues(node: unknown, path: string): string[] {
+		if (node === null || typeof node !== "object") return [];
+		const issues: string[] = [];
+		if (Array.isArray(node)) {
+			node.forEach((entry, i) => issues.push(...collectIssues(entry, `${path}[${i}]`)));
+			return issues;
+		}
+		const obj = node as Record<string, unknown>;
+		if ("const" in obj) {
+			issues.push(`${path} has const: ${JSON.stringify(obj.const)}`);
+		}
+		if (Array.isArray(obj.enum)) {
+			obj.enum.forEach((v: unknown, i: number) => {
+				if (typeof v !== "string") {
+					issues.push(`${path}.enum[${i}] = ${JSON.stringify(v)} (${typeof v})`);
+				}
+			});
+		}
+		for (const k in obj) issues.push(...collectIssues(obj[k], `${path}.${k}`));
+		return issues;
+	}
+
+	it("drops the boolean const on the qa/electron discriminator so the API accepts the schema", () => {
 		const schema = {
 			type: "object" as const,
 			properties: {
@@ -1157,41 +1190,21 @@ describe("normalizeSchemaForCCA", () => {
 		};
 
 		const normalized = normalizeSchemaForCCA(schema) as {
-			properties?: { qa?: { properties?: { attached?: unknown } } };
+			properties?: { qa?: { properties?: { attached?: { type?: string; const?: unknown } } } };
 		};
 		const attached = normalized.properties?.qa?.properties?.attached;
 
-		// The original `const` set must be preserved so the API can
-		// validate the discriminator and the model can see both branches.
-		expect(attached).toEqual({
-			anyOf: [
-				{ type: "boolean", description: "Run the QA preset", const: true },
-				{ type: "boolean", description: "When omitted or false", const: false },
-			],
-		});
+		// The literal `const` must be dropped (CCA does not know the
+		// keyword) and `type` must remain so the model still sees the
+		// value shape. The description is preserved verbatim.
+		expect(attached?.const).toBeUndefined();
+		expect(attached?.type).toBe("boolean");
 
-		// Hard guard: no boolean values may appear in any `enum`, anywhere
-		// in the normalized tree.
-		const booleanEnums: Array<{ path: string; value: unknown }> = [];
-		const walk = (node: unknown, path: string): void => {
-			if (node === null || typeof node !== "object") return;
-			if (Array.isArray(node)) {
-				node.forEach((entry, i) => walk(entry, `${path}[${i}]`));
-				return;
-			}
-			const obj = node as Record<string, unknown>;
-			if (Array.isArray(obj.enum)) {
-				obj.enum.forEach((v: unknown, i: number) => {
-					if (typeof v !== "string") booleanEnums.push({ path: `${path}.enum[${i}]`, value: v });
-				});
-			}
-			for (const k in obj) walk(obj[k], `${path}.${k}`);
-		};
-		walk(normalized, "$");
-		expect(booleanEnums).toEqual([]);
+		// Hard guard: no `const` and no boolean enums anywhere in the tree.
+		expect(collectIssues(normalized, "$")).toEqual([]);
 	});
 
-	it("keeps a non-string const in the non-combiner branch (single-variant schema)", () => {
+	it("drops a top-level boolean const without leaving an enum entry", () => {
 		const schema = {
 			type: "object" as const,
 			properties: {
@@ -1200,12 +1213,17 @@ describe("normalizeSchemaForCCA", () => {
 		};
 
 		const normalized = normalizeSchemaForCCA(schema) as {
-			properties?: { all?: { const?: unknown; enum?: unknown } };
+			properties?: { all?: { const?: unknown; enum?: unknown; type?: string } };
 		};
 		const all = normalized.properties?.all;
-		// The literal const must survive, not be folded into `enum: [true]`.
-		expect(all?.const).toBe(true);
+		// The literal const must not survive (would be rejected as
+		// "Unknown name \"const\""), and the value must not leak into
+		// an enum either (would be rejected as TYPE_STRING).
+		expect(all?.const).toBeUndefined();
 		expect(all?.enum).toBeUndefined();
+		// `type` is still emitted so the model can produce a boolean.
+		expect(all?.type).toBe("boolean");
+		expect(collectIssues(normalized, "$")).toEqual([]);
 	});
 
 	it("still collapses string-only anyOf/oneOf into a string enum (regression guard for the valid path)", () => {
@@ -1216,8 +1234,10 @@ describe("normalizeSchemaForCCA", () => {
 			],
 		};
 
-		const normalized = normalizeSchemaForCCA(schema) as { enum?: unknown[]; type?: string };
+		const normalized = normalizeSchemaForCCA(schema) as { enum?: unknown[]; type?: string; const?: unknown };
 		expect(normalized.type).toBe("string");
 		expect(normalized.enum).toEqual(["open", "closed"]);
+		// No `const` should leak into the output even on the string path.
+		expect(normalized.const).toBeUndefined();
 	});
 });

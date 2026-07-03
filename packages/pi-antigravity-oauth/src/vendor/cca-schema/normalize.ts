@@ -338,10 +338,15 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		result.type = nonNull[0] ?? types[0];
 	}
 	if (constValue !== undefined) {
-		// Cloud Code Assist's `enum` keyword requires TYPE_STRING values.
-		// Keep the original `const` for non-string values (e.g. boolean
-		// discriminators like `Type.Literal(true/false)`) so the API does
-		// not reject the request as a TYPE_STRING mismatch.
+		// Cloud Code Assist's `enum` keyword requires TYPE_STRING values,
+		// and its underlying Schema proto does not know the `const`
+		// keyword at all — emitting `const: <value>` (string or otherwise)
+		// is rejected with "Unknown name \"const\"". Fold string consts
+		// into `enum`; drop non-string consts (e.g. boolean discriminators
+		// from `Type.Literal(true/false)`) entirely. The surrounding
+		// `type` keyword is still emitted so the model can see the value
+		// shape; the precise literal is conveyed through the field's
+		// `description` set by the schema author.
 		if (typeof constValue === "string") {
 			const existingEnum = Array.isArray(result.enum) ? result.enum : [];
 			pushEnumValue(existingEnum, constValue);
@@ -349,11 +354,8 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			if (!result.type) {
 				result.type = inferJsonSchemaTypeFromValue(constValue);
 			}
-		} else {
-			result.const = constValue;
-			if (!result.type) {
-				result.type = inferJsonSchemaTypeFromValue(constValue);
-			}
+		} else if (!result.type) {
+			result.type = inferJsonSchemaTypeFromValue(constValue);
 		}
 	}
 
