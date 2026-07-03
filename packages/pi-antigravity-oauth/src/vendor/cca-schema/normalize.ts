@@ -255,6 +255,15 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		for (const variant of variants) {
 			pushEnumValue(dedupedEnum, variant.const);
 		}
+		// Cloud Code Assist's `enum` keyword requires TYPE_STRING values.
+		// Non-string `const` discriminators (e.g. `Type.Literal(true/false)`
+		// in `pi-agent-browser-native`'s `qa`/`electron` unions) would be
+		// collapsed to `enum: [true, false]` and rejected as TYPE_STRING
+		// mismatches. Leave the `anyOf` in place so the original
+		// discriminators survive normalization.
+		if (!dedupedEnum.every((value) => typeof value === "string")) {
+			continue;
+		}
 		result.enum = dedupedEnum;
 
 		const explicitTypes = variants
@@ -329,11 +338,22 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		result.type = nonNull[0] ?? types[0];
 	}
 	if (constValue !== undefined) {
-		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
-		pushEnumValue(existingEnum, constValue);
-		result.enum = existingEnum;
-		if (!result.type) {
-			result.type = inferJsonSchemaTypeFromValue(constValue);
+		// Cloud Code Assist's `enum` keyword requires TYPE_STRING values.
+		// Keep the original `const` for non-string values (e.g. boolean
+		// discriminators like `Type.Literal(true/false)`) so the API does
+		// not reject the request as a TYPE_STRING mismatch.
+		if (typeof constValue === "string") {
+			const existingEnum = Array.isArray(result.enum) ? result.enum : [];
+			pushEnumValue(existingEnum, constValue);
+			result.enum = existingEnum;
+			if (!result.type) {
+				result.type = inferJsonSchemaTypeFromValue(constValue);
+			}
+		} else {
+			result.const = constValue;
+			if (!result.type) {
+				result.type = inferJsonSchemaTypeFromValue(constValue);
+			}
 		}
 	}
 
@@ -558,6 +578,13 @@ function collapseSameTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" 
 	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) return schema;
 	let commonType: string | undefined;
 	let firstEntry: JsonObject | undefined;
+	// Preserve discriminator-style anyOf/oneOf: when every variant carries a
+	// `const` keyword, collapsing to the first variant drops the other const
+	// values and breaks the discriminator contract. Caller-level schema
+	// builders (e.g. `Type.Literal(true/false)` in `pi-agent-browser-native`)
+	// rely on the original const set to discriminate the parent union.
+	const allCarryConst = variantsRaw.every((entry) => isJsonObject(entry) && "const" in entry);
+	if (allCarryConst) return schema;
 	for (const entry of variantsRaw) {
 		if (!isJsonObject(entry) || typeof entry.type !== "string") return schema;
 		if (commonType === undefined) {
@@ -789,7 +816,14 @@ function hasResidualSchemaIncompatibilities(
 	if (checks.nullable && Object.hasOwn(value, "nullable")) return true;
 	if (checks.combiners) {
 		for (const combiner of CCA_FORBIDDEN_COMBINERS) {
-			if (Array.isArray(value[combiner])) return true;
+			if (!Array.isArray(value[combiner])) continue;
+			// Discriminator unions (every variant has a `const`) are kept
+			// as-is by `collapseSameTypeCombinerVariants` to preserve the
+			// const set, and Cloud Code Assist accepts them.
+			const variants = value[combiner];
+			const allConstDiscriminators =
+				Array.isArray(variants) && variants.every((v) => isJsonObject(v) && "const" in v);
+			if (!allConstDiscriminators) return true;
 		}
 	}
 	for (const k in value) {

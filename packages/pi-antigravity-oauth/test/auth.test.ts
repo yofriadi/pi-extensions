@@ -19,6 +19,7 @@ import {
 	startCallbackServer,
 } from "../src/google-oauth-utils.ts";
 import { ANTIGRAVITY_MODELS } from "../src/models.ts";
+import { normalizeSchemaForCCA } from "../src/vendor/cca-schema/normalize.ts";
 
 describe("pi-antigravity-oauth extension", () => {
 	let tempDir: string;
@@ -1118,5 +1119,105 @@ describe("google-antigravity-oauth discoverProject", () => {
 		);
 
 		expect(projectId).toBe("env-project");
+	});
+});
+
+describe("normalizeSchemaForCCA", () => {
+	// Cloud Code Assist's `enum` keyword only accepts TYPE_STRING values.
+	// Discriminators built from `Type.Literal(true/false)` (e.g. the
+	// `attached` field in `pi-agent-browser-native`'s `qa` union, the
+	// `all` field in its `electron` union) used to be collapsed into
+	// `enum: [true]` / `enum: [false]` and rejected as TYPE_STRING
+	// mismatches by the upstream API. The normalizer must keep the
+	// discriminator intact instead.
+	it("preserves boolean const discriminators instead of collapsing to a boolean enum", () => {
+		const schema = {
+			type: "object" as const,
+			properties: {
+				qa: {
+					anyOf: [
+						{
+							type: "object" as const,
+							properties: {
+								attached: { type: "boolean" as const, const: true, description: "Run the QA preset" },
+								expectedText: { type: "string" as const },
+							},
+						},
+						{
+							type: "object" as const,
+							properties: {
+								url: { type: "string" as const },
+								attached: { type: "boolean" as const, const: false, description: "When omitted or false" },
+								expectedText: { type: "string" as const },
+							},
+						},
+					],
+				},
+			},
+		};
+
+		const normalized = normalizeSchemaForCCA(schema) as {
+			properties?: { qa?: { properties?: { attached?: unknown } } };
+		};
+		const attached = normalized.properties?.qa?.properties?.attached;
+
+		// The original `const` set must be preserved so the API can
+		// validate the discriminator and the model can see both branches.
+		expect(attached).toEqual({
+			anyOf: [
+				{ type: "boolean", description: "Run the QA preset", const: true },
+				{ type: "boolean", description: "When omitted or false", const: false },
+			],
+		});
+
+		// Hard guard: no boolean values may appear in any `enum`, anywhere
+		// in the normalized tree.
+		const booleanEnums: Array<{ path: string; value: unknown }> = [];
+		const walk = (node: unknown, path: string): void => {
+			if (node === null || typeof node !== "object") return;
+			if (Array.isArray(node)) {
+				node.forEach((entry, i) => walk(entry, `${path}[${i}]`));
+				return;
+			}
+			const obj = node as Record<string, unknown>;
+			if (Array.isArray(obj.enum)) {
+				obj.enum.forEach((v: unknown, i: number) => {
+					if (typeof v !== "string") booleanEnums.push({ path: `${path}.enum[${i}]`, value: v });
+				});
+			}
+			for (const k in obj) walk(obj[k], `${path}.${k}`);
+		};
+		walk(normalized, "$");
+		expect(booleanEnums).toEqual([]);
+	});
+
+	it("keeps a non-string const in the non-combiner branch (single-variant schema)", () => {
+		const schema = {
+			type: "object" as const,
+			properties: {
+				all: { type: "boolean" as const, const: true, description: "Apply to all launches" },
+			},
+		};
+
+		const normalized = normalizeSchemaForCCA(schema) as {
+			properties?: { all?: { const?: unknown; enum?: unknown } };
+		};
+		const all = normalized.properties?.all;
+		// The literal const must survive, not be folded into `enum: [true]`.
+		expect(all?.const).toBe(true);
+		expect(all?.enum).toBeUndefined();
+	});
+
+	it("still collapses string-only anyOf/oneOf into a string enum (regression guard for the valid path)", () => {
+		const schema = {
+			anyOf: [
+				{ type: "string" as const, const: "open" },
+				{ type: "string" as const, const: "closed" },
+			],
+		};
+
+		const normalized = normalizeSchemaForCCA(schema) as { enum?: unknown[]; type?: string };
+		expect(normalized.type).toBe("string");
+		expect(normalized.enum).toEqual(["open", "closed"]);
 	});
 });
