@@ -1,0 +1,63 @@
+{
+	"name": "@yofriadi/pi-toon",
+	"version": "0.2.0",
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"description": "Pi extension for jaq-first jq-compatible and TOON guidance when handling dense JSON.",
+	"license": "MIT",
+	"author": {
+		"name": "Yofriadi Yahya",
+		"email": "yofriadi.yahya@proton.me"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-toon"
+	},
+	"bugs": {
+		"url": "https://github.com/yofriadi/pi-extensions/issues"
+	},
+	"homepage": "https://github.com/yofriadi/pi-extensions#readme",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"toon",
+		"jaq",
+		"jq",
+		"json",
+		"token-optimization"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"files": [
+		"src/**/*",
+		"skills/**/*",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "0.80.6",
+		"@earendil-works/pi-coding-agent": "0.80.6",
+		"vitest": "3.2.4"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	}
+}

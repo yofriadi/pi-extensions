@@ -5,7 +5,7 @@
 	"version": "0.1.0",
 	"scripts": {
 		"test": "pnpm -r --if-present test",
-		"check": "biome check . && tsc --noEmit -p packages/pi-antigravity-oauth/tsconfig.json",
+		"check": "biome check . && tsc --noEmit -p packages/pi-antigravity-oauth/tsconfig.json && tsc --noEmit -p packages/pi-provider-kiro/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
 		"check:fix": "biome check --write ."
 	},
 	"devDependencies": {
