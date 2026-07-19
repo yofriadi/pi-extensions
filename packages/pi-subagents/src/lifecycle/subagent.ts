@@ -6,6 +6,7 @@
  * Behavior (abort, steer buffering) lives here rather than on SubagentManager.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { debugLog } from "#src/debug";
@@ -84,6 +85,11 @@ export interface SubagentInit {
 	/** Lifecycle status and metrics. Defaults to a fresh queued state. */
 	state?: SubagentState;
 }
+
+if (!(globalThis as any)[Symbol.for("pi-subagents:active-store")]) {
+	(globalThis as any)[Symbol.for("pi-subagents:active-store")] = new AsyncLocalStorage();
+}
+const activeSubagentStore = (globalThis as any)[Symbol.for("pi-subagents:active-store")];
 
 export class Subagent {
 	// Identity — set once at construction
@@ -268,11 +274,17 @@ export class Subagent {
 
 		const runConfig = this.execution.getRunConfig?.();
 		try {
-			const result = await this.subagentSession.runTurnLoop(this.execution.prompt, {
-				maxTurns: this.execution.maxTurns,
-				defaultMaxTurns: runConfig?.defaultMaxTurns,
-				graceTurns: runConfig?.graceTurns,
-				signal: this.abortController.signal,
+			const result = await activeSubagentStore.run({
+				id: this.id,
+				type: this.type,
+				readOnly: this.type === "Explore" || this.type === "Plan" || this.type === "codebase-explorer" || this.type === "plan-reviewer",
+			}, () => {
+				return this.subagentSession.runTurnLoop(this.execution.prompt, {
+					maxTurns: this.execution.maxTurns,
+					defaultMaxTurns: runConfig?.defaultMaxTurns,
+					graceTurns: runConfig?.graceTurns,
+					signal: this.abortController.signal,
+				});
 			});
 			this.completeRun(result);
 		} catch (err) {
@@ -330,7 +342,13 @@ export class Subagent {
 		}));
 
 		try {
-			const responseText = await subagentSession.resumeTurnLoop(prompt, signal);
+			const responseText = await activeSubagentStore.run({
+				id: this.id,
+				type: this.type,
+				readOnly: this.type === "Explore" || this.type === "Plan" || this.type === "codebase-explorer" || this.type === "plan-reviewer",
+			}, () => {
+				return subagentSession.resumeTurnLoop(prompt, signal);
+			});
 			this.markCompleted(responseText);
 		} catch (err) {
 			this.markError(err);

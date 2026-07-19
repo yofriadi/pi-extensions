@@ -6,7 +6,7 @@
 
 import type { AgentConfig } from "#src/types";
 
-const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "colgrep"];
 
 export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
   [
@@ -49,8 +49,8 @@ You are STRICTLY PROHIBITED from:
 Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find, cat, head, tail.
 
 # Tool Usage
+- Use the colgrep tool for semantic code search (searching by meaning/intent) and grep for exact content search
 - Use the find tool for file pattern matching (NOT the bash find command)
-- Use the grep tool for content search (NOT bash grep/rg command)
 - Use the read tool for reading files (NOT bash cat/head/tail)
 - Use Bash ONLY for read-only operations
 - Make independent tool calls in parallel for efficiency

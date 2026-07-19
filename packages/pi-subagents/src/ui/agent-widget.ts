@@ -5,7 +5,7 @@
  * Uses the callback form of setWidget for themed rendering.
  */
 
-import { AgentTypeRegistry } from "#src/config/agent-types";
+import type { AgentTypeRegistry } from "#src/config/agent-types";
 import type { Subagent } from "#src/lifecycle/subagent";
 import type { SubagentManager, SubagentManagerObserver } from "#src/lifecycle/subagent-manager";
 import type { CompactionInfo } from "#src/types";

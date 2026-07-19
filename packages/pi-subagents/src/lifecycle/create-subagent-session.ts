@@ -13,9 +13,9 @@
  */
 
 import type { Model } from "@earendil-works/pi-ai";
-import {
-  type AgentSession,
-  type SettingsManager,
+import type {
+  AgentSession,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfigLookup } from "#src/config/agent-types";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";

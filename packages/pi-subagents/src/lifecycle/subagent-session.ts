@@ -10,10 +10,10 @@
  * reaching through `subagentSession.session` from `Subagent` (Law of Demeter).
  */
 
-import {
-  type AgentSession,
-  type AgentSessionEvent,
-  type ToolDefinition,
+import type {
+  AgentSession,
+  AgentSessionEvent,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import { normalizeMaxTurns } from "#src/lifecycle/turn-limits";

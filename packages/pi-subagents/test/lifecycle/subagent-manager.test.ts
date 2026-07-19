@@ -700,17 +700,15 @@ describe("SubagentManager — onSubagentCreated observer", () => {
 describe("SubagentManager — lifecycle observer forwarding", () => {
   let manager: SubagentManager;
 
-  beforeEach(() => {
-    const { factory } = createSessionFactory(createMockSession());
-    ({ manager } = createManager({ createSubagentSession: factory }));
-  });
-
   afterEach(() => {
     manager.dispose();
   });
 
   it("forwards onSessionCreated from spawn options observer to Agent", async () => {
+    const session = createMockSession();
     const received: { agent: Subagent | undefined } = { agent: undefined };
+    const { factory } = createSessionFactory(session);
+    ({ manager } = createManager({ createSubagentSession: factory }));
 
     const id = manager.spawn(STUB_SNAPSHOT, "general-purpose", "test", {
       description: "test",
@@ -728,7 +726,10 @@ describe("SubagentManager — lifecycle observer forwarding", () => {
   });
 
   it("forwards onSessionCreated for foreground agents", async () => {
+    const session = createMockSession();
     const received: { agent: Subagent | undefined } = { agent: undefined };
+    const { factory } = createSessionFactory(session);
+    ({ manager } = createManager({ createSubagentSession: factory }));
 
     await manager.spawnAndWait(STUB_SNAPSHOT, "general-purpose", "test", {
       description: "fg",

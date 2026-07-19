@@ -1,10 +1,10 @@
 import { vi } from "vitest";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
-import {
-	type AgentToolManager,
-	type AgentToolRuntime,
-	type AgentToolSettings,
+import type {
+	AgentToolManager,
+	AgentToolRuntime,
+	AgentToolSettings,
 } from "#src/tools/agent-tool";
 import { makeModel } from "./make-model";
 import { createTestSubagent } from "./make-subagent";

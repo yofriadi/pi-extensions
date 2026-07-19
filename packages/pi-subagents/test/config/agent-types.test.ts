@@ -220,7 +220,7 @@ describe("AgentTypeRegistry", () => {
     it("returns restricted tools for Explore", () => {
       const registry = makeRegistry();
       const names = registry.getToolNamesForType("Explore");
-      expect(names).toEqual(["read", "bash", "grep", "find", "ls"]);
+      expect(names).toEqual(["read", "bash", "grep", "find", "ls", "colgrep"]);
     });
 
     it("returns custom tool names for user agent", () => {
