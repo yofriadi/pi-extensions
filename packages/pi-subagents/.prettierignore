@@ -1,0 +1,5 @@
+# This fork does not use Prettier — formatting is handled by Biome
+# (see biome.json and the sibling Pi-package conventions). Ignore all
+# files to prevent Prettier from being run accidentally (e.g. by an
+# agent harness with project-level write-time Prettier formatting).
+*
