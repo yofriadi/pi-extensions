@@ -30,7 +30,8 @@
  * Model: defaults to the user's currently active model with reasoning/thinking
  * disabled and cache writes disabled. This piggybacks on whatever auth the user
  * already has configured (including custom providers) so there are no login
- * surprises. Override explicitly with `--recap-model "<provider>/<id>"`.
+ * surprises. Override explicitly with `--recap-model "<provider>/<id>"` or the
+ * `sessionRecap.model` setting.
  *
  * Flags:
  *   --recap-away-seconds <n>   Continuous blur before an away recap (default 90)
@@ -45,8 +46,11 @@
  */
 
 import { createHash } from "node:crypto";
-import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Context as AiContext, Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 type ContentBlock = {
 	type?: string;
@@ -66,7 +70,8 @@ type Entry = {
 	};
 };
 
-type Model = Parameters<typeof completeSimple>[0];
+type RecapModel = Model<Api>;
+type RecapStreamOptions = SimpleStreamOptions & { env?: Record<string, string> };
 
 type RecapReason = "idle" | "manual" | "resume" | "focus";
 
@@ -75,6 +80,8 @@ const STATUS_KEY = "session-recap";
 
 const DEFAULT_AWAY_SECONDS = 90;
 const DEFAULT_IDLE_SECONDS = 120;
+const SETTINGS_KEY = "sessionRecap";
+const CURRENT_MODEL = "current";
 
 // Debounce after a turn ends while blurred, so mid-loop turn_ends (which are
 // immediately followed by the next turn_start) don't trigger drafts.
@@ -106,6 +113,21 @@ function splitModel(spec: string): { provider: string; id: string } | undefined 
 	const idx = spec.indexOf("/");
 	if (idx <= 0) return undefined;
 	return { provider: spec.slice(0, idx), id: spec.slice(idx + 1) };
+}
+
+function settingsModelOverride(): string | undefined {
+	try {
+		const raw = readFileSync(join(getAgentDir(), "settings.json"), "utf8");
+		const settings = JSON.parse(raw) as Record<string, unknown>;
+		const recap = settings[SETTINGS_KEY];
+		if (!recap || typeof recap !== "object" || Array.isArray(recap)) return undefined;
+		const value = (recap as { model?: unknown }).model;
+		if (typeof value !== "string") return undefined;
+		const model = value.trim();
+		return model && model !== CURRENT_MODEL ? model : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function extractText(content: unknown): string {
@@ -269,15 +291,12 @@ async function generateRecap(
 	overrideSpec: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | undefined> {
-	// Prefer explicit override flag; otherwise use the active model.
-	let model: Model | undefined = ctx.model;
+	// Prefer an explicit CLI/settings override; otherwise use the active model.
+	let model: RecapModel | undefined = ctx.model;
 	if (overrideSpec) {
 		const parsed = splitModel(overrideSpec);
 		if (parsed) {
-			const found = (getModel as (provider: string, id: string) => Model | undefined)(
-				parsed.provider,
-				parsed.id,
-			);
+			const found = ctx.modelRegistry.find(parsed.provider, parsed.id);
 			if (found) model = found;
 		}
 	}
@@ -307,32 +326,41 @@ async function generateRecap(
 		transcript.slice(0, TRANSCRIPT_CHAR_CAP) +
 		"\n</transcript>";
 
-	const response = await completeSimple(
-		model,
-		{
-			// Some providers (notably openai-codex-responses) require a non-empty
-			// top-level instruction string even for simple one-shot completions.
-			systemPrompt: "You write terse, concrete session recaps for a coding agent UI.",
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: prompt }],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		{
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			env: auth.env,
-			signal,
-			// Recaps are tiny, throwaway UI hints. Do not pay to create/read prompt
-			// cache entries, and do not spend reasoning tokens. Claude Code's away
-			// summary path likewise disables thinking for this job.
-			cacheRetention: "none",
-			maxTokens: 256,
-		},
-	);
+	const requestContext: AiContext = {
+		// Some providers (notably openai-codex-responses) require a non-empty
+		// top-level instruction string even for simple one-shot completions.
+		systemPrompt: "You write terse, concrete session recaps for a coding agent UI.",
+		messages: [
+			{
+				role: "user",
+				content: [{ type: "text", text: prompt }],
+				timestamp: Date.now(),
+			},
+		],
+	};
+	const requestOptions: RecapStreamOptions = {
+		apiKey: auth.apiKey,
+		headers: auth.headers,
+		env: auth.env,
+		signal,
+		// Recaps are tiny, throwaway UI hints. Do not pay to create/read prompt
+		// cache entries, and do not spend reasoning tokens. Claude Code's away
+		// summary path likewise disables thinking for this job.
+		cacheRetention: "none",
+		maxTokens: 256,
+	};
+
+	// Extension-registered providers expose their custom transport through the
+	// model registry, not pi-ai's compatibility API registry. Call that stream
+	// directly; keep completeSimple for built-in providers.
+	const getProviderConfig = ctx.modelRegistry.getRegisteredProviderConfig;
+	const customStream =
+		typeof getProviderConfig === "function"
+			? getProviderConfig.call(ctx.modelRegistry, model.provider)?.streamSimple
+			: undefined;
+	const response = customStream
+		? await customStream(model, requestContext, requestOptions).result()
+		: await completeSimple(model, requestContext, requestOptions);
 
 	const text = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -367,8 +395,7 @@ export default function (pi: ExtensionAPI) {
 		default: String(DEFAULT_AWAY_SECONDS),
 	});
 	pi.registerFlag("recap-idle-seconds", {
-		description:
-			"Idle-fallback: seconds after turn_end before a recap when the terminal doesn't report focus",
+		description: "Idle-fallback: seconds after turn_end before a recap when the terminal doesn't report focus",
 		type: "string",
 		default: String(DEFAULT_IDLE_SECONDS),
 	});
@@ -433,8 +460,9 @@ export default function (pi: ExtensionAPI) {
 	const isFocusDisabled = (): boolean => Boolean(pi.getFlag("recap-disable-focus"));
 	const allowDuringActive = (): boolean => Boolean(pi.getFlag("recap-during-active"));
 	const modelOverride = (): string | undefined => {
-		const v = String(pi.getFlag("recap-model") ?? "").trim();
-		return v.length > 0 ? v : undefined;
+		const flag = String(pi.getFlag("recap-model") ?? "").trim();
+		if (flag.length > 0) return flag === CURRENT_MODEL ? undefined : flag;
+		return settingsModelOverride();
 	};
 
 	const clearIdleTimer = () => {
@@ -466,8 +494,7 @@ export default function (pi: ExtensionAPI) {
 	// The idle fallback only exists for terminals that don't report focus.
 	// Once we've seen a real focus event, the away/post-turn triggers own the
 	// job and the idle path would just be noise while the user is watching.
-	const idleFallbackEligible = (): boolean =>
-		!focusEnabled || isFocusDisabled() || !focusEventsSeen;
+	const idleFallbackEligible = (): boolean => !focusEnabled || isFocusDisabled() || !focusEventsSeen;
 
 	const generateAndShow = async (ctx: ExtensionContext, opts: { reason: RecapReason }) => {
 		const entries = ctx.sessionManager.getBranch() as Entry[];
@@ -491,8 +518,7 @@ export default function (pi: ExtensionAPI) {
 		activeController = controller;
 
 		const showStatus = opts.reason === "manual" || opts.reason === "idle";
-		if (showStatus && ctx.hasUI)
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "✦ drafting recap…"));
+		if (showStatus && ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "✦ drafting recap…"));
 
 		try {
 			const recap = await generateRecap(transcript, ctx, modelOverride(), controller.signal);

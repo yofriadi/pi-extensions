@@ -1,31 +1,46 @@
 {
-  "name": "@tmustier/pi-session-recap",
-  "version": "0.2.1",
-  "description": "While-you-were-away recap above the editor when you return to a Pi session. Keeps you in flow when multi-agenting.",
-  "license": "MIT",
-  "author": "Thomas Mustier",
-  "keywords": [
-    "pi-package"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/tmustier/pi-extensions.git",
-    "directory": "session-recap"
-  },
-  "bugs": "https://github.com/tmustier/pi-extensions/issues",
-  "homepage": "https://github.com/tmustier/pi-extensions/tree/main/session-recap",
-  "pi": {
-    "extensions": [
-      "index.ts"
-    ],
-    "image": "https://raw.githubusercontent.com/tmustier/pi-extensions/main/session-recap/assets/recap.png"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3"
-  }
+	"name": "@tmustier/pi-session-recap",
+	"version": "0.2.1",
+	"description": "While-you-were-away recap above the editor when you return to a Pi session. Keeps you in flow when multi-agenting.",
+	"license": "MIT",
+	"author": "Thomas Mustier",
+	"type": "module",
+	"keywords": [
+		"pi-package"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/tmustier/pi-extensions.git",
+		"directory": "session-recap"
+	},
+	"bugs": "https://github.com/tmustier/pi-extensions/issues",
+	"homepage": "https://github.com/tmustier/pi-extensions/tree/main/session-recap",
+	"files": [
+		"index.ts",
+		"assets",
+		"CHANGELOG.md",
+		"DESIGN.md",
+		"LICENSE",
+		"README.md"
+	],
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		],
+		"image": "https://raw.githubusercontent.com/tmustier/pi-extensions/main/session-recap/assets/recap.png"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "0.80.10",
+		"@earendil-works/pi-coding-agent": "0.80.10",
+		"vitest": "3.2.4"
+	}
 }

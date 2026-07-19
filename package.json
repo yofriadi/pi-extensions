@@ -5,7 +5,8 @@
 	"version": "0.1.0",
 	"scripts": {
 		"test": "pnpm -r --if-present test",
-		"check": "biome check . && tsc --noEmit -p packages/pi-antigravity-oauth/tsconfig.json && tsc --noEmit -p packages/pi-provider-kiro/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
+		"update:session-recap": "bash scripts/update-session-recap-subtree.sh",
+		"check": "biome check . && tsc --noEmit -p packages/pi-antigravity-oauth/tsconfig.json && tsc --noEmit -p packages/pi-provider-kiro/tsconfig.json && tsc --noEmit -p packages/pi-session-recap/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
 		"check:fix": "biome check --write ."
 	},
 	"devDependencies": {

@@ -3,6 +3,7 @@
 	"include": [],
 	"references": [
 		{ "path": "./packages/pi-antigravity-oauth" },
-		{ "path": "./packages/pi-toon" }
+		{ "path": "./packages/pi-toon" },
+		{ "path": "./packages/pi-session-recap" }
 	]
 }

@@ -41,38 +41,41 @@ Defaults to the **currently active model** in your Pi session, but with recap-sp
 - Output is capped with `maxTokens: 256`.
 - No active model or failed auth resolution → the recap is skipped silently.
 
-Override with `--recap-model "<provider>/<id>"` if you want a specific model regardless of the session's active one.
+Override with `--recap-model "<provider>/<id>"` if you want a specific model regardless of the session's active one. The CLI flag takes priority over the persistent setting below.
 
-## Install
-
-### Pi package manager
-
-```bash
-pi install git:github.com/tmustier/pi-extensions
-```
-
-Filter to just this extension in `~/.pi/agent/settings.json`:
+Alternatively, configure the model in `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "packages": [
-    {
-      "source": "git:github.com/tmustier/pi-extensions",
-      "extensions": ["session-recap/index.ts"]
-    }
-  ]
+  "sessionRecap": {
+    "model": "anthropic/claude-sonnet-4-6"
+  }
 }
 ```
 
-### Local clone
+Use `"current"` (or omit `sessionRecap.model`) to follow the active session model. Custom providers registered with `pi.registerProvider` are supported. The setting is read whenever a recap starts.
+
+## Install
+
+### Local fork package
+
+Install this vendored package from the monorepo checkout:
+
+```bash
+pi install /path/to/pi-extensions/packages/pi-session-recap
+```
+
+Or load the source directly without installing it:
 
 ```json
 {
   "extensions": [
-    "~/pi-extensions/session-recap/index.ts"
+		"/path/to/pi-extensions/packages/pi-session-recap/index.ts"
   ]
 }
 ```
+
+This package is imported from [`tmustier/pi-extensions/session-recap`](https://github.com/tmustier/pi-extensions/tree/main/session-recap) with `git subtree`. The local custom-provider and `sessionRecap.model` changes are kept on top of the subtree, so upstream updates can be pulled and merged.
 
 ## Flags
 
@@ -83,7 +86,7 @@ Filter to just this extension in `~/.pi/agent/settings.json`:
 | `--recap-disable-focus` | `false` | Disable DECSET `?1004` focus reporting. Idle fallback still runs. |
 | `--recap-during-active` | `false` | Allow away recaps while an agent turn is still running, instead of deferring to the end of the turn. |
 | `--recap-disable` | `false` | Disable the automatic recap entirely. `/recap` still works. |
-| `--recap-model "<p/id>"` | (active model) | Override the default, e.g. `anthropic/claude-sonnet-4-6`. |
+| `--recap-model "<p/id>"` | `sessionRecap.model`, then active model | Override the configured/default model, e.g. `anthropic/claude-sonnet-4-6`. |
 
 > v0.1's `--recap-focus-min-seconds` was removed: recaps are no longer drafted on every focus-out, so there is no quick-glance suppression to tune.
 

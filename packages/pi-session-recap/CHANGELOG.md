@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (local fork)
+
+### Added
+
+- Support extension-registered custom providers by invoking their `streamSimple` handler from Pi's model registry.
+- Support persistent `sessionRecap.model` configuration in the active Pi agent directory's `settings.json`; `--recap-model` takes precedence and `"current"` follows the active session model.
+
+### Fixed
+
+- Resolve model overrides through Pi's model registry so custom-provider models can be selected.
+
 ## [0.2.1] - 2026-07-05
 
 ### Fixed
