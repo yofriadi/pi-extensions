@@ -151,26 +151,28 @@ async function runOnce(
       return { kind: "auth", message: authMessage };
     }
 
-    // Pass the combined signal so the underlying fetch is cancelled immediately
-    // either when the user presses Esc, or when an idle/ceiling timeout fires.
-    const responseStream = stream(
-      model,
-      {
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: userMessage }],
-            timestamp: Date.now(),
-          },
-        ],
-      },
-      {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        signal: combineSignals(options.signal, timeoutController.signal),
-        ...summarizerThinkingOptions(config),
-      }
-    );
+    // Extension-registered providers ship their own streamSimple implementation.
+    // Prefer it when present; pi-ai's global stream only knows built-in APIs.
+    const registeredProvider =
+      ctx.modelRegistry.getRegisteredProviderConfig?.(model.provider);
+    const requestContext = {
+      messages: [
+        {
+          role: "user" as const,
+          content: [{ type: "text" as const, text: userMessage }],
+          timestamp: Date.now(),
+        },
+      ],
+    };
+    const requestOptions = {
+      apiKey: auth.apiKey,
+      headers: auth.headers,
+      signal: combineSignals(options.signal, timeoutController.signal),
+      ...summarizerThinkingOptions(config),
+    };
+    const responseStream = registeredProvider?.streamSimple
+      ? registeredProvider.streamSimple(model, requestContext, requestOptions)
+      : stream(model, requestContext, requestOptions);
 
     // Ceiling arms once at call start; idle arms/resets on every stream event
     // (including before the first one, so it also bounds time-to-first-token).

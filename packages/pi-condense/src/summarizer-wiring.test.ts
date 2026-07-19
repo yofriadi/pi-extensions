@@ -105,12 +105,19 @@ interface Note {
   level: string;
 }
 
-function makeCtx(notes: Note[], sessionModel: any = SESSION, primaryModel: any = PRIMARY) {
+function makeCtx(
+  notes: Note[],
+  sessionModel: any = SESSION,
+  primaryModel: any = PRIMARY,
+  providerStream?: (model: any, input?: any, opts?: any) => any
+) {
   return {
     model: sessionModel,
     modelRegistry: {
       find: () => primaryModel,
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
+      getRegisteredProviderConfig: () =>
+        providerStream ? { streamSimple: providerStream } : undefined,
     },
     ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) },
   } as any;
@@ -128,6 +135,21 @@ function makeBatch() {
 }
 
 const distinctConfig = { ...DEFAULT_CONFIG, summarizerModel: "provider-a/primary-model" };
+
+describe("registered custom provider streaming", () => {
+  it("uses the provider stream registered in the model registry", async () => {
+    streamImpl = () => {
+      throw new Error("No API provider registered for api: custom-api");
+    };
+    const notes: Note[] = [];
+    const ctx = makeCtx(notes, SESSION, PRIMARY, () => okStream("- configured model summary"));
+
+    const result = await summarizeBatch(makeBatch(), distinctConfig, ctx);
+
+    expect(result?.summaryText).toBe("- configured model summary");
+    expect(notes).toHaveLength(0);
+  });
+});
 
 describe("runSummarization wiring — same-model no-op (legacy path)", () => {
   it("summarizerModel=default: transient failure notifies error, returns null, controller untouched", async () => {
