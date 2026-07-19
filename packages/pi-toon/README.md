@@ -35,7 +35,7 @@ pi install npm:@yofriadi/pi-toon
 /toon status      Show current state
 ```
 
-The enabled setting is stored in Pi's public agent directory as `toon.json`. The status bar shows `TOON: on`, `TOON: off`, or `TOON: unavailable`.
+The enabled setting is stored in Pi's public agent directory as `toon.json`. Use `/toon status` to inspect the current state.
 
 ## Behavior
 

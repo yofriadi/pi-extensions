@@ -1,13 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-	type ExtensionAPI,
-	type ExtensionCommandContext,
-	type ExtensionContext,
-	getAgentDir,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const STATUS_KEY = "pi-toon";
 const STATE_FILE = "toon.json";
 
 export type QueryCommand = "jaq" | "jq";
@@ -160,18 +154,6 @@ export default function toon(pi: ExtensionAPI): void {
 	let queryCommand: QueryCommand | null | undefined;
 	let toonAvailable: boolean | undefined;
 
-	function syncStatus(ctx: Pick<ExtensionContext, "ui">): void {
-		if (!enabled) {
-			ctx.ui.setStatus(STATUS_KEY, "TOON: off");
-			return;
-		}
-		if (queryCommand === null || toonAvailable === false) {
-			ctx.ui.setStatus(STATUS_KEY, "TOON: unavailable");
-			return;
-		}
-		ctx.ui.setStatus(STATUS_KEY, "TOON: on");
-	}
-
 	function stateMessage(): string {
 		if (!enabled) return "TOON guidance is off.";
 		if (queryCommand === null || toonAvailable === false)
@@ -193,14 +175,6 @@ export default function toon(pi: ExtensionAPI): void {
 		return null;
 	}
 
-	pi.on("session_start", (_event, ctx) => {
-		syncStatus(ctx);
-	});
-
-	pi.on("session_shutdown", (_event, ctx) => {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-	});
-
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!enabled || !mentionsJson(event.prompt)) return undefined;
 
@@ -215,7 +189,6 @@ export default function toon(pi: ExtensionAPI): void {
 			if (!toonAvailable) {
 				ctx.ui.notify("toon not found. Install it with: npm i -g @toon-format/cli", "warning");
 			}
-			syncStatus(ctx);
 		}
 
 		if (queryCommand === null || toonAvailable === false) return undefined;
@@ -227,7 +200,6 @@ export default function toon(pi: ExtensionAPI): void {
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const argument = args.trim().toLowerCase();
 			if (argument === "status") {
-				syncStatus(ctx);
 				ctx.ui.notify(stateMessage(), "info");
 				return;
 			}
@@ -247,7 +219,6 @@ export default function toon(pi: ExtensionAPI): void {
 
 			enabled = nextEnabled;
 			saveEnabledState(enabled);
-			syncStatus(ctx);
 			ctx.ui.notify(`TOON guidance ${enabled ? "enabled" : "disabled"}.`, "info");
 		},
 	});

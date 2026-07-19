@@ -175,35 +175,34 @@ describe("TOON shape heuristics", () => {
 });
 
 describe("pi-toon extension integration", () => {
-	it("loads one extension and registers the command and lifecycle handlers", async () => {
+	it("loads one extension and registers the command and prompt handler", async () => {
 		const extension = await loadToonExtension();
 
 		expect(extension.commands.has("toon")).toBe(true);
 		expect(extension.commands.get("toon")?.description).toBe("Toggle JSON/TOON guidance (on, off, or status)");
 		expect(extension.handlers.get("before_agent_start")).toHaveLength(1);
-		expect(extension.handlers.get("session_start")).toHaveLength(1);
-		expect(extension.handlers.get("session_shutdown")).toHaveLength(1);
+		expect(extension.handlers.get("session_start")).toBeUndefined();
+		expect(extension.handlers.get("session_shutdown")).toBeUndefined();
 	});
 
 	it("gates injection to enabled JSON-related prompts after the lazy binary probe", async () => {
 		makeToonCommandsAvailable();
 		const extension = await loadToonExtension();
 		const handler = getHandler(extension, "before_agent_start");
-		const ui = { notify: vi.fn(), setStatus: vi.fn() };
+		const ui = { notify: vi.fn() };
 		const context = { ui } as unknown as ExtensionContext;
 
 		expect(await handler(beforeAgentStartEvent("fix the auth bug"), context)).toBeUndefined();
 		expect(await handler(beforeAgentStartEvent("inspect this JSON response"), context)).toEqual({
 			systemPrompt: `${JSON_SYSTEM_PROMPT}\n\nUse \`jaq\` for jq-compatible JSON queries in this environment.\n\nbase system prompt`,
 		});
-		expect(ui.setStatus).toHaveBeenCalledWith("pi-toon", "TOON: on");
 	});
 
 	it("falls back to jq when jaq is unavailable", async () => {
 		makeToonCommandsAvailable(["jq", "toon"]);
 		const extension = await loadToonExtension();
 		const handler = getHandler(extension, "before_agent_start");
-		const context = { ui: { notify: vi.fn(), setStatus: vi.fn() } } as unknown as ExtensionContext;
+		const context = { ui: { notify: vi.fn() } } as unknown as ExtensionContext;
 
 		const result = await handler(beforeAgentStartEvent("inspect this JSON response"), context);
 		expect(result).toEqual({
@@ -215,11 +214,10 @@ describe("pi-toon extension integration", () => {
 		const extension = await loadToonExtension();
 		const command = extension.commands.get("toon");
 		if (!command) throw new Error("Expected toon command");
-		const ui = { notify: vi.fn(), setStatus: vi.fn() };
+		const ui = { notify: vi.fn() };
 		const context = { ui } as unknown as ExtensionCommandContext;
 
 		await command.handler("", context);
-		expect(ui.setStatus).toHaveBeenLastCalledWith("pi-toon", "TOON: off");
 		expect(JSON.parse(readFileSync(join(agentDir, "toon.json"), "utf8"))).toEqual({ enabled: false });
 
 		const reloaded = await loadToonExtension();
@@ -227,22 +225,11 @@ describe("pi-toon extension integration", () => {
 		expect(await reloadedHandler(beforeAgentStartEvent("inspect JSON"), context)).toBeUndefined();
 
 		await command.handler("ENABLE", context);
-		expect(ui.setStatus).toHaveBeenLastCalledWith("pi-toon", "TOON: on");
 		expect(JSON.parse(readFileSync(join(agentDir, "toon.json"), "utf8"))).toEqual({ enabled: true });
 
 		await command.handler("status", context);
 		expect(ui.notify).toHaveBeenLastCalledWith("TOON guidance is on.", "info");
 		await command.handler("on now", context);
 		expect(ui.notify).toHaveBeenLastCalledWith("Usage: /toon [on|enable|off|disable|status]", "warning");
-	});
-
-	it("clears its status on session shutdown", async () => {
-		const extension = await loadToonExtension();
-		const handler = getHandler(extension, "session_shutdown");
-		const ui = { notify: vi.fn(), setStatus: vi.fn() };
-		const context = { ui } as unknown as ExtensionContext;
-
-		await handler({ type: "session_shutdown", reason: "quit" }, context);
-		expect(ui.setStatus).toHaveBeenCalledWith("pi-toon", undefined);
 	});
 });
