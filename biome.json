@@ -38,8 +38,8 @@
 	"overrides": [
 		{
 			"includes": [
-				"packages/pi-antigravity-oauth/src/cloud-code-assist.ts",
-				"packages/pi-antigravity-oauth/src/vendor/**"
+				"packages/pi-provider-antigravity/src/cloud-code-assist.ts",
+				"packages/pi-provider-antigravity/src/vendor/**"
 			],
 			"linter": {
 				"rules": {
@@ -47,6 +47,6 @@
 					"suspicious": { "noExplicitAny": "off" }
 				}
 			}
-		}
+		},
 	]
 }

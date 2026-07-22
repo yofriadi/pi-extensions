@@ -10,6 +10,7 @@
 
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { type GoogleOAuthLoginConfig, loginWithGoogleOAuth } from "./google-oauth-utils.ts";
+import { discoverAntigravityModels } from "./model-discovery.ts";
 import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET } from "./vendor/credentials.ts";
 
 const REDIRECT_URI = "http://localhost:51121/oauth-callback";
@@ -102,16 +103,39 @@ const LOGIN_CONFIG: GoogleOAuthLoginConfig = {
 	discoverProject,
 };
 
+async function withAvailableModels(
+	credentials: OAuthCredentials,
+	onProgress?: (message: string) => void,
+): Promise<OAuthCredentials> {
+	try {
+		onProgress?.("Discovering available models...");
+		const catalog = await discoverAntigravityModels({
+			accessToken: credentials.access,
+			signal: AbortSignal.timeout(30_000),
+		});
+		return {
+			...credentials,
+			antigravityAvailableModelIds: catalog.models.filter((model) => !model.internal).map((model) => model.id),
+		};
+	} catch {
+		onProgress?.("Model discovery unavailable; using the static catalog.");
+		return credentials;
+	}
+}
+
 export async function loginAntigravity(
 	onAuth: (info: { url: string; instructions?: string }) => void,
 	onProgress?: (message: string) => void,
 	onManualCodeInput?: () => Promise<string>,
 ): Promise<OAuthCredentials> {
-	return loginWithGoogleOAuth(LOGIN_CONFIG, onAuth, onProgress, onManualCodeInput);
+	const credentials = await loginWithGoogleOAuth(LOGIN_CONFIG, onAuth, onProgress, onManualCodeInput);
+	return withAvailableModels(credentials, onProgress);
 }
 
-/** Refresh Antigravity token. */
-export async function refreshAntigravityToken(refreshToken: string, projectId: string): Promise<OAuthCredentials> {
+export async function refreshAntigravityAccessToken(
+	refreshToken: string,
+	projectId: string,
+): Promise<OAuthCredentials> {
 	const response = await fetch(TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -140,4 +164,9 @@ export async function refreshAntigravityToken(refreshToken: string, projectId: s
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
 		projectId,
 	};
+}
+
+/** Refresh Antigravity credentials and cache the current public backend catalog. */
+export async function refreshAntigravityToken(refreshToken: string, projectId: string): Promise<OAuthCredentials> {
+	return withAvailableModels(await refreshAntigravityAccessToken(refreshToken, projectId));
 }

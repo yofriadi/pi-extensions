@@ -22,6 +22,13 @@ import {
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "@google/genai";
+import {
+	ANTIGRAVITY_AUTOPUSH_ENDPOINT,
+	ANTIGRAVITY_DAILY_ENDPOINT,
+	ANTIGRAVITY_SANDBOX_ENDPOINT,
+	CLOUD_CODE_ASSIST_ENDPOINT,
+	getAntigravityHeaders,
+} from "./antigravity-protocol.ts";
 import { getAntigravityRequestModelId } from "./models.ts";
 import { normalizeSchemaForCCA } from "./vendor/cca-schema/normalize.ts";
 import {
@@ -66,20 +73,24 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	 * Antigravity variants.
 	 */
 	antigravityEffort?: ThinkingLevel | "off";
+	antigravityValidation?: {
+		primaryEndpointOnly?: boolean;
+		maxAttempts?: number;
+		maxEmptyStreamRetries?: number;
+	};
 }
 
-const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
-// Antigravity tier endpoints. omp ships with `daily-cloudcode-pa.googleapis.com`
-// (no `.sandbox`) as the primary tier and falls back to the `.sandbox` host
-// and then to prod. Order matches the upstream omp catalog.
-const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-const ANTIGRAVITY_AUTOPUSH_ENDPOINT = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
+export interface AntigravitySimpleStreamOptions extends SimpleStreamOptions {
+	antigravityValidation?: NonNullable<GoogleGeminiCliOptions["antigravityValidation"]>;
+}
+
+// Antigravity uses the daily endpoint first, with compatibility fallbacks for
+// accounts or models not available on that tier.
 const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
 	ANTIGRAVITY_DAILY_ENDPOINT,
 	ANTIGRAVITY_SANDBOX_ENDPOINT,
 	ANTIGRAVITY_AUTOPUSH_ENDPOINT,
-	DEFAULT_ENDPOINT,
+	CLOUD_CODE_ASSIST_ENDPOINT,
 ] as const;
 // Headers for Gemini CLI (prod endpoint)
 const GEMINI_CLI_HEADERS = {
@@ -91,16 +102,6 @@ const GEMINI_CLI_HEADERS = {
 		pluginType: "GEMINI",
 	}),
 };
-
-// Headers for Antigravity (sandbox endpoint) - requires specific User-Agent
-const DEFAULT_ANTIGRAVITY_VERSION = "1.104.0";
-
-function getAntigravityHeaders() {
-	const version = process.env.PI_AI_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION;
-	return {
-		"User-Agent": `antigravity/${version} darwin/arm64`,
-	};
-}
 
 // Antigravity system instruction (compact version from CLIProxyAPI).
 const ANTIGRAVITY_SYSTEM_INSTRUCTION =
@@ -395,7 +396,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 			// type but ignored for antigravity to keep the chain intact.
 			// Non-antigravity models use `baseUrl` as a full override, or
 			// the prod endpoint by default.
-			const endpoints = isAntigravity ? ANTIGRAVITY_ENDPOINT_FALLBACKS : baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT];
+			const endpoints = options?.antigravityValidation?.primaryEndpointOnly
+				? [ANTIGRAVITY_DAILY_ENDPOINT]
+				: isAntigravity
+					? ANTIGRAVITY_ENDPOINT_FALLBACKS
+					: baseUrl
+						? [baseUrl]
+						: [CLOUD_CODE_ASSIST_ENDPOINT];
 
 			let requestBody = buildRequest(model, context, projectId, options, isAntigravity);
 			const nextRequestBody = await options?.onPayload?.(requestBody, model);
@@ -421,8 +428,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 			let lastError: Error | undefined;
 			let requestUrl: string | undefined;
 			let endpointIndex = 0;
+			const maxAttempts = options?.antigravityValidation?.maxAttempts ?? MAX_RETRIES + 1;
+			if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+				throw new Error("Antigravity request attempt limit must be a positive integer");
+			}
 
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			for (let attempt = 0; attempt < maxAttempts; attempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -454,7 +465,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 					}
 
 					// Check if retryable (429, 5xx, network patterns)
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
+					if (attempt + 1 < maxAttempts && isRetryableError(response.status, errorText)) {
 						// Advance endpoint if possible
 						if (endpointIndex < endpoints.length - 1) {
 							endpointIndex++;
@@ -494,7 +505,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 						lastError = new Error(`Network error: ${lastError.cause.message}`);
 					}
 					// Network errors are retryable
-					if (attempt < MAX_RETRIES) {
+					if (attempt + 1 < maxAttempts) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
 						continue;
@@ -783,8 +794,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 
 			let receivedContent = false;
 			let currentResponse = response;
+			const maxEmptyStreamRetries =
+				options?.antigravityValidation?.maxEmptyStreamRetries ?? MAX_EMPTY_STREAM_RETRIES;
+			if (!Number.isSafeInteger(maxEmptyStreamRetries) || maxEmptyStreamRetries < 0) {
+				throw new Error("Antigravity empty-stream retry limit must be a non-negative integer");
+			}
 
-			for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
+			for (let emptyAttempt = 0; emptyAttempt <= maxEmptyStreamRetries; emptyAttempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -820,7 +836,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 					break;
 				}
 
-				if (emptyAttempt < MAX_EMPTY_STREAM_RETRIES) {
+				if (emptyAttempt < maxEmptyStreamRetries) {
 					resetOutput();
 				}
 			}
@@ -855,10 +871,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 	return stream;
 };
 
-export const streamSimpleGoogleGeminiCli: StreamFunction<"google-gemini-cli", SimpleStreamOptions> = (
+export const streamSimpleGoogleGeminiCli: StreamFunction<"google-gemini-cli", AntigravitySimpleStreamOptions> = (
 	model: Model<"google-gemini-cli">,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options?: AntigravitySimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
@@ -867,7 +883,7 @@ export const streamSimpleGoogleGeminiCli: StreamFunction<"google-gemini-cli", Si
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const antigravityEffort: GoogleGeminiCliOptions["antigravityEffort"] = options?.reasoning ?? "off";
-	const antigravityAwareBase = { ...base, antigravityEffort };
+	const antigravityAwareBase = { ...base, antigravityEffort, antigravityValidation: options?.antigravityValidation };
 	if (!options?.reasoning) {
 		// Only auto-disable thinking for non-reasoning models. Reasoning
 		// models default to thinking enabled — sending `thinkingBudget: 0`

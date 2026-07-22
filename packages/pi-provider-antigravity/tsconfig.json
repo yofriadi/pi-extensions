@@ -4,6 +4,6 @@
 		"lib": ["ES2022"],
 		"noUncheckedIndexedAccess": false
 	},
-	"include": ["src/**/*", "test/**/*"],
+	"include": ["scripts/**/*", "src/**/*", "test/**/*"],
 	"exclude": ["node_modules", "dist"]
 }

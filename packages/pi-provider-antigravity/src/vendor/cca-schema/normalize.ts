@@ -48,6 +48,7 @@ export interface NormalizeSchemaOptions {
 	extractNullableFromUnions: boolean;
 	rejectResidualIncompatibilities?: ReadonlyArray<ResidualSchemaIncompatibility>;
 	validateAndFallback?: { fallback: unknown };
+	stringOnlyEnum?: boolean;
 }
 
 interface NormalizeSchemaWalkOptions extends NormalizeSchemaOptions {
@@ -356,6 +357,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			}
 		} else if (!result.type) {
 			result.type = inferJsonSchemaTypeFromValue(constValue);
+		}
+	}
+	if (options.stringOnlyEnum && Array.isArray(result.enum)) {
+		const stringEnum = result.enum.filter((v): v is string => typeof v === "string");
+		if (stringEnum.length > 0) {
+			result.enum = stringEnum;
+		} else {
+			delete result.enum;
 		}
 	}
 
@@ -878,6 +887,7 @@ export function normalizeSchemaForGoogle(value: unknown): unknown {
 		collapseMixedTypeCombiners: false,
 		stripResidualCombinersFixpoint: false,
 		extractNullableFromUnions: false,
+		stringOnlyEnum: true,
 	});
 }
 
@@ -898,6 +908,7 @@ export function normalizeSchemaForCCA(value: unknown): unknown {
 		extractNullableFromUnions: true,
 		rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners"],
 		validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
+		stringOnlyEnum: true,
 	});
 }
 

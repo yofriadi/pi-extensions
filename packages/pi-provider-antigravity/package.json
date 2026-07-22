@@ -1,6 +1,6 @@
 {
-	"name": "@yofriadi/pi-antigravity-oauth",
-	"version": "0.3.0",
+	"name": "@yofriadi/pi-provider-antigravity",
+	"version": "0.2.0",
 	"publishConfig": {
 		"access": "public"
 	},
@@ -14,7 +14,7 @@
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/yofriadi/pi-extensions.git",
-		"directory": "packages/pi-antigravity-oauth"
+		"directory": "packages/pi-provider-antigravity"
 	},
 	"bugs": {
 		"url": "https://github.com/yofriadi/pi-extensions/issues"
@@ -33,15 +33,20 @@
 		"node": ">=22.19.0"
 	},
 	"files": [
+		"scripts/**/*",
 		"src/**/*"
 	],
 	"scripts": {
+		"discover-models": "jiti scripts/discover-models.ts",
 		"test": "vitest run",
+		"test:live": "jiti scripts/validate-live.ts",
 		"test:watch": "vitest",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"prepublishOnly": "npm run typecheck && npm test"
 	},
 	"dependencies": {
-		"@google/genai": "1.52.0"
+		"@google/genai": "1.52.0",
+		"jiti": "2.7.0"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",

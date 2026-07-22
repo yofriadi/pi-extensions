@@ -21,14 +21,14 @@ import {
 import { ANTIGRAVITY_MODELS } from "../src/models.ts";
 import { normalizeSchemaForCCA } from "../src/vendor/cca-schema/normalize.ts";
 
-describe("pi-antigravity-oauth extension", () => {
+describe("pi-provider-antigravity extension", () => {
 	let tempDir: string;
 	let agentDir: string;
 	let settingsManager: SettingsManager;
 	let packageManager: DefaultPackageManager;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `pi-antigravity-oauth-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDir = join(tmpdir(), `pi-provider-antigravity-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
@@ -96,30 +96,38 @@ describe("pi-antigravity-oauth extension", () => {
 		const availableModels = registry.getAll();
 		const antigravityModels = availableModels.filter((m) => m.provider === "google-antigravity");
 
-		expect(antigravityModels.length).toBe(16);
+		expect(antigravityModels.length).toBe(6);
 		expect(antigravityModels.map((m) => m.id).sort()).toEqual(
 			[
-				"claude-opus-4-5",
 				"claude-opus-4-6",
-				"claude-sonnet-4-5",
 				"claude-sonnet-4-6",
-				"gemini-2.5-flash",
-				"gemini-2.5-flash-lite",
-				"gemini-2.5-pro",
-				"gemini-3-flash",
-				"gemini-3-pro",
-				"gemini-3.1-flash-image",
-				"gemini-3.1-flash-lite",
 				"gemini-3.1-pro",
 				"gemini-3.5-flash",
+				"gemini-3.6-flash",
 				"gpt-oss-120b",
-				"tab_flash_lite_preview",
-				"tab_jump_flash_lite_preview",
 			].sort(),
 		);
-		expect(antigravityModels.every((m) => m.baseUrl === "https://daily-cloudcode-pa.sandbox.googleapis.com")).toBe(
-			true,
-		);
+		expect(antigravityModels.every((m) => m.baseUrl === "https://daily-cloudcode-pa.googleapis.com")).toBe(true);
+	});
+
+	it("filters Antigravity models from discovered OAuth metadata", async () => {
+		const { runtime } = await loadPackageAndBind();
+		const oauth = runtime.pendingProviderRegistrations.find(
+			(registration) => registration.name === "google-antigravity",
+		)?.config.oauth;
+		if (!oauth?.modifyModels) throw new Error("oauth.modifyModels not registered for the provider");
+		const models = [...ANTIGRAVITY_MODELS, { ...ANTIGRAVITY_MODELS[0], id: "other", provider: "other" }];
+		const filtered = oauth.modifyModels(models, {
+			refresh: "r",
+			access: "a",
+			expires: Date.now() + 60_000,
+			projectId: "p",
+			antigravityAvailableModelIds: ["gemini-3.5-flash-low"],
+		});
+		expect(filtered.filter((model) => model.provider === "google-antigravity").map((model) => model.id)).toEqual([
+			"gemini-3.5-flash",
+		]);
+		expect(filtered.some((model) => model.id === "other")).toBe(true);
 	});
 
 	it("rejects credentials missing a projectId in getApiKey and refreshToken", async () => {
@@ -211,12 +219,10 @@ describe("google-antigravity stream fallback", () => {
 		expect(body.request.generationConfig?.thinkingConfig).toBeUndefined();
 	});
 	it("rewrites Antigravity model IDs to the server-side request IDs", async () => {
-		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-5") as Model<"google-gemini-cli">;
-		const gemini3 = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3-pro") as Model<"google-gemini-cli">;
-		const geminiLite = ANTIGRAVITY_MODELS.find(
-			(m) => m.id === "gemini-3.1-flash-lite",
-		) as Model<"google-gemini-cli">;
-		if (!claude || !gemini3 || !geminiLite) throw new Error("expected Antigravity models missing");
+		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6") as Model<"google-gemini-cli">;
+		const gemini3 = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.6-flash") as Model<"google-gemini-cli">;
+		if (!claude || !gemini3) throw new Error("expected Antigravity models missing");
+
 
 		const captured: string[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
@@ -229,53 +235,49 @@ describe("google-antigravity stream fallback", () => {
 			});
 		});
 
-		// Claude Opus 4.5 with reasoning on -> thinking variant
+
+		// Claude Opus 4.6 with reasoning on -> thinking variant
 		await streamSimpleGoogleGeminiCli(
 			claude,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }), reasoning: "high" },
 		).result();
-		expect(captured.at(-1)).toBe("claude-opus-4-5-thinking");
+		expect(captured.at(-1)).toBe("claude-opus-4-6-thinking");
+
 
 		captured.length = 0;
-		// Claude Opus 4.5 with reasoning off -> still thinking (no off route)
+		// Claude Opus 4.6 with reasoning off -> still thinking (no off route)
 		await streamSimpleGoogleGeminiCli(
 			claude,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }) },
 		).result();
-		expect(captured.at(-1)).toBe("claude-opus-4-5-thinking");
+		expect(captured.at(-1)).toBe("claude-opus-4-6-thinking");
+
 
 		captured.length = 0;
-		// Gemini 3 Pro high -> high
+		// Gemini 3.6 Flash high -> high
 		await streamSimpleGoogleGeminiCli(
 			gemini3,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }), reasoning: "high" },
+
 		).result();
-		expect(captured.at(-1)).toBe("gemini-3-pro-high");
+		expect(captured.at(-1)).toBe("gemini-3.6-flash-high");
+
 
 		captured.length = 0;
-		// Gemini 3 Pro off -> low
+		// Gemini 3.6 Flash off -> low runtime tier
 		await streamSimpleGoogleGeminiCli(
 			gemini3,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }) },
 		).result();
-		expect(captured.at(-1)).toBe("gemini-3-pro-low");
-
-		captured.length = 0;
-		// Non-reasoning model is passed through unchanged.
-		await streamSimpleGoogleGeminiCli(
-			geminiLite,
-			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }) },
-		).result();
-		expect(captured.at(-1)).toBe("gemini-3.1-flash-lite");
+		expect(captured.at(-1)).toBe("gemini-3.6-flash-low");
 	});
 	it("normalizes Antigravity tool schemas via the vendored CCA pipeline for Claude", async () => {
-		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-5") as Model<"google-gemini-cli">;
-		if (!claude) throw new Error("claude-opus-4-5 model missing");
+		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6") as Model<"google-gemini-cli">;
+		if (!claude) throw new Error("claude-opus-4-6 model missing");
 
 		let firstBody = "";
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
@@ -344,8 +346,8 @@ describe("google-antigravity stream fallback", () => {
 		expect(body.request.toolConfig.functionCallingConfig.mode).toBe("VALIDATED");
 	});
 	it("normalizes tool schemas with no top-level type by inferring object", async () => {
-		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-5") as Model<"google-gemini-cli">;
-		if (!claude) throw new Error("claude-opus-4-5 model missing");
+		const claude = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6") as Model<"google-gemini-cli">;
+		if (!claude) throw new Error("claude-opus-4-6 model missing");
 
 		let firstBody = "";
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
@@ -1145,7 +1147,9 @@ describe("normalizeSchemaForCCA", () => {
 		if (node === null || typeof node !== "object") return [];
 		const issues: string[] = [];
 		if (Array.isArray(node)) {
-			node.forEach((entry, i) => issues.push(...collectIssues(entry, `${path}[${i}]`)));
+			node.forEach((entry, i) => {
+				issues.push(...collectIssues(entry, `${path}[${i}]`));
+			});
 			return issues;
 		}
 		const obj = node as Record<string, unknown>;
@@ -1180,7 +1184,11 @@ describe("normalizeSchemaForCCA", () => {
 							type: "object" as const,
 							properties: {
 								url: { type: "string" as const },
-								attached: { type: "boolean" as const, const: false, description: "When omitted or false" },
+								attached: {
+									type: "boolean" as const,
+									const: false,
+									description: "When omitted or false",
+								},
 								expectedText: { type: "string" as const },
 							},
 						},
@@ -1239,5 +1247,37 @@ describe("normalizeSchemaForCCA", () => {
 		expect(normalized.enum).toEqual(["open", "closed"]);
 		// No `const` should leak into the output even on the string path.
 		expect(normalized.const).toBeUndefined();
+	});
+
+	it("strips boolean and numeric values from enum arrays", () => {
+		const schema = {
+			type: "object" as const,
+			properties: {
+				propA: {
+					type: "object" as const,
+					properties: {
+						propB: {
+							type: "boolean" as const,
+							enum: [true, false],
+						},
+						propC: {
+							type: "number" as const,
+							enum: [1, 2, 3],
+						},
+						propD: {
+							type: "string" as const,
+							enum: ["a", "b", 42 as unknown as string],
+						},
+					},
+				},
+			},
+		};
+
+		const normalized = normalizeSchemaForCCA(schema) as Record<string, unknown>;
+		const propA = (normalized.properties as Record<string, unknown>).propA as Record<string, unknown>;
+		const properties = propA.properties as Record<string, Record<string, unknown>>;
+		expect(properties.propB.enum).toBeUndefined();
+		expect(properties.propC.enum).toBeUndefined();
+		expect(properties.propD.enum).toEqual(["a", "b"]);
 	});
 });
