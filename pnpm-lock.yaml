@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: 22.19.19
         version: 22.19.19
+      fallow:
+        specifier: ^3.8.0
+        version: 3.8.0
       rumdl:
         specifier: ^0.2.40
         version: 0.2.40
@@ -480,6 +483,46 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@fallow-cli/darwin-arm64@3.8.0':
+    resolution: {integrity: sha512-fsAtCAj073n1RlZpHttQA2ALgwf9OcCO6hgs6UA9WgKrhpiSg542pwfn2HPjXQH5V1hKxnrr9QP1PRAMR9ISLQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@fallow-cli/darwin-x64@3.8.0':
+    resolution: {integrity: sha512-yIgiLDOHUfk1JbUJCe3rRfINtZI52cqPFkLGNM5a/C3pSzUChbnCdXpMMvry1ta6AxlZ5DN3oeqVWg3M9hIlzQ==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@fallow-cli/linux-arm64-gnu@3.8.0':
+    resolution: {integrity: sha512-KD+ISVHlnG6qNq9hLIu53obvx/o1xpu9wm6XIkxdzcmnQCxlPNL+M+p2VUz6q9BuNJ34chao/9GsjGWd3qjMcg==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@fallow-cli/linux-arm64-musl@3.8.0':
+    resolution: {integrity: sha512-ggowJf3SfE8kw4dfXY1MY5D4WOiZqwuTHz4u4NI3ITvlVEBa/nS3PzSInOcHAc7p2wOliYxBO9ex+bhKRwUeSw==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@fallow-cli/linux-x64-gnu@3.8.0':
+    resolution: {integrity: sha512-htb4iu5bR0b9TTZykVLmZHAwc2NMSoBo+Pytjg9pgOsVDs4PwUavB/sEcQqYKeXkgN5K8Cyu2oBKFYcfMPmjMA==}
+    cpu: [x64]
+    os: [linux]
+
+  '@fallow-cli/linux-x64-musl@3.8.0':
+    resolution: {integrity: sha512-gK+cqX8RE6f/9DEFTGm5y3JD0VDjk1gCJKfZy+ezImNopNt1m3CKkY4ihvm2z7XCOSM/m4HrHSo5Ig9hIdSn0A==}
+    cpu: [x64]
+    os: [linux]
+
+  '@fallow-cli/win32-arm64-msvc@3.8.0':
+    resolution: {integrity: sha512-Zus+cAWNJWVpF7NFhfaZiw1nHyODFKEstRjOgJgebr7XTN62upQt051n5j3NeiPlTuVHmmgLHdvvOcVUpcygzw==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@fallow-cli/win32-x64-msvc@3.8.0':
+    resolution: {integrity: sha512-MCkrRm/pz6Im6EbQiT8IXt+KS8p+QVJ+1CH6QBGR+4L0BRZwZT4QJs4MQAEi8iybxHW6jIzc/14+5pNfsjSguw==}
+    cpu: [x64]
+    os: [win32]
+
   '@google/genai@1.52.0':
     resolution: {integrity: sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==}
     engines: {node: '>=20.0.0'}
@@ -932,6 +975,10 @@ packages:
     resolution: {integrity: sha512-h5k/5U50IJJFpzfL6nO9jaaumfjO/f2NjK/oYB2Djzm4p9L+3T9qWpZqZ2hAbLPuuYq9wrU08WQyBTL5GbPk5Q==}
     engines: {node: '>=6'}
 
+  detect-libc@2.1.2:
+    resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
+    engines: {node: '>=8'}
+
   diff@8.0.4:
     resolution: {integrity: sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw==}
     engines: {node: '>=0.3.1'}
@@ -956,6 +1003,11 @@ packages:
 
   extend@3.0.2:
     resolution: {integrity: sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==}
+
+  fallow@3.8.0:
+    resolution: {integrity: sha512-+hsOqLE7ixJu46xcg8R5yYLVDWux9vjJ9smMV6OPXl/kCyMHbU3yo9Uid7Gs/ab3XcMobUixcwQbXbljuhg5+g==}
+    engines: {node: '>=22'}
+    hasBin: true
 
   fast-xml-builder@1.2.0:
     resolution: {integrity: sha512-00aAWieqff+ZJhsXA4g1g7M8k+7AYoMUUHF+/zFb5U6Uv/P0Vl4QZo84/IcufzYalLuEj9928bXN9PbbFzMF0Q==}
@@ -2015,6 +2067,30 @@ snapshots:
   '@esbuild/win32-x64@0.27.7':
     optional: true
 
+  '@fallow-cli/darwin-arm64@3.8.0':
+    optional: true
+
+  '@fallow-cli/darwin-x64@3.8.0':
+    optional: true
+
+  '@fallow-cli/linux-arm64-gnu@3.8.0':
+    optional: true
+
+  '@fallow-cli/linux-arm64-musl@3.8.0':
+    optional: true
+
+  '@fallow-cli/linux-x64-gnu@3.8.0':
+    optional: true
+
+  '@fallow-cli/linux-x64-musl@3.8.0':
+    optional: true
+
+  '@fallow-cli/win32-arm64-msvc@3.8.0':
+    optional: true
+
+  '@fallow-cli/win32-x64-msvc@3.8.0':
+    optional: true
+
   '@google/genai@1.52.0':
     dependencies:
       google-auth-library: 10.7.0
@@ -2382,6 +2458,8 @@ snapshots:
 
   deep-eql@5.0.2: {}
 
+  detect-libc@2.1.2: {}
+
   diff@8.0.4: {}
 
   ecdsa-sig-formatter@1.0.11:
@@ -2426,6 +2504,19 @@ snapshots:
   expect-type@1.3.0: {}
 
   extend@3.0.2: {}
+
+  fallow@3.8.0:
+    dependencies:
+      detect-libc: 2.1.2
+    optionalDependencies:
+      '@fallow-cli/darwin-arm64': 3.8.0
+      '@fallow-cli/darwin-x64': 3.8.0
+      '@fallow-cli/linux-arm64-gnu': 3.8.0
+      '@fallow-cli/linux-arm64-musl': 3.8.0
+      '@fallow-cli/linux-x64-gnu': 3.8.0
+      '@fallow-cli/linux-x64-musl': 3.8.0
+      '@fallow-cli/win32-arm64-msvc': 3.8.0
+      '@fallow-cli/win32-x64-msvc': 3.8.0
 
   fast-xml-builder@1.2.0:
     dependencies:

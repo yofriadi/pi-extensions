@@ -1,0 +1,42 @@
+#:schema https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json
+
+# Monorepo: Pi loads each package by path (no main/exports field), so declare the
+# entry files explicitly. Globs resolve relative to the repo root and cover both
+# root-level index.ts (pi-condense, pi-session-recap) and src/index.ts
+# (pi-provider-antigravity, pi-toon).
+entry = ["packages/*/index.ts", "packages/*/src/index.ts"]
+ignoreExportsUsedInFile = true
+ignoreDependencies = [
+	"@biomejs/biome",
+	"rumdl",
+	"fallow",
+	"typescript",
+	"vitest",
+]
+ignorePatterns = [
+	"**/vendor/**",
+	"**/node_modules/**",
+	"packages/pi-condense/**",
+	".fallow/**",
+	".rumdl_cache/**",
+]
+
+# describe()/it() callbacks are whole-suite closures; relax the unit-size
+# ceiling for test files so health stays prod-focused (complexity/CRAP checks
+# unchanged).
+[[health.thresholdOverrides]]
+files = ["**/*.test.*", "**/*.spec.*", "**/test/**", "**/tests/**"]
+maxUnitSize = 500
+reason = "describe()/it() callbacks are whole-suite closures; relax the unit-size ceiling for test files so health stays prod-focused (complexity/CRAP checks unchanged)."
+
+[rules]
+unused-files = "error"
+unused-exports = "error"
+unused-types = "error"
+unused-class-members = "error"
+circular-dependencies = "error"
+unlisted-dependencies = "error"
+unresolved-imports = "error"
+unused-dev-dependencies = "error"
+dev-dependencies-in-production = "error"
+stale-suppressions = "error"
