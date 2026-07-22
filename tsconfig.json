@@ -3,6 +3,7 @@
 	"include": [],
 	"references": [
 		{ "path": "./packages/pi-provider-antigravity" },
+		{ "path": "./packages/pi-provider-kiro" },
 		{ "path": "./packages/pi-toon" },
 		{ "path": "./packages/pi-session-recap" }
 	]

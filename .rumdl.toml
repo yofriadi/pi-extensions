@@ -1,0 +1,22 @@
+[global]
+# Subtree-vendored packages and vendored sources are upstream-owned; never lint or reformat them.
+exclude = ["**/CHANGELOG.md", "packages/pi-condense/**", "packages/pi-subagents/**", "packages/pi-session-recap/**", "packages/pi-provider-antigravity/src/vendor/**", "node_modules/**", ".rumdl_cache/**"]
+disable = ["MD041"]
+extend-enable = ["MD060"]
+
+[MD013]
+line-length = 0
+reflow = true
+reflow-mode = "sentence-per-line"
+
+[MD024]
+siblings_only = true
+
+[MD029]
+style = "ordered"
+
+[MD033]
+allowed_elements = ["p", "img"]
+
+[MD060]
+style = "aligned"

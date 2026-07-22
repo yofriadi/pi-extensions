@@ -7,10 +7,12 @@
 		"test": "pnpm -r --if-present test",
 		"update:session-recap": "bash scripts/update-session-recap-subtree.sh",
 		"check": "biome check . && tsc --noEmit -p packages/pi-provider-antigravity/tsconfig.json && tsc --noEmit -p packages/pi-provider-kiro/tsconfig.json && tsc --noEmit -p packages/pi-session-recap/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
-		"check:fix": "biome check --write ."
+		"check:fix": "biome check --write .",
+		"prepare": "command -v prek >/dev/null 2>&1 && prek install || echo \"prek not found — skipping hook install (see README)\""
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
+		"rumdl": "^0.2.40",
 		"@types/node": "22.19.19",
 		"typescript": "5.9.3",
 		"vitest": "3.2.4"

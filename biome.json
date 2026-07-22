@@ -48,5 +48,18 @@
 				}
 			}
 		},
+		{
+			"includes": ["packages/pi-provider-kiro/**"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedVariables": "off"
+					},
+					"suspicious": {
+						"noExplicitAny": "off"
+					}
+				}
+			}
+		}
 	]
 }

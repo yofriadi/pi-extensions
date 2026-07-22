@@ -1,0 +1,20 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+default_install_hook_types = ["pre-commit"]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "trailing-whitespace", exclude = '''packages/(pi-condense|pi-subagents|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/''' },
+    { id = "end-of-file-fixer", exclude = '''packages/(pi-condense|pi-subagents|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/''' },
+    { id = "check-added-large-files" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "biome", name = "biome", entry = "pnpm exec biome check --write --files-ignore-unknown=true", language = "system", types_or = ["javascript", "jsx", "ts", "tsx", "json"] },
+    { id = "rumdl", name = "rumdl", entry = "pnpm exec rumdl fmt", language = "system", files = "\\.md$", exclude = '''packages/(pi-condense|pi-subagents|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/''' },
+]
