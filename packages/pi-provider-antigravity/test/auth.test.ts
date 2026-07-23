@@ -223,7 +223,6 @@ describe("google-antigravity stream fallback", () => {
 		const gemini3 = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.6-flash") as Model<"google-gemini-cli">;
 		if (!claude || !gemini3) throw new Error("expected Antigravity models missing");
 
-
 		const captured: string[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
 			if (typeof init?.body === "string") {
@@ -235,7 +234,6 @@ describe("google-antigravity stream fallback", () => {
 			});
 		});
 
-
 		// Claude Opus 4.6 with reasoning on -> thinking variant
 		await streamSimpleGoogleGeminiCli(
 			claude,
@@ -243,7 +241,6 @@ describe("google-antigravity stream fallback", () => {
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }), reasoning: "high" },
 		).result();
 		expect(captured.at(-1)).toBe("claude-opus-4-6-thinking");
-
 
 		captured.length = 0;
 		// Claude Opus 4.6 with reasoning off -> still thinking (no off route)
@@ -254,17 +251,14 @@ describe("google-antigravity stream fallback", () => {
 		).result();
 		expect(captured.at(-1)).toBe("claude-opus-4-6-thinking");
 
-
 		captured.length = 0;
 		// Gemini 3.6 Flash high -> high
 		await streamSimpleGoogleGeminiCli(
 			gemini3,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: JSON.stringify({ token: "t", projectId: "p" }), reasoning: "high" },
-
 		).result();
 		expect(captured.at(-1)).toBe("gemini-3.6-flash-high");
-
 
 		captured.length = 0;
 		// Gemini 3.6 Flash off -> low runtime tier

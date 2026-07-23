@@ -224,7 +224,7 @@ export const ANTIGRAVITY_MODELS: AntigravityModel[] = [
 		contextWindow: 131072,
 		maxTokens: 32768,
 	},
-]
+];
 
 export interface AntigravityCliSelection {
 	label: string;

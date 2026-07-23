@@ -466,8 +466,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 
 					// Check if retryable (429, 5xx, network patterns)
 					if (attempt + 1 < maxAttempts && isRetryableError(response.status, errorText)) {
-						// Advance endpoint if possible
-						if (endpointIndex < endpoints.length - 1) {
+						// A 429 is account/model quota state, not an endpoint miss. Keep
+						// retrying the same endpoint so a later fallback 404 cannot mask
+						// the actionable quota error. Server errors may still use the
+						// compatibility endpoint chain.
+						if (response.status >= 500 && endpointIndex < endpoints.length - 1) {
 							endpointIndex++;
 						}
 

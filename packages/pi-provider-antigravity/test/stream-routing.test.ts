@@ -75,4 +75,33 @@ describe("Gemini 3.5 Flash stream routing", () => {
 		expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/^https:\/\/daily-cloudcode-pa\.googleapis\.com\//);
 		expect(response.stopReason).toBe("error");
 	});
+
+	it("does not mask a quota error with a fallback endpoint 404", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.startsWith("https://daily-cloudcode-pa.googleapis.com/")) {
+				return new Response(JSON.stringify({ error: { message: "Individual quota reached." } }), {
+					status: 429,
+				});
+			}
+			return new Response("Requested entity was not found.", { status: 404 });
+		});
+		const model = ANTIGRAVITY_MODELS.find(
+			(candidate) => candidate.id === "gemini-3.6-flash",
+		) as Model<"google-gemini-cli">;
+
+		const response = await streamSimpleGoogleGeminiCli(
+			model,
+			{ messages: [{ role: "user", content: "Reply with OK", timestamp: Date.now() }] },
+			{
+				apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+				reasoning: "low",
+				antigravityValidation: { maxAttempts: 2, maxEmptyStreamRetries: 0 },
+			},
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(response.stopReason).toBe("error");
+		expect(response.errorMessage).toMatch(/429.*quota|quota.*429/i);
+	});
 });
