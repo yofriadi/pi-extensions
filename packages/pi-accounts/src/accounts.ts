@@ -1,8 +1,4 @@
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	AccountStore,
 	consumeMigrationNotice,
@@ -50,10 +46,7 @@ export type AccountsDependencies = {
 	closeCodexWebSockets?: (sessionId?: string) => unknown | Promise<unknown>;
 };
 
-export default function accountsExtension(
-	pi: ExtensionAPI,
-	dependencies: AccountsDependencies = {},
-): void {
+export default function accountsExtension(pi: ExtensionAPI, dependencies: AccountsDependencies = {}): void {
 	const store = dependencies.store ?? new AccountStore();
 	let migrationNotice = dependencies.store ? undefined : consumeMigrationNotice();
 	const providers = [
@@ -62,9 +55,7 @@ export default function accountsExtension(
 	];
 	validateProviderSet(providers);
 	const adapters = new Map(providers.map((provider) => [provider.id, provider]));
-	const coordinators = new Map(
-		providers.map((provider) => [provider.id, new RuntimeAuthCoordinator(pi, provider)]),
-	);
+	const coordinators = new Map(providers.map((provider) => [provider.id, new RuntimeAuthCoordinator(pi, provider)]));
 	const results = new Map<AccountProviderId, EnsureActiveProviderAuthResult>();
 	const appliedIdentities = new Map<AccountProviderId, string>();
 	const abortProviders = new Set<AccountProviderId>();
@@ -89,8 +80,7 @@ export default function accountsExtension(
 				if (latest && latest !== task) return latest;
 				const previousIdentity = appliedIdentities.get(providerId);
 				const shouldInvalidate =
-					previousIdentity !== identity &&
-					!(previousIdentity === undefined && identity === "default");
+					previousIdentity !== identity && !(previousIdentity === undefined && identity === "default");
 				if (shouldInvalidate) {
 					await adapter.invalidateConnections?.(ctx.sessionManager.getSessionId());
 					latest = syncTasks.get(providerId);
@@ -158,12 +148,7 @@ export default function accountsExtension(
 			const result = await syncProvider(providerId, ctx);
 			const coordinator = coordinators.get(providerId);
 			if (result.status === "error") abortProviders.add(providerId);
-			if (
-				result.status === "active" &&
-				ctx.model &&
-				coordinator &&
-				!coordinator.isModelAvailable(ctx.model.id)
-			) {
+			if (result.status === "active" && ctx.model && coordinator && !coordinator.isModelAvailable(ctx.model.id)) {
 				abortProviders.add(providerId);
 				ctx.ui.notify(
 					`${requireAdapter(adapters, providerId).displayName} model ${ctx.model.id} is not available to account "${result.accountName}".`,
@@ -199,10 +184,7 @@ function createAccountCommand(
 	pi: ExtensionAPI,
 	store: AccountStore,
 	adapters: Map<AccountProviderId, AccountProviderAdapter>,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ) {
 	return {
 		description: "Open the interactive subscription account manager",
@@ -229,10 +211,7 @@ async function showAccountsMenu(
 	ctx: ExtensionCommandContext,
 	store: AccountStore,
 	adapters: Map<AccountProviderId, AccountProviderAdapter>,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	if (!ctx.hasUI) {
 		ctx.ui.notify("/accounts requires interactive UI.", "error");
@@ -260,8 +239,7 @@ async function showAccountsMenu(
 		return;
 	}
 	if (action === SWITCH_ANOTHER_PROVIDER_ACTION || action === SWITCH_PROVIDER_ACTION) {
-		const excludeProviderId =
-			action === SWITCH_ANOTHER_PROVIDER_ACTION ? currentProviderId : undefined;
+		const excludeProviderId = action === SWITCH_ANOTHER_PROVIDER_ACTION ? currentProviderId : undefined;
 		const provider = await selectProviderWithAccounts(ctx, states, excludeProviderId);
 		if (provider) await showSwitchProviderAccount(ctx, store, provider.adapter, syncProvider);
 	}
@@ -321,21 +299,13 @@ function buildAccountsMenuActions(
 	if (!hasAnyStoredAccount) return [LOGIN_ACTION];
 	const currentHasAccounts = currentState ? accountNames(currentState).length > 0 : false;
 	if (currentState && currentHasAccounts) {
-		const actions = [
-			switchCurrentProviderAction(currentState.adapter),
-			LOGIN_ACTION,
-			REMOVE_ACTION,
-		];
+		const actions = [switchCurrentProviderAction(currentState.adapter), LOGIN_ACTION, REMOVE_ACTION];
 		if (providerStatesWithAccounts(states, currentState.id).length > 0) {
 			actions.push(SWITCH_ANOTHER_PROVIDER_ACTION);
 		}
 		return actions;
 	}
-	return [
-		LOGIN_ACTION,
-		currentState ? SWITCH_ANOTHER_PROVIDER_ACTION : SWITCH_PROVIDER_ACTION,
-		REMOVE_ACTION,
-	];
+	return [LOGIN_ACTION, currentState ? SWITCH_ANOTHER_PROVIDER_ACTION : SWITCH_PROVIDER_ACTION, REMOVE_ACTION];
 }
 
 function switchCurrentProviderAction(adapter: AccountProviderAdapter): string {
@@ -347,15 +317,9 @@ async function showLoginAccount(
 	ctx: ExtensionCommandContext,
 	store: AccountStore,
 	adapters: Map<AccountProviderId, AccountProviderAdapter>,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
-	const adapter = await selectProvider(
-		ctx,
-		sortedProviderStates(await readProviderMenuStates(store, adapters)),
-	);
+	const adapter = await selectProvider(ctx, sortedProviderStates(await readProviderMenuStates(store, adapters)));
 	if (!adapter) return;
 	const name = await ctx.ui.input(`Name this ${adapter.displayName} account:`, "work");
 	if (name === undefined) return;
@@ -366,10 +330,7 @@ async function showSwitchProviderAccount(
 	ctx: ExtensionCommandContext,
 	store: AccountStore,
 	adapter: AccountProviderAdapter,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	const state = await store.readProviderAsync(adapter.id);
 	const options = switchAccountOptions(state.active, Object.keys(state.accounts));
@@ -410,10 +371,7 @@ async function showRemoveAccount(
 	ctx: ExtensionCommandContext,
 	store: AccountStore,
 	adapters: Map<AccountProviderId, AccountProviderAdapter>,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	const states = await readProviderMenuStates(store, adapters);
 	const options = removeAccountOptions(states, toProviderId(ctx.model?.provider));
@@ -435,17 +393,13 @@ async function showRemoveAccount(
 	await removeAccount(ctx, store, option.adapter, option.accountName, syncProvider);
 }
 
-function sortedProviderStates(
-	states: Map<AccountProviderId, ProviderMenuState>,
-): ProviderMenuState[];
+function sortedProviderStates(states: Map<AccountProviderId, ProviderMenuState>): ProviderMenuState[];
 function sortedProviderStates(states: readonly ProviderMenuState[]): ProviderMenuState[];
 function sortedProviderStates(
 	states: Map<AccountProviderId, ProviderMenuState> | readonly ProviderMenuState[],
 ): ProviderMenuState[] {
 	const values = Array.isArray(states) ? [...states] : [...states.values()];
-	return values.sort((left, right) =>
-		left.adapter.displayName.localeCompare(right.adapter.displayName),
-	);
+	return values.sort((left, right) => left.adapter.displayName.localeCompare(right.adapter.displayName));
 }
 
 function providerStatesWithAccounts(
@@ -518,10 +472,7 @@ async function loginAccount(
 	store: AccountStore,
 	adapter: AccountProviderAdapter,
 	nameArg: string,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	const parsed = parseAccountName(nameArg);
 	if (!parsed.ok) return ctx.ui.notify(parsed.error, "warning");
@@ -558,10 +509,7 @@ async function loginAccount(
 			result.status === "active" ? "info" : "error",
 		);
 	} catch (error) {
-		ctx.ui.notify(
-			`${adapter.displayName} login failed: ${redactTokenText(errorMessage(error))}`,
-			"error",
-		);
+		ctx.ui.notify(`${adapter.displayName} login failed: ${redactTokenText(errorMessage(error))}`, "error");
 	}
 }
 
@@ -570,10 +518,7 @@ async function switchAccount(
 	store: AccountStore,
 	adapter: AccountProviderAdapter,
 	nameArg: string,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	let name = nameArg.trim();
 	if (!name) {
@@ -630,10 +575,7 @@ async function removeAccount(
 	store: AccountStore,
 	adapter: AccountProviderAdapter,
 	nameArg: string,
-	syncProvider: (
-		providerId: AccountProviderId,
-		ctx: ExtensionContext,
-	) => Promise<EnsureActiveProviderAuthResult>,
+	syncProvider: (providerId: AccountProviderId, ctx: ExtensionContext) => Promise<EnsureActiveProviderAuthResult>,
 ): Promise<void> {
 	const parsed = parseAccountName(nameArg);
 	if (!parsed.ok) return ctx.ui.notify(parsed.error, "warning");
@@ -694,9 +636,7 @@ function isAccountProviderId(value: string): value is AccountProviderId {
 
 function isDefaultPiLoginArg(value: string): boolean {
 	const normalized = value.trim().toLowerCase();
-	return (
-		normalized === "default" || normalized === "--default" || normalized === DEFAULT_PI_LOGIN_LABEL
-	);
+	return normalized === "default" || normalized === "--default" || normalized === DEFAULT_PI_LOGIN_LABEL;
 }
 
 function formatActivationMessage(
@@ -705,11 +645,7 @@ function formatActivationMessage(
 	name: string,
 	result: EnsureActiveProviderAuthResult,
 ): string {
-	if (
-		result.status !== "inactive" &&
-		result.accountName !== "unknown" &&
-		result.accountName !== name
-	) {
+	if (result.status !== "inactive" && result.accountName !== "unknown" && result.accountName !== name) {
 		return `${action} ${adapter.displayName} account "${name}" was superseded by "${result.accountName}" before activation.`;
 	}
 	if (result.status === "error") {
@@ -735,10 +671,7 @@ async function selectedCredential(
 	}
 }
 
-async function authIdentity(
-	store: AccountStore,
-	result: EnsureActiveProviderAuthResult,
-): Promise<string> {
+async function authIdentity(store: AccountStore, result: EnsureActiveProviderAuthResult): Promise<string> {
 	if (result.status === "inactive") return "default";
 	if (result.status === "error") return `error:${result.accountName}`;
 	const state = await store.readProviderAsync(result.providerId);
@@ -779,10 +712,7 @@ async function selectDefaultModelIfUnknown(
 	if (!adapter.defaultModelId || !isUnknownModel(ctx.model)) return;
 	const model = ctx.modelRegistry.find(adapter.id, adapter.defaultModelId);
 	if (!model) {
-		ctx.ui.notify(
-			`Logged in, but ${adapter.id}/${adapter.defaultModelId} was not found.`,
-			"warning",
-		);
+		ctx.ui.notify(`Logged in, but ${adapter.id}/${adapter.defaultModelId} was not found.`, "warning");
 		return;
 	}
 	if (!(await pi.setModel(model))) {

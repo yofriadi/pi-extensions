@@ -70,10 +70,7 @@ export function createBuiltinProviderAdapters(
 	];
 }
 
-export function createOAuthInteraction(
-	ctx: ExtensionCommandContext,
-	providerName: string,
-): AuthInteraction {
+export function createOAuthInteraction(ctx: ExtensionCommandContext, providerName: string): AuthInteraction {
 	return {
 		signal: ctx.signal,
 		prompt: async (prompt) => promptForOAuth(ctx, prompt),
@@ -81,10 +78,7 @@ export function createOAuthInteraction(
 	};
 }
 
-function createLazyProviderOwnedOAuth(
-	providerId: AccountProviderId,
-	loader: ProviderModuleLoader,
-): ProviderOwnedOAuth {
+function createLazyProviderOwnedOAuth(providerId: AccountProviderId, loader: ProviderModuleLoader): ProviderOwnedOAuth {
 	const load = () => loadProviderOwnedOAuth(providerId, loader);
 	return {
 		login: async (interaction) => (await load()).login(interaction),
@@ -100,8 +94,7 @@ async function loadProviderOwnedOAuth(
 	let promise = oauthPromises.get(providerId);
 	if (!promise) {
 		promise = loader().then((module) => {
-			const oauth = module.builtinProviders().find((provider) => provider.id === providerId)
-				?.auth.oauth;
+			const oauth = module.builtinProviders().find((provider) => provider.id === providerId)?.auth.oauth;
 			if (!oauth) throw new Error(`Pi's built-in ${providerId} OAuth provider is unavailable.`);
 			return oauth;
 		});
@@ -132,17 +125,10 @@ async function promptForOAuth(ctx: ExtensionCommandContext, prompt: AuthPrompt):
 	return value;
 }
 
-function notifyOAuthEvent(
-	ctx: ExtensionCommandContext,
-	providerName: string,
-	event: AuthEvent,
-): void {
+function notifyOAuthEvent(ctx: ExtensionCommandContext, providerName: string, event: AuthEvent): void {
 	switch (event.type) {
 		case "info":
-			ctx.ui.notify(
-				[event.message, ...(event.links ?? []).map((link) => link.url)].join("\n"),
-				"info",
-			);
+			ctx.ui.notify([event.message, ...(event.links ?? []).map((link) => link.url)].join("\n"), "info");
 			break;
 		case "auth_url":
 			ctx.ui.notify(

@@ -80,9 +80,7 @@ export type StorageLockResult<T> = {
 
 export interface AccountStorageBackend {
 	withLock<T>(mutator: (current: string | undefined) => StorageLockResult<T>): T;
-	withLockAsync<T>(
-		mutator: (current: string | undefined) => Promise<StorageLockResult<T>>,
-	): Promise<T>;
+	withLockAsync<T>(mutator: (current: string | undefined) => Promise<StorageLockResult<T>>): Promise<T>;
 }
 
 export class FileAccountStorageBackend implements AccountStorageBackend {
@@ -104,9 +102,7 @@ export class FileAccountStorageBackend implements AccountStorageBackend {
 		}
 	}
 
-	async withLockAsync<T>(
-		mutator: (current: string | undefined) => Promise<StorageLockResult<T>>,
-	): Promise<T> {
+	async withLockAsync<T>(mutator: (current: string | undefined) => Promise<StorageLockResult<T>>): Promise<T> {
 		this.ensureFileExists();
 		let release: (() => Promise<void>) | undefined;
 		let compromisedError: Error | undefined;
@@ -223,9 +219,7 @@ export class InMemoryAccountStorageBackend implements AccountStorageBackend {
 		return result;
 	}
 
-	async withLockAsync<T>(
-		mutator: (current: string | undefined) => Promise<StorageLockResult<T>>,
-	): Promise<T> {
+	async withLockAsync<T>(mutator: (current: string | undefined) => Promise<StorageLockResult<T>>): Promise<T> {
 		const { result, next } = await mutator(this.value);
 		if (next !== undefined) this.value = next;
 		return result;

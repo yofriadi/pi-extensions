@@ -17,11 +17,7 @@ import { basename, dirname, join } from "node:path";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type AccountProviderId, SUPPORTED_PROVIDER_IDS } from "./oauth.js";
-import {
-	type AccountStorageBackend,
-	FileAccountStorageBackend,
-	InMemoryAccountStorageBackend,
-} from "./storage.js";
+import { type AccountStorageBackend, FileAccountStorageBackend, InMemoryAccountStorageBackend } from "./storage.js";
 
 export const ACCOUNTS_FILE = "pi-accounts.json";
 export const LEGACY_CODEX_ACCOUNTS_FILE = "pi-codex-accounts.json";
@@ -90,9 +86,7 @@ export class AccountStore {
 	): Promise<ProviderAccountsData> {
 		let updated = emptyProviderState();
 		await this.updateAsync(async (data) => {
-			updated = normalizeProviderState(
-				await mutator(cloneProviderState(data.providers[providerId])),
-			);
+			updated = normalizeProviderState(await mutator(cloneProviderState(data.providers[providerId])));
 			return {
 				...data,
 				providers: defineOwn(data.providers, providerId, updated),
@@ -102,9 +96,7 @@ export class AccountStore {
 	}
 
 	async writeRawForTest(raw: string): Promise<void> {
-		await this.serialized(async () =>
-			this.backend.withLockAsync(async () => ({ result: undefined, next: raw })),
-		);
+		await this.serialized(async () => this.backend.withLockAsync(async () => ({ result: undefined, next: raw })));
 	}
 
 	private async serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -122,16 +114,13 @@ export class AccountStore {
 	}
 }
 
-export function parseAccountName(
-	input: string,
-): { ok: true; name: string } | { ok: false; error: string } {
+export function parseAccountName(input: string): { ok: true; name: string } | { ok: false; error: string } {
 	const name = input.trim();
 	if (!name) return { ok: false, error: "Account name is required." };
 	if (!ACCOUNT_NAME_RE.test(name)) {
 		return {
 			ok: false,
-			error:
-				"Account names must be 1-64 characters using letters, numbers, dot, underscore, or hyphen.",
+			error: "Account names must be 1-64 characters using letters, numbers, dot, underscore, or hyphen.",
 		};
 	}
 	return { ok: true, name };
@@ -151,8 +140,7 @@ export function parseAccountsData(raw: string | undefined): AccountsData {
 function normalizeAccountsData(value: unknown): AccountsData {
 	if (!isRecord(value)) throw new Error("Invalid accounts data: expected an object.");
 	if (value.version !== 1) throw new Error("Invalid accounts data: version must be 1.");
-	if (!isRecord(value.providers))
-		throw new Error("Invalid accounts data: providers must be an object.");
+	if (!isRecord(value.providers)) throw new Error("Invalid accounts data: providers must be an object.");
 	const providers = Object.create(null) as Record<string, ProviderAccountsData>;
 	for (const [providerId, state] of Object.entries(value.providers)) {
 		if (!isAccountProviderId(providerId)) {
@@ -171,8 +159,7 @@ function normalizeAccountsData(value: unknown): AccountsData {
 function normalizeProviderState(value: unknown): ProviderAccountsData {
 	if (!isRecord(value)) throw new Error("Invalid accounts data: provider state must be an object.");
 	const active = parseActiveAccount(value.active);
-	if (!isRecord(value.accounts))
-		throw new Error("Invalid accounts data: accounts must be an object.");
+	if (!isRecord(value.accounts)) throw new Error("Invalid accounts data: accounts must be an object.");
 	const accounts = Object.create(null) as Record<string, StoredOAuthCredential>;
 	for (const [name, credential] of Object.entries(value.accounts)) {
 		const parsedName = parseAccountName(name);
@@ -187,10 +174,7 @@ function normalizeProviderState(value: unknown): ProviderAccountsData {
 	return active ? { active, accounts } : { accounts };
 }
 
-export function normalizeStoredCredential(
-	value: unknown,
-	accountName: string,
-): StoredOAuthCredential {
+export function normalizeStoredCredential(value: unknown, accountName: string): StoredOAuthCredential {
 	const cloned = cloneJsonValue(value, new Set(), `${accountName} credential`);
 	if (!isRecord(cloned)) {
 		throw new Error(`Invalid accounts data: ${accountName} credential must be an object.`);
@@ -315,11 +299,7 @@ function migrateReleasedCodexData(raw: string | undefined): AccountsData {
 	const state = normalizeProviderState({ active: parsed.active, accounts: parsed.accounts });
 	return {
 		version: 1,
-		providers: defineOwn(
-			Object.create(null) as Record<string, ProviderAccountsData>,
-			"openai-codex",
-			state,
-		),
+		providers: defineOwn(Object.create(null) as Record<string, ProviderAccountsData>, "openai-codex", state),
 	};
 }
 
@@ -328,10 +308,7 @@ let pendingMigrationNotice: string | undefined;
 function createDefaultBackend(): AccountStorageBackend {
 	const agentDir = getAgentDir();
 	const canonical = join(agentDir, ACCOUNTS_FILE);
-	const legacyCandidates = [
-		join(agentDir, LEGACY_CODEX_ACCOUNTS_FILE),
-		join(agentDir, OLDEST_CODEX_ACCOUNTS_FILE),
-	];
+	const legacyCandidates = [join(agentDir, LEGACY_CODEX_ACCOUNTS_FILE), join(agentDir, OLDEST_CODEX_ACCOUNTS_FILE)];
 	pendingMigrationNotice = undefined;
 	for (const legacy of legacyCandidates) {
 		if (!pathEntryExists(legacy) && !pathEntryExists(canonical)) continue;
@@ -342,10 +319,7 @@ function createDefaultBackend(): AccountStorageBackend {
 	return new FileAccountStorageBackend(canonical);
 }
 
-function migrateLegacyCodexAccountsFileSync(
-	legacyPath: string,
-	canonicalPath: string,
-): MigrationResult {
+function migrateLegacyCodexAccountsFileSync(legacyPath: string, canonicalPath: string): MigrationResult {
 	cleanupStaleMigrationTemps(canonicalPath);
 	if (pathEntryExists(canonicalPath)) {
 		validateCanonicalAccountsFile(canonicalPath);

@@ -4,7 +4,7 @@
 # entry files explicitly. Globs resolve relative to the repo root and cover both
 # root-level index.ts (pi-condense, pi-session-recap) and src/index.ts
 # (pi-provider-antigravity, pi-toon).
-entry = ["packages/*/index.ts", "packages/*/src/index.ts"]
+entry = ["packages/*/index.ts", "packages/*/src/index.ts", "packages/*/src/accounts.ts"]
 ignoreExportsUsedInFile = true
 ignoreDependencies = [
 	"@biomejs/biome",

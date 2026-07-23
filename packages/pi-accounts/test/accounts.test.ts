@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createMockContext, createMockPi } from "../../../test/support.js";
 import accountsExtension, {
 	ACCOUNTS_STATUS_KEY,
 	AccountStore,
@@ -8,18 +7,12 @@ import accountsExtension, {
 	parseAccountName,
 	type StoredOAuthCredential,
 } from "../src/accounts.js";
-import {
-	type AccountProviderAdapter,
-	createBuiltinProviderAdapters,
-	createOAuthInteraction,
-} from "../src/oauth.js";
+import { type AccountProviderAdapter, createBuiltinProviderAdapters, createOAuthInteraction } from "../src/oauth.js";
 import { RuntimeAuthCoordinator } from "../src/runtime-auth.js";
 import { InMemoryAccountStorageBackend } from "../src/storage.js";
+import { createMockContext, createMockPi } from "./support.js";
 
-const credential = (
-	suffix: string,
-	extra: Record<string, unknown> = {},
-): StoredOAuthCredential => ({
+const credential = (suffix: string, extra: Record<string, unknown> = {}): StoredOAuthCredential => ({
 	type: "oauth",
 	access: `access-${suffix}`,
 	refresh: `refresh-${suffix}`,
@@ -37,15 +30,11 @@ function fakeProvider(
 ): AccountProviderAdapter {
 	return {
 		id,
-		displayName:
-			id === "openai-codex" ? "OpenAI Codex" : id === "anthropic" ? "Anthropic" : "GitHub Copilot",
+		displayName: id === "openai-codex" ? "OpenAI Codex" : id === "anthropic" ? "Anthropic" : "GitHub Copilot",
 		requiresApiKeyBridge: options.requiresApiKeyBridge ?? id === "openai-codex",
 		oauth: {
 			async login() {
-				return credential(
-					`login-${id}`,
-					id === "github-copilot" ? { availableModelIds: ["allowed"] } : {},
-				);
+				return credential(`login-${id}`, id === "github-copilot" ? { availableModelIds: ["allowed"] } : {});
 			},
 			async refresh(current) {
 				return { ...current, access: `${current.access}-refreshed`, expires: Date.now() + 60_000 };
@@ -98,9 +87,7 @@ function runtimeHarness(mock: ReturnType<typeof createMockPi>) {
 			return { ...model, baseUrl: config?.baseUrl ?? model.baseUrl };
 		},
 		async getApiKeyAndHeaders(model: { provider: string }) {
-			const config = mock.providers.get(model.provider) as
-				| { headers?: Record<string, string> }
-				| undefined;
+			const config = mock.providers.get(model.provider) as { headers?: Record<string, string> } | undefined;
 			return { ok: true as const, apiKey: keys.get(model.provider), headers: config?.headers };
 		},
 	};
@@ -127,8 +114,7 @@ function createInteractiveAccountContext(
 		select: async (title: string, values: string[]) => {
 			selectCalls.push({ title, options: values });
 			const selected = selections.shift();
-			if (selected !== undefined)
-				assert.ok(values.includes(selected), `Missing option: ${selected}`);
+			if (selected !== undefined) assert.ok(values.includes(selected), `Missing option: ${selected}`);
 			return selected;
 		},
 		input: async (title: string, placeholder?: string) => {
@@ -184,10 +170,7 @@ test("OAuth interaction preserves provider prompts, cancellation, and notificati
 		}),
 		"device",
 	);
-	await assert.rejects(
-		interaction.prompt({ type: "manual_code", message: "Code" }),
-		/Login cancelled/,
-	);
+	await assert.rejects(interaction.prompt({ type: "manual_code", message: "Code" }), /Login cancelled/);
 	interaction.notify({
 		type: "device_code",
 		userCode: "ABCD",
@@ -200,11 +183,7 @@ test("accounts registers only the interactive /accounts command and lifecycle ho
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store: new AccountStore(new InMemoryAccountStorageBackend()),
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 
 	assert.deepEqual([...mock.commands.keys()].sort(), ["accounts"]);
@@ -227,11 +206,7 @@ test("accounts command ignores arguments but requires interactive UI", async () 
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store: new AccountStore(new InMemoryAccountStorageBackend()),
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { ctx, notifications } = createMockContext({ hasUI: false });
 
@@ -246,11 +221,7 @@ test("accounts empty state offers only login and ignores command arguments", asy
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry } = runtimeHarness(mock);
 	const { ctx, selectCalls } = createInteractiveAccountContext(
@@ -279,11 +250,7 @@ test("accounts menu summarizes all supported providers and prioritizes current p
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry } = runtimeHarness(mock);
 	const { ctx, selectCalls } = createInteractiveAccountContext({
@@ -314,11 +281,7 @@ test("accounts menu prioritizes login when the current provider has no saved acc
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry } = runtimeHarness(mock);
 	const { ctx, selectCalls } = createInteractiveAccountContext({
@@ -344,11 +307,7 @@ test("accounts menu uses generic provider switch for unsupported current models"
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry } = runtimeHarness(mock);
 	const { ctx, selectCalls } = createInteractiveAccountContext({
@@ -358,11 +317,7 @@ test("accounts menu uses generic provider switch for unsupported current models"
 
 	await mock.commands.get("accounts")?.handler("ignored", ctx);
 
-	assert.deepEqual(selectCalls[0]?.options, [
-		"Login new account",
-		"Switch provider account",
-		"Remove account",
-	]);
+	assert.deepEqual(selectCalls[0]?.options, ["Login new account", "Switch provider account", "Remove account"]);
 });
 
 test("switch another provider account selects provider before account", async () => {
@@ -374,11 +329,7 @@ test("switch another provider account selects provider before account", async ()
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry, keys } = runtimeHarness(mock);
 	const { ctx, selectCalls } = createInteractiveAccountContext(
@@ -406,11 +357,7 @@ test("provider accounts activate independently and default clears only one provi
 		},
 	});
 	const mock = createMockPi();
-	const providers = [
-		fakeProvider("openai-codex"),
-		fakeProvider("anthropic"),
-		fakeProvider("github-copilot"),
-	];
+	const providers = [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")];
 	accountsExtension(mock.pi, { store, providers });
 	const { registry, keys } = runtimeHarness(mock);
 	const { ctx, notifications } = createInteractiveAccountContext(
@@ -632,11 +579,7 @@ test("generic login stores the full provider-owned credential and activates it",
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry, keys } = runtimeHarness(mock);
 	const { ctx } = createInteractiveAccountContext(
@@ -659,11 +602,7 @@ test("login rejects default as a reserved account name", async () => {
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry } = runtimeHarness(mock);
 	const { ctx, notifications } = createInteractiveAccountContext(
@@ -830,17 +769,13 @@ test("Copilot account switches rebuild model filtering from the complete pre-ove
 
 	await coordinator.ensureActive(ctx, store);
 	assert.deepEqual(
-		(mock.providers.get("github-copilot") as { models: Array<{ id: string }> }).models.map(
-			(model) => model.id,
-		),
+		(mock.providers.get("github-copilot") as { models: Array<{ id: string }> }).models.map((model) => model.id),
 		["allowed"],
 	);
 	await store.updateProvider("github-copilot", (state) => ({ ...state, active: "second" }));
 	await coordinator.ensureActive(ctx, store);
 	assert.deepEqual(
-		(mock.providers.get("github-copilot") as { models: Array<{ id: string }> }).models.map(
-			(model) => model.id,
-		),
+		(mock.providers.get("github-copilot") as { models: Array<{ id: string }> }).models.map((model) => model.id),
 		["blocked"],
 	);
 });
@@ -900,10 +835,7 @@ test("invalid refreshed credentials fail closed instead of escaping storage vali
 	const result = await coordinator.ensureActive(ctx, store);
 	assert.equal(result.status, "error");
 	assert.equal(keys.get("anthropic"), FAIL_CLOSED_API_KEY);
-	assert.equal(
-		(await store.readProviderAsync("anthropic")).accounts.work?.access,
-		"access-expired",
-	);
+	assert.equal((await store.readProviderAsync("anthropic")).accounts.work?.access, "access-expired");
 });
 
 test("fail-closed runtime keys are attempted even when a provider overlay is rejected", async () => {
@@ -1099,11 +1031,7 @@ test("remove account confirms and active removal restores default provider auth"
 	const mock = createMockPi();
 	accountsExtension(mock.pi, {
 		store,
-		providers: [
-			fakeProvider("openai-codex"),
-			fakeProvider("anthropic"),
-			fakeProvider("github-copilot"),
-		],
+		providers: [fakeProvider("openai-codex"), fakeProvider("anthropic"), fakeProvider("github-copilot")],
 	});
 	const { registry, keys } = runtimeHarness(mock);
 	const { ctx, confirmCalls } = createInteractiveAccountContext(

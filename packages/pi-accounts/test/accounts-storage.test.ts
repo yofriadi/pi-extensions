@@ -3,12 +3,7 @@ import { chmod, lstat, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-	ACCOUNTS_FILE,
-	AccountStore,
-	migrateLegacyCodexAccountsFile,
-	parseAccountsData,
-} from "../src/accounts.js";
+import { ACCOUNTS_FILE, AccountStore, migrateLegacyCodexAccountsFile, parseAccountsData } from "../src/accounts.js";
 import { FileAccountStorageBackend, InMemoryAccountStorageBackend } from "../src/storage.js";
 
 const credential = (suffix: string, extra: Record<string, unknown> = {}) => ({
@@ -44,19 +39,13 @@ test("provider-scoped storage preserves independent active accounts and OAuth me
 
 	const stored = await store.readAsync();
 	assert.equal(stored.providers.anthropic?.active, "work");
-	assert.equal(
-		Object.hasOwn(stored.providers.anthropic?.accounts.work ?? {}, "optionalMetadata"),
-		false,
-	);
+	assert.equal(Object.hasOwn(stored.providers.anthropic?.accounts.work ?? {}, "optionalMetadata"), false);
 	assert.equal(stored.providers["github-copilot"]?.active, "personal");
 	assert.deepEqual(stored.providers["github-copilot"]?.accounts.personal?.availableModelIds, [
 		"gpt-4.1",
 		"claude-sonnet-4.5",
 	]);
-	assert.equal(
-		stored.providers["github-copilot"]?.accounts.personal?.enterpriseUrl,
-		"github.example.com",
-	);
+	assert.equal(stored.providers["github-copilot"]?.accounts.personal?.enterpriseUrl, "github.example.com");
 });
 
 test("parsed provider and account maps treat prototype-like names as own properties", () => {
@@ -213,20 +202,15 @@ test("concurrent migrations serialize and install one complete canonical file", 
 	const legacy = join(dir, "pi-codex-accounts.json");
 	const canonical = join(dir, ACCOUNTS_FILE);
 	try {
-		await writeFile(
-			legacy,
-			JSON.stringify({ active: "work", accounts: { work: credential("work") } }),
-			{ mode: 0o600 },
-		);
+		await writeFile(legacy, JSON.stringify({ active: "work", accounts: { work: credential("work") } }), {
+			mode: 0o600,
+		});
 		const results = await Promise.all([
 			migrateLegacyCodexAccountsFile(legacy, canonical),
 			migrateLegacyCodexAccountsFile(legacy, canonical),
 		]);
 		assert.deepEqual(results.map((result) => result.status).sort(), ["canonical", "migrated"]);
-		assert.equal(
-			parseAccountsData(await readFile(canonical, "utf8")).providers["openai-codex"]?.active,
-			"work",
-		);
+		assert.equal(parseAccountsData(await readFile(canonical, "utf8")).providers["openai-codex"]?.active, "work");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -238,21 +222,16 @@ test("migration recovers from stale interrupted temporary files", async () => {
 	const canonical = join(dir, ACCOUNTS_FILE);
 	const staleTemp = join(dir, `.${ACCOUNTS_FILE}.interrupted.tmp`);
 	try {
-		await writeFile(
-			legacy,
-			JSON.stringify({ active: "work", accounts: { work: credential("work") } }),
-			{ mode: 0o600 },
-		);
+		await writeFile(legacy, JSON.stringify({ active: "work", accounts: { work: credential("work") } }), {
+			mode: 0o600,
+		});
 		await writeFile(staleTemp, "partial secret", { mode: 0o600 });
 		const old = new Date(Date.now() - 60_000);
 		await utimes(staleTemp, old, old);
 
 		assert.equal((await migrateLegacyCodexAccountsFile(legacy, canonical)).status, "migrated");
 		await assert.rejects(lstat(staleTemp), /ENOENT/);
-		assert.equal(
-			parseAccountsData(await readFile(canonical, "utf8")).providers["openai-codex"]?.active,
-			"work",
-		);
+		assert.equal(parseAccountsData(await readFile(canonical, "utf8")).providers["openai-codex"]?.active, "work");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -264,10 +243,7 @@ test("migration rejects symlink credential paths without changing their targets"
 	const legacy = join(dir, "pi-codex-accounts.json");
 	const canonical = join(dir, ACCOUNTS_FILE);
 	try {
-		await writeFile(
-			target,
-			JSON.stringify({ active: "old", accounts: { old: credential("old") } }),
-		);
+		await writeFile(target, JSON.stringify({ active: "old", accounts: { old: credential("old") } }));
 		await symlink(target, legacy);
 		await assert.rejects(migrateLegacyCodexAccountsFile(legacy, canonical), /regular file/);
 		assert.ok((await readFile(target, "utf8")).includes("access-old"));
@@ -282,10 +258,7 @@ test("migration gives an existing canonical file precedence without rewriting it
 	const legacy = join(dir, "pi-codex-accounts.json");
 	const canonical = join(dir, ACCOUNTS_FILE);
 	try {
-		await writeFile(
-			legacy,
-			JSON.stringify({ active: "old", accounts: { old: credential("old") } }),
-		);
+		await writeFile(legacy, JSON.stringify({ active: "old", accounts: { old: credential("old") } }));
 		await writeFile(canonical, JSON.stringify({ version: 1, providers: {} }));
 		await chmod(canonical, 0o644);
 

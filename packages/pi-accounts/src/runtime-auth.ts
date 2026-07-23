@@ -137,14 +137,7 @@ export class RuntimeAuthCoordinator {
 			if (refreshError !== undefined) {
 				const selection = await this.activeCredentialMatches(store, active, credential);
 				if (selection.error !== undefined) {
-					return this.failClosed(
-						ctx,
-						operation,
-						runtimeOverride,
-						active,
-						selection.error,
-						credential,
-					);
+					return this.failClosed(ctx, operation, runtimeOverride, active, selection.error, credential);
 				}
 				if (!selection.matches) return this.ensureActive(ctx, store, now);
 				return this.failClosed(ctx, operation, runtimeOverride, active, refreshError, credential);
@@ -158,14 +151,7 @@ export class RuntimeAuthCoordinator {
 		} catch (error) {
 			const selection = await this.activeCredentialMatches(store, active, credential);
 			if (selection.error !== undefined) {
-				return this.failClosed(
-					ctx,
-					operation,
-					runtimeOverride,
-					active,
-					selection.error,
-					credential,
-				);
+				return this.failClosed(ctx, operation, runtimeOverride, active, selection.error, credential);
 			}
 			if (!selection.matches) return this.ensureActive(ctx, store, now);
 			return this.failClosed(ctx, operation, runtimeOverride, active, error, credential);
@@ -237,12 +223,7 @@ export class RuntimeAuthCoordinator {
 	): Promise<EnsureActiveProviderAuthResult> {
 		let suffix = "";
 		try {
-			this.overlay.apply(
-				ctx,
-				operation,
-				{},
-				credential ? safelyReadAvailableModelIds(credential) : undefined,
-			);
+			this.overlay.apply(ctx, operation, {}, credential ? safelyReadAvailableModelIds(credential) : undefined);
 		} catch {
 			suffix = " Pi could not apply the fail-closed provider overlay.";
 		}
@@ -338,12 +319,7 @@ class RuntimeProviderOverlay {
 		return this.generation;
 	}
 
-	apply(
-		ctx: ExtensionContext,
-		generation: number,
-		auth: ModelAuth,
-		availableModelIds?: readonly string[],
-	): boolean {
+	apply(ctx: ExtensionContext, generation: number, auth: ModelAuth, availableModelIds?: readonly string[]): boolean {
 		if (generation !== this.generation) return false;
 		const needsOverlay =
 			this.provider.requiresApiKeyBridge ||
@@ -388,10 +364,7 @@ class RuntimeProviderOverlay {
 		this.reset();
 	}
 
-	private buildConfig(
-		auth: ModelAuth,
-		availableModelIds?: readonly string[],
-	): RuntimeProviderConfig {
+	private buildConfig(auth: ModelAuth, availableModelIds?: readonly string[]): RuntimeProviderConfig {
 		const next: RuntimeProviderConfig = { ...(this.previous ?? {}) };
 		if (this.provider.requiresApiKeyBridge) next.apiKey = this.fallbackApiKey;
 		if (auth.baseUrl) next.baseUrl = auth.baseUrl;
@@ -405,10 +378,7 @@ class RuntimeProviderOverlay {
 		return next;
 	}
 
-	private replaceConfig(
-		fallback: RuntimeProviderConfig | undefined,
-		next: RuntimeProviderConfig,
-	): void {
+	private replaceConfig(fallback: RuntimeProviderConfig | undefined, next: RuntimeProviderConfig): void {
 		this.pi.unregisterProvider(this.provider.id);
 		try {
 			if (Object.keys(next).length > 0) this.pi.registerProvider(this.provider.id, next);
@@ -485,13 +455,8 @@ class RuntimeApiKeyController {
 		}
 	}
 
-	private async set(
-		snapshot: RuntimeOverrideSnapshot | undefined,
-		apiKey: string,
-		force = false,
-	): Promise<boolean> {
-		if (!snapshot)
-			throw new Error("This Pi version does not expose runtime provider authentication.");
+	private async set(snapshot: RuntimeOverrideSnapshot | undefined, apiKey: string, force = false): Promise<boolean> {
+		if (!snapshot) throw new Error("This Pi version does not expose runtime provider authentication.");
 		const { generation, state, target } = snapshot;
 		return enqueueMutation(state, async () => {
 			if (state.generation !== generation) return false;
@@ -514,10 +479,7 @@ class RuntimeApiKeyController {
 	}
 }
 
-function readProviderModels(
-	ctx: ExtensionContext,
-	providerId: string,
-): NonNullable<RuntimeProviderConfig["models"]> {
+function readProviderModels(ctx: ExtensionContext, providerId: string): NonNullable<RuntimeProviderConfig["models"]> {
 	const registry = ctx.modelRegistry as unknown as {
 		getAll?: () => readonly Record<string, unknown>[];
 	};
@@ -552,10 +514,7 @@ function mergeConfigHeaders(
 	return result;
 }
 
-function validateModelAuth(
-	auth: unknown,
-	providerName: string,
-): asserts auth is ModelAuth & { apiKey: string } {
+function validateModelAuth(auth: unknown, providerName: string): asserts auth is ModelAuth & { apiKey: string } {
 	if (!isRecord(auth)) throw new Error(`${providerName} OAuth returned invalid request auth.`);
 	if (typeof auth.apiKey !== "string" || !auth.apiKey) {
 		throw new Error(`${providerName} OAuth returned no API key.`);
@@ -620,10 +579,7 @@ function findProviderModel(
 	modelId: string,
 ): { provider: string; id: string; baseUrl?: string } | undefined {
 	const registry = ctx.modelRegistry as unknown as {
-		find?: (
-			provider: string,
-			id: string,
-		) => { provider: string; id: string; baseUrl?: string } | undefined;
+		find?: (provider: string, id: string) => { provider: string; id: string; baseUrl?: string } | undefined;
 	};
 	return typeof registry.find === "function" ? registry.find(providerId, modelId) : undefined;
 }
@@ -631,21 +587,13 @@ function findProviderModel(
 async function getApiKeyAndHeaders(
 	ctx: ExtensionContext,
 	model: { provider: string; id: string; baseUrl?: string },
-): Promise<
-	| { ok: true; apiKey?: string; headers?: Record<string, string> }
-	| { ok: false; error: string }
-	| undefined
-> {
+): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string } | undefined> {
 	const registry = ctx.modelRegistry as unknown as {
 		getApiKeyAndHeaders?: (
 			candidate: unknown,
-		) => Promise<
-			{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }
-		>;
+		) => Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
 	};
-	return typeof registry.getApiKeyAndHeaders === "function"
-		? registry.getApiKeyAndHeaders(model)
-		: undefined;
+	return typeof registry.getApiKeyAndHeaders === "function" ? registry.getApiKeyAndHeaders(model) : undefined;
 }
 
 function defineOwn(
@@ -663,17 +611,11 @@ function defineOwn(
 	return next;
 }
 
-function getOwnCredential(
-	accounts: Record<string, OAuthCredential>,
-	name: string,
-): OAuthCredential | undefined {
+function getOwnCredential(accounts: Record<string, OAuthCredential>, name: string): OAuthCredential | undefined {
 	return Object.hasOwn(accounts, name) ? accounts[name] : undefined;
 }
 
-function getRegisteredProviderConfig(
-	ctx: ExtensionContext,
-	providerId: string,
-): RuntimeProviderConfig | undefined {
+function getRegisteredProviderConfig(ctx: ExtensionContext, providerId: string): RuntimeProviderConfig | undefined {
 	const registry = ctx.modelRegistry as unknown as {
 		getRegisteredProviderConfig?: (provider: string) => RuntimeProviderConfig | undefined;
 		registeredProviders?: Map<string, RuntimeProviderConfig>;
@@ -681,9 +623,7 @@ function getRegisteredProviderConfig(
 	if (typeof registry.getRegisteredProviderConfig === "function") {
 		return registry.getRegisteredProviderConfig(providerId);
 	}
-	return registry.registeredProviders instanceof Map
-		? registry.registeredProviders.get(providerId)
-		: undefined;
+	return registry.registeredProviders instanceof Map ? registry.registeredProviders.get(providerId) : undefined;
 }
 
 function shallowConfigEqual(
@@ -750,15 +690,10 @@ function redactCredentialError(error: unknown, credential: OAuthCredential): str
 
 export function redactTokenText(text: string, exactSecrets: readonly string[] = []): string {
 	const secrets = [...new Set(exactSecrets.filter(Boolean))].sort((a, b) => b.length - a.length);
-	const exact = secrets.length
-		? new RegExp(secrets.map((secret) => escapeRegExp(secret)).join("|"), "g")
-		: undefined;
+	const exact = secrets.length ? new RegExp(secrets.map((secret) => escapeRegExp(secret)).join("|"), "g") : undefined;
 	return (exact ? text.replace(exact, "<redacted>") : text)
 		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer <redacted>")
-		.replace(
-			/"(access|refresh|access_token|refresh_token|token)"\s*:\s*"[^"]+"/gi,
-			'"$1":"<redacted>"',
-		)
+		.replace(/"(access|refresh|access_token|refresh_token|token)"\s*:\s*"[^"]+"/gi, '"$1":"<redacted>"')
 		.replace(/\b(access|refresh)[_-][A-Za-z0-9._~+/=-]+/gi, "$1-<redacted>");
 }
 

@@ -29,7 +29,8 @@
 	"scripts": {
 		"check": "biome check . && npm run typecheck",
 		"format": "biome check --write .",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "node scripts/run-tests.mjs"
 	},
 	"dependencies": {
 		"proper-lockfile": "^4.1.2"
