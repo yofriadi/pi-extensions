@@ -35,17 +35,21 @@ See `packages/pi-provider-antigravity/README.md` for model IDs and provider deta
 ## Development
 
 ```bash
-pnpm install                         # install workspace deps (incl. peer deps)
+pnpm install                         # install workspace deps + git hooks (prek)
 pnpm test                            # run all tests
 pnpm run check                       # biome + tsc
 pnpm run check:fix                   # biome --write
 ```
 
+Git hooks are managed by [prek](https://github.com/j178/prek) (`@j178/prek`).
+`pnpm install` runs `prek install` via the `prepare` script.
+Config lives in `prek.toml` (biome, rumdl, trailing whitespace, EOF, large files).
+
 Tests are colocated in `packages/pi-provider-antigravity/test/` and exercise both the lower-level OAuth helpers and the full extension-load path through the real Pi loader.
 
 ## Layout
 
-```
+```text
 .
 ├── packages/
 │   └── pi-provider-antigravity/
@@ -69,4 +73,6 @@ Tests are colocated in `packages/pi-provider-antigravity/test/` and exercise bot
 └── README.md
 ```
 
-This is a source-only repo. Pi loads `./src/index.ts` directly via jiti; there is no build step. The `@yofriadi/pi-provider-antigravity` package is published to npm as `@yofriadi/pi-provider-antigravity`; the root workspace is not.
+This is a source-only repo.
+Pi loads `./src/index.ts` directly via jiti; there is no build step.
+The `@yofriadi/pi-provider-antigravity` package is published to npm as `@yofriadi/pi-provider-antigravity`; the root workspace is not.
