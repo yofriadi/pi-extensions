@@ -1,4 +1,4 @@
-import { stream } from "@earendil-works/pi-ai";
+import { stream } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
@@ -151,28 +151,35 @@ async function runOnce(
       return { kind: "auth", message: authMessage };
     }
 
-    // Extension-registered providers ship their own streamSimple implementation.
-    // Prefer it when present; pi-ai's global stream only knows built-in APIs.
-    const registeredProvider =
-      ctx.modelRegistry.getRegisteredProviderConfig?.(model.provider);
-    const requestContext = {
-      messages: [
-        {
-          role: "user" as const,
-          content: [{ type: "text" as const, text: userMessage }],
-          timestamp: Date.now(),
-        },
-      ],
-    };
-    const requestOptions = {
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      signal: combineSignals(options.signal, timeoutController.signal),
-      ...summarizerThinkingOptions(config),
-    };
-    const responseStream = registeredProvider?.streamSimple
-      ? registeredProvider.streamSimple(model, requestContext, requestOptions)
-      : stream(model, requestContext, requestOptions);
+    // Mirror the main loop (model-runtime stream): auth resolution can carry a
+    // seat-specific baseUrl (e.g. GitHub Copilot business/enterprise endpoints).
+    // The shipped model data pins the individual host, which 421s other seats,
+    // so the resolved auth baseUrl must win over the static model baseUrl.
+    const providerAuth = await ctx.modelRegistry.getProviderAuth(model.provider);
+    const effectiveModel = providerAuth?.auth.baseUrl
+      ? { ...model, baseUrl: providerAuth.auth.baseUrl }
+      : model;
+
+    // Pass the combined signal so the underlying fetch is cancelled immediately
+    // either when the user presses Esc, or when an idle/ceiling timeout fires.
+    const responseStream = stream(
+      effectiveModel,
+      {
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: userMessage }],
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+        signal: combineSignals(options.signal, timeoutController.signal),
+        ...summarizerThinkingOptions(config),
+      }
+    );
 
     // Ceiling arms once at call start; idle arms/resets on every stream event
     // (including before the first one, so it also bounds time-to-first-token).
