@@ -30,8 +30,10 @@
  * Model: defaults to the user's currently active model with reasoning/thinking
  * disabled and cache writes disabled. This piggybacks on whatever auth the user
  * already has configured (including custom providers) so there are no login
- * surprises. Override explicitly with `--recap-model "<provider>/<id>"` or the
- * `sessionRecap.model` setting.
+ * surprises. Custom providers with a registered transport are routed directly;
+ * providers whose API is unknown to pi-ai are skipped silently. Override
+ * explicitly with `--recap-model "<provider>/<id>"` or the `sessionRecap.model`
+ * setting.
  *
  * Flags:
  *   --recap-away-seconds <n>   Continuous blur before an away recap (default 90)
@@ -48,7 +50,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Context as AiContext, Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Context as AiContext, Api, AssistantMessage, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -358,9 +360,23 @@ async function generateRecap(
 		typeof getProviderConfig === "function"
 			? getProviderConfig.call(ctx.modelRegistry, model.provider)?.streamSimple
 			: undefined;
-	const response = customStream
-		? await customStream(model, requestContext, requestOptions).result()
-		: await completeSimple(model, requestContext, requestOptions);
+	let response: AssistantMessage;
+	if (customStream) {
+		response = await customStream(model, requestContext, requestOptions).result();
+	} else {
+		try {
+			response = await completeSimple(model, requestContext, requestOptions);
+		} catch (err) {
+			// A provider with no registered custom transport and an API unknown to
+			// pi-ai's compat registry cannot be routed by completeSimple. Skip the
+			// recap silently, matching the documented "failed auth resolution →
+			// skipped silently" behavior.
+			if (err instanceof Error && err.message.startsWith("No API provider registered for api:")) {
+				return undefined;
+			}
+			throw err;
+		}
+	}
 
 	const text = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")

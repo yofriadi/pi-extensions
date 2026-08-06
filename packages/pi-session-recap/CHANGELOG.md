@@ -4,12 +4,21 @@
 
 ### Added
 
-- Support extension-registered custom providers by invoking their `streamSimple` handler from Pi's model registry.
+- Support extension-registered custom providers by invoking their `streamSimple` handler from Pi's model registry, so recaps work for providers that upstream v0.2.2 skips.
 - Support persistent `sessionRecap.model` configuration in the active Pi agent directory's `settings.json`; `--recap-model` takes precedence and `"current"` follows the active session model.
 
 ### Fixed
 
 - Resolve model overrides through Pi's model registry so custom-provider models can be selected.
+- Adopt upstream's silent-skip for providers with neither a registered transport nor a pi-ai compat route: the `completeSimple` fallback is now wrapped so an unroutable API skips the recap instead of logging an error.
+
+## [0.2.2] - 2026-07-21
+
+### Fixed
+- Skip recap generation silently when the active model uses a custom API handler that is registered only in Pi's runtime and cannot be resolved by pi-ai's standalone compatibility layer. Users can still select a supported recap model with `--recap-model`.
+- Publish the metadata-only branch deduplication fix listed under 0.2.1. Version 0.2.2 is the first npm release since 0.2.0.
+
+Thanks to @timvdhoorn for reporting and fixing the custom-provider failure ([#81](https://github.com/tmustier/pi-extensions/pull/81)).
 
 ## [0.2.1] - 2026-07-05
 
