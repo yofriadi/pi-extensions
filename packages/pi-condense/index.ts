@@ -486,6 +486,15 @@ export default function (pi: ExtensionAPI) {
               ? "skipped-deduped"
               : "skipped-trivial";
 
+      // Raw session branch, unwrapped once for the chain-compression block below.
+      // Only materialized when chain compression is enabled.
+      let branchMessages: any[] | undefined;
+      if (currentConfig.value.chainCompression.enabled) {
+        branchMessages = ctx.sessionManager.getBranch()
+          .filter((e: any) => e.type === "message" && e.message)
+          .map((e: any) => e.message);
+      }
+
       const frontierSnapshot: PruneFrontier = {
         lastAttemptedToolCallId: lastTC.toolCallId,
         lastAttemptedToolName: lastTC.toolName,
@@ -524,14 +533,11 @@ export default function (pi: ExtensionAPI) {
       // Non-fatal: a failure here does not roll back the successful summarization.
       if (currentConfig.value.chainCompression.enabled) {
         try {
-          const branch = ctx.sessionManager.getBranch();
-          const branchMessages = branch
-            .filter((e: any) => e.type === "message" && e.message)
-            .map((e: any) => e.message);
           // message_end fires before pi persists the closing assistant, so thread it
           // in here; otherwise the newest chain reads as open and K over-retains by 1.
-          const chains = detectChains(withClosingMessage(branchMessages, options.closingMessage), protectionPredicate);
-          const inGrace = inGraceRecoveryToolCallIds(branchMessages, currentConfig.value.recoveryGraceTurns);
+          // branchMessages was unwrapped once above, gated on chainCompression.enabled.
+          const chains = detectChains(withClosingMessage(branchMessages!, options.closingMessage), protectionPredicate);
+          const inGrace = inGraceRecoveryToolCallIds(branchMessages!, currentConfig.value.recoveryGraceTurns);
           const { compressedEntries } = await compressEligible(
             chains,
             currentConfig.value.chainCompression.rollingWindow,
@@ -818,15 +824,15 @@ export default function (pi: ExtensionAPI) {
     let changed = false;
 
     // pruneMessages is the single source of truth for "is there work to do".
-    // It fast-paths (returns the original array reference) when both the
-    // tool-call index and chain registry are empty, so calling it
-    // unconditionally is safe and avoids a split gate here.
+    // It returns the original array reference (pruned: false) only when none of
+    // the three phases changed anything; index/registry emptiness alone does not
+    // imply a no-op, since error-purge (phase 2) prunes independently of them.
+    // Calling it unconditionally is safe and avoids a split gate here.
     const result = pruneMessages(
       messages,
       indexer,
       currentConfig.value.chainCompression,
       currentConfig.value.purgeErrors,
-      currentConfig.value.thinkingStrip,
       currentConfig.value,
       currentConfig.value.recoveryGraceTurns,
     );
