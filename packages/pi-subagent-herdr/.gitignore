@@ -1,0 +1,9 @@
+node_modules/
+.pi/*
+!.pi/skills/
+!.pi/settings.json
+
+pi-session-*.html
+*.session.html
+*.session-export.html
+pi-mlflow.json
