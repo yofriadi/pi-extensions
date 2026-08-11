@@ -89,16 +89,17 @@ export function getRegion(parentPaneId: string): RegionState | undefined {
 	return getStore().regions.get(parentPaneId);
 }
 
+// fallow-ignore-next-line unused-export -- public region-store query API preserved from HEAD
+export function listRegions(): RegionState[] {
+	return Array.from(getStore().regions.values());
+}
+
 function setRegion(state: RegionState): void {
 	getStore().regions.set(state.parentPaneId, state);
 }
 
 function deleteRegion(parentPaneId: string): void {
 	getStore().regions.delete(parentPaneId);
-}
-
-export function listRegions(): RegionState[] {
-	return Array.from(getStore().regions.values());
 }
 
 /** Optional last TUI render width (set by the widget) for min-size when stdout is non-TTY. */
@@ -173,33 +174,48 @@ export function selectRegionPane(region: RegionState, layout: HerdrPaneLayout | 
 	}
 	if (region.panes.length === 1) return region.panes[0].paneId;
 
-	const regionIds = new Set(region.panes.map((p) => p.paneId));
-	const geoPanes = layout?.panes.filter((p) => regionIds.has(p.paneId)) ?? [];
+	const regionIds = new Set(region.panes.map((pane) => pane.paneId));
+	const geoPanes = layout?.panes.filter((pane) => regionIds.has(pane.paneId)) ?? [];
+	return geoPanes.length > 0
+		? selectTopPane(geoPanes, geometryPaneComparator(region))
+		: selectTopPane(region.panes, fallbackPaneComparator);
+}
 
-	if (geoPanes.length > 0) {
-		const metric = (p: HerdrLayoutPane) => (region.direction === "right" ? p.rect.height : p.rect.width);
+function selectTopPane<T extends { paneId: string }>(panes: T[], comparator: (left: T, right: T) => number): string {
+	return [...panes].sort(comparator)[0].paneId;
+}
 
-		const ranked = [...geoPanes].sort((a, b) => {
-			const diff = metric(b) - metric(a);
-			if (diff !== 0) return diff;
-			if (a.rect.y !== b.rect.y) return a.rect.y - b.rect.y;
-			if (a.rect.x !== b.rect.x) return a.rect.x - b.rect.x;
-			// Durable insertion order (ord), then paneId for total order
-			const ao = region.panes.find((p) => p.paneId === a.paneId)?.ord ?? 0;
-			const bo = region.panes.find((p) => p.paneId === b.paneId)?.ord ?? 0;
-			if (ao !== bo) return ao - bo;
-			return a.paneId < b.paneId ? -1 : a.paneId > b.paneId ? 1 : 0;
-		});
-		return ranked[0].paneId;
-	}
+function geometryPaneComparator(region: RegionState): (left: HerdrLayoutPane, right: HerdrLayoutPane) => number {
+	const ords = new Map(region.panes.map((pane) => [pane.paneId, pane.ord]));
+	return (left, right) =>
+		firstNonZero(
+			geometryMetric(region.direction, right) - geometryMetric(region.direction, left),
+			left.rect.y - right.rect.y,
+			left.rect.x - right.rect.x,
+			paneOrdinal(ords, left.paneId) - paneOrdinal(ords, right.paneId),
+			comparePaneIds(left.paneId, right.paneId),
+		);
+}
 
-	// Depth fallback: shallowest, then durable ord, then paneId.
-	const ranked = [...region.panes].sort((a, b) => {
-		if (a.depth !== b.depth) return a.depth - b.depth;
-		if (a.ord !== b.ord) return a.ord - b.ord;
-		return a.paneId < b.paneId ? -1 : a.paneId > b.paneId ? 1 : 0;
-	});
-	return ranked[0].paneId;
+function geometryMetric(direction: LayoutDirection, pane: HerdrLayoutPane): number {
+	return direction === "right" ? pane.rect.height : pane.rect.width;
+}
+
+function paneOrdinal(ords: Map<string, number>, paneId: string): number {
+	return ords.get(paneId) ?? 0;
+}
+
+function fallbackPaneComparator(left: RegionPane, right: RegionPane): number {
+	return firstNonZero(left.depth - right.depth, left.ord - right.ord, comparePaneIds(left.paneId, right.paneId));
+}
+
+function firstNonZero(...values: number[]): number {
+	return values.find((value) => value !== 0) ?? 0;
+}
+
+function comparePaneIds(left: string, right: string): number {
+	if (left === right) return 0;
+	return left < right ? -1 : 1;
 }
 
 function firstSplitDirection(direction: LayoutDirection): LayoutDirection {
@@ -311,96 +327,137 @@ export type SplitFn = (name: string, direction: LayoutDirection, targetPaneId?: 
 
 export type TabCreateFn = (name: string, cwd?: string) => string;
 
+type AttachDependencies = {
+	splitFn?: SplitFn;
+	tabCreateFn?: TabCreateFn;
+	measure?: { columns?: number; rows?: number };
+	layoutQuery?: (paneId: string) => HerdrPaneLayout | null;
+	paneExists?: (paneId: string) => boolean;
+};
+
+type ResolvedAttach = {
+	direction: LayoutDirection;
+	layoutMode: LayoutMode;
+	surface: SurfaceMode;
+	splitFn: SplitFn;
+	tabCreateFn?: TabCreateFn;
+	layoutQuery: (paneId: string) => HerdrPaneLayout | null;
+	paneExists?: (paneId: string) => boolean;
+	measure?: { columns?: number; rows?: number };
+};
+
 /**
  * Create the next attached-region pane for a parent, or fall back to tab/single.
  *
  * `splitFn` / `tabCreateFn` are injectable for unit tests.
  */
-export function attachPane(
+export function attachPane(parentPaneId: string, options: AttachOptions, deps?: AttachDependencies): AttachResult {
+	const attach = resolveAttach(parentPaneId, options, deps);
+	const specialSurface = nonAttachedSurfaceResult(parentPaneId, options, attach);
+	if (specialSurface) return specialSurface;
+	const initialFallback = initialRegionTabFallback(parentPaneId, options, attach);
+	if (initialFallback) return initialFallback;
+	reapVanishedPanes(parentPaneId, attach.paneExists);
+	const region = getRegion(parentPaneId);
+	if (!region || region.panes.length === 0) return createInitialRegion(parentPaneId, options, attach);
+	return appendToRegion(parentPaneId, options, attach, region);
+}
+
+function resolveAttach(
+	_parentPaneId: string,
+	options: AttachOptions,
+	deps: AttachDependencies | undefined,
+): ResolvedAttach {
+	return {
+		direction: options.direction ?? "right",
+		layoutMode: options.layout ?? "attached",
+		surface: options.surface ?? "pane",
+		splitFn: deps?.splitFn ?? splitCurrentPane,
+		tabCreateFn: deps?.tabCreateFn ?? createSubagentPane,
+		layoutQuery: deps?.layoutQuery ?? getHerdrPaneLayout,
+		paneExists: deps?.paneExists,
+		measure: deps?.measure,
+	};
+}
+
+function nonAttachedSurfaceResult(
 	parentPaneId: string,
 	options: AttachOptions,
-	deps?: {
-		splitFn?: SplitFn;
-		tabCreateFn?: TabCreateFn;
-		measure?: { columns?: number; rows?: number }; // partial ok; axis-aware guard
-		layoutQuery?: (paneId: string) => HerdrPaneLayout | null;
-		/** Override pane existence checks (defaults to herdr pane get). */
-		paneExists?: (paneId: string) => boolean;
-	},
-): AttachResult {
-	const direction = options.direction ?? "right";
-	const layoutMode = options.layout ?? "attached";
-	const surface = options.surface ?? "pane";
-	const splitFn = deps?.splitFn ?? splitCurrentPane;
-	const tabCreateFn = deps?.tabCreateFn ?? createSubagentPane;
-	const layoutQuery = deps?.layoutQuery ?? getHerdrPaneLayout;
-
-	if (surface === "tab" || layoutMode !== "attached") {
-		if (layoutMode === "single" && surface !== "tab") {
-			const paneId = splitFn(options.name, direction, parentPaneId, options.cwd);
-			return { paneId };
-		}
-		if (!tabCreateFn) {
-			throw new Error("tab surface requested but no tabCreateFn provided");
-		}
-		return { paneId: tabCreateFn(options.name, options.cwd), fellBackToTab: surface === "tab" };
+	attach: ResolvedAttach,
+): AttachResult | undefined {
+	if (attach.surface !== "tab" && attach.layoutMode === "attached") return undefined;
+	if (attach.layoutMode === "single" && attach.surface !== "tab") {
+		return { paneId: attach.splitFn(options.name, attach.direction, parentPaneId, options.cwd) };
 	}
+	return directTabResult(options, attach, attach.surface === "tab");
+}
 
-	// The min-size guard applies when establishing a region. Once attached, the
-	// parent TUI naturally shrinks; reapplying the guard would divert later stack
-	// entries to tabs even though the region itself has sufficient geometry.
+function directTabResult(options: AttachOptions, attach: ResolvedAttach, fellBackToTab: boolean): AttachResult {
+	if (!attach.tabCreateFn) throw new Error("tab surface requested but no tabCreateFn provided");
+	return { paneId: attach.tabCreateFn(options.name, options.cwd), fellBackToTab };
+}
+
+function initialRegionTabFallback(
+	parentPaneId: string,
+	options: AttachOptions,
+	attach: ResolvedAttach,
+): AttachResult | undefined {
 	const existingRegion = getRegion(parentPaneId);
-	const dims = measureParentTerminal(deps?.measure);
-	if ((!existingRegion || existingRegion.panes.length === 0) && shouldFallBackToTab(direction, dims)) {
-		if (!tabCreateFn) {
-			throw new Error("min-size tab fallback requested but no tabCreateFn provided");
-		}
-		const threshold = direction === "right" ? `${MIN_ATTACHED_COLS_RIGHT} cols` : `${MIN_ATTACHED_ROWS_DOWN} rows`;
-		return {
-			paneId: tabCreateFn(options.name, options.cwd),
-			fellBackToTab: true,
-			warning: `Caller terminal too small for attached layout (need ≥ ${threshold}); fell back to tab.`,
-		};
-	}
-
-	// Drop vanished panes before selecting a split target.
-	reapVanishedPanes(parentPaneId, deps?.paneExists);
-
-	let region = getRegion(parentPaneId);
-	if (!region || region.panes.length === 0) {
-		const childId = splitFn(options.name, firstSplitDirection(direction), parentPaneId, options.cwd);
-		region = {
-			direction,
-			parentPaneId,
-			panes: [{ paneId: childId, depth: 0, ord: 0 }],
-		};
-		setRegion(region);
-		return { paneId: childId };
-	}
-
-	if (region.direction !== direction) {
-		if (!tabCreateFn) {
-			throw new Error("attached layout direction conflict requires an isolated tab");
-		}
-		return {
-			paneId: tabCreateFn(options.name, options.cwd),
-			fellBackToTab: true,
-			warning: `Attached region uses direction:${region.direction}; isolated direction:${direction} run in a tab.`,
-		};
-	}
-	const effectiveDirection = region.direction;
-	const layout = layoutQuery(parentPaneId);
-	const targetId = selectRegionPane(region, layout);
-	const childId = splitFn(options.name, subsequentSplitDirection(effectiveDirection), targetId, options.cwd);
-	const target = region.panes.find((p) => p.paneId === targetId);
-	const childDepth = (target?.depth ?? 0) + 1;
-	const nextOrd = region.panes.reduce((max, p) => (p.ord > max ? p.ord : max), -1) + 1;
-	region = {
-		...region,
-		panes: [...region.panes, { paneId: childId, depth: childDepth, ord: nextOrd }],
+	const isNewRegion = !existingRegion || existingRegion.panes.length === 0;
+	if (!isNewRegion || !shouldFallBackToTab(attach.direction, measureParentTerminal(attach.measure))) return undefined;
+	if (!attach.tabCreateFn) throw new Error("min-size tab fallback requested but no tabCreateFn provided");
+	const threshold =
+		attach.direction === "right" ? `${MIN_ATTACHED_COLS_RIGHT} cols` : `${MIN_ATTACHED_ROWS_DOWN} rows`;
+	return {
+		paneId: attach.tabCreateFn(options.name, options.cwd),
+		fellBackToTab: true,
+		warning: `Caller terminal too small for attached layout (need ≥ ${threshold}); fell back to tab.`,
 	};
-	setRegion(region);
-	return { paneId: childId };
+}
+
+function createInitialRegion(parentPaneId: string, options: AttachOptions, attach: ResolvedAttach): AttachResult {
+	const paneId = attach.splitFn(options.name, firstSplitDirection(attach.direction), parentPaneId, options.cwd);
+	setRegion({
+		direction: attach.direction,
+		parentPaneId,
+		panes: [{ paneId, depth: 0, ord: 0 }],
+	});
+	return { paneId };
+}
+
+function appendToRegion(
+	parentPaneId: string,
+	options: AttachOptions,
+	attach: ResolvedAttach,
+	region: RegionState,
+): AttachResult {
+	const conflict = conflictingDirectionTab(options, attach, region);
+	if (conflict) return conflict;
+	const targetPaneId = selectRegionPane(region, attach.layoutQuery(parentPaneId));
+	const paneId = attach.splitFn(options.name, subsequentSplitDirection(region.direction), targetPaneId, options.cwd);
+	setRegion(appendRegionPane(region, targetPaneId, paneId));
+	return { paneId };
+}
+
+function conflictingDirectionTab(
+	options: AttachOptions,
+	attach: ResolvedAttach,
+	region: RegionState,
+): AttachResult | undefined {
+	if (region.direction === attach.direction) return undefined;
+	if (!attach.tabCreateFn) throw new Error("attached layout direction conflict requires an isolated tab");
+	return {
+		paneId: attach.tabCreateFn(options.name, options.cwd),
+		fellBackToTab: true,
+		warning: `Attached region uses direction:${region.direction}; isolated direction:${attach.direction} run in a tab.`,
+	};
+}
+
+function appendRegionPane(region: RegionState, targetPaneId: string, paneId: string): RegionState {
+	const target = region.panes.find((pane) => pane.paneId === targetPaneId);
+	const depth = (target?.depth ?? 0) + 1;
+	const nextOrd = region.panes.reduce((max, pane) => (pane.ord > max ? pane.ord : max), -1) + 1;
+	return { ...region, panes: [...region.panes, { paneId, depth, ord: nextOrd }] };
 }
 
 /**

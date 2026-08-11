@@ -2,11 +2,15 @@
 
 ## Purpose
 
-LLM-facing tools for running explicitly configured Pi subagents in Herdr panes, with strict identity, bounded foreground/background admission, isolated child controls, progressive-disclosure skills, and permission-compatible resume.
+LLM-facing tools for running explicitly configured Pi subagents in Herdr panes, with strict identity, bounded foreground/background admission, isolated child controls, and progressive-disclosure skills.
+
 ## Requirements
+
 ### Requirement: explicit named subagent tool
 
-The extension SHALL register `subagent` with required `agent` and `task`. It SHALL NOT support a bare or default agent. It SHALL resolve the canonical agent definition before queue admission and derive display identity from the canonical ID unless an optional presentation-only `label` is supplied.
+The extension SHALL register `subagent` with required `agent` and `task`.
+It SHALL NOT support a bare or default agent.
+It SHALL resolve the canonical agent definition before queue admission and derive display identity from the canonical ID unless an optional presentation-only `label` is supplied.
 
 #### Scenario: named async spawn
 
@@ -30,7 +34,11 @@ The extension SHALL register `subagent` with required `agent` and `task`. It SHA
 
 ### Requirement: canonical user-owned agent resolution
 
-The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<canonical-id>.md` and `${PI_CODING_AGENT_DIR}/agents/<canonical-id>.md` (Pi default `~/.pi/agent/agents`). A trusted project definition SHALL override the global definition. Package examples, bundled definitions, generated definitions, and unrelated directories SHALL NOT participate. The canonical ID SHALL be a validated filename stem and SHALL bind lookup, prompt tag, definition-owned model routing, permission identity, session metadata, and resume.
+The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<canonical-id>.md` and `${PI_CODING_AGENT_DIR}/agents/<canonical-id>.md` (Pi default `~/.pi/agent/agents`).
+A trusted project definition SHALL override the global definition.
+Package examples, bundled definitions, generated definitions, and unrelated directories SHALL NOT participate.
+The canonical ID SHALL be a validated filename stem and SHALL bind lookup, prompt tag, definition-owned model routing, permission identity, and session provenance for initial dispatch.
+It SHALL NOT authorize or identify a model-facing resume operation.
 
 #### Scenario: trusted project override
 
@@ -54,7 +62,14 @@ The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<can
 
 ### Requirement: minimal subagent call schema
 
-The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, or `autoExit`. The agent definition SHALL own tools, skills, seed, identity instructions, and optional model/thinking. Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing. Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime. Package-level model maps (`models.default`, `models.agents`) and other package `config.json` keys SHALL NOT participate in routing or defaults. Optional `label` SHALL affect presentation only. Optional `blocking` SHALL default to false (background) when omitted. Optional `layout`, `surface`, and `direction` remain per-call overrides only—not package-configurable.
+The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, or `autoExit`.
+The agent definition SHALL own tools, skills, seed, identity instructions, and optional model/thinking.
+Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing.
+Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime.
+Package-level model maps (`models.default`, `models.agents`) and other package `config.json` keys SHALL NOT participate in routing or defaults.
+Optional `label` SHALL affect presentation only.
+Optional `blocking` SHALL default to false (background) when omitted.
+Optional `layout`, `surface`, and `direction` remain per-call overrides only—not package-configurable.
 
 #### Scenario: schema inspection
 
@@ -64,17 +79,17 @@ The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tool
 #### Scenario: label does not change authority
 
 - **WHEN** a call supplies `label: "auth-flow"` for agent `reviewer`
-- **THEN** pane/widget/result presentation may use the label while permissions, skills, tools, session ownership, and routing remain bound to `reviewer`
+- **THEN** pane/widget/result presentation may use the label while permissions, skills, tools, session provenance, and routing remain bound to `reviewer`
 
 #### Scenario: omitted model and thinking inherit
 
 - **WHEN** a valid agent definition omits `model` or `thinking`
-- **THEN** the omitted value inherits from the parent runtime invoking the launch or resume, while any declared value is used and cannot be overridden per call or package config
+- **THEN** the omitted value inherits from the parent runtime invoking the launch, while any declared value is used and cannot be overridden per call or package config
 
 #### Scenario: package model config is ignored
 
 - **WHEN** a package-root `config.json` or `config.json.example` defines `models.default` or `models.agents`
-- **THEN** launch and resume still resolve model only from agent frontmatter or parent inheritance and do not load those package keys
+- **THEN** launch resolves model only from agent frontmatter or parent inheritance and does not load those package keys
 
 #### Scenario: omitted blocking is background
 
@@ -98,7 +113,11 @@ The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tool
 
 ### Requirement: foreground and background admission queues
 
-Per parent session, the extension SHALL run no more than one foreground blocking run and four background runs. A `subagent` call enters the foreground class only when `blocking: true` is explicitly supplied; omitted or false `blocking` and all `subagent_resume` calls belong to the background class. No package config SHALL change that default. Valid excess calls SHALL wait in separate FIFO queues rather than fail. Validation SHALL occur before queue insertion; queued entries SHALL create no session, artifact, sidecar, pane, or child process.
+Per parent session, the extension SHALL run no more than one foreground blocking run and four background runs.
+A `subagent` call enters the foreground class only when `blocking: true` is explicitly supplied; omitted or false `blocking` calls belong to the background class.
+No package config SHALL change that default.
+Valid excess calls SHALL wait in separate FIFO queues rather than fail.
+Validation SHALL occur before queue insertion; queued entries SHALL create no session, artifact, sidecar, pane, or child process.
 
 #### Scenario: one foreground plus four background
 
@@ -112,7 +131,7 @@ Per parent session, the extension SHALL run no more than one foreground blocking
 
 #### Scenario: fifth background call queues
 
-- **WHEN** an async call or resume arrives while four background runs are active
+- **WHEN** a fifth asynchronous `subagent` call arrives while four background runs are active
 - **THEN** it returns a queued acknowledgement and launches in FIFO order when a background slot opens
 
 #### Scenario: default spawn is background
@@ -132,12 +151,16 @@ Per parent session, the extension SHALL run no more than one foreground blocking
 
 #### Scenario: exactly-once slot release
 
-- **WHEN** a run completes, fails, is cancelled, loses its pane, pings, rolls back launch, or is shut down
+- **WHEN** a run completes, fails, is cancelled, loses its pane, rolls back launch, or is shut down
 - **THEN** its slot and leases release exactly once and the next valid entry in that class is admitted
 
 ### Requirement: agent-owned progressive-disclosure skills
 
-The extension SHALL read only plural `skills:` from the resolved agent definition as an ordered comma-separated allowlist. It SHALL normalize and validate every name, reject duplicate entries, resolve each name against Pi's effective skill resources, and fail before queueing if a name is missing or has multiple matches. It SHALL restrict the child resource set to selected canonical skill paths and SHALL NOT synthesize initial `/skill:<name>` prompts. An explicitly loaded child companion SHALL advertise selected metadata inside exactly one standard `<available_skills>` container, created when absent, before normally discovered permission-system sanitization runs. Launch SHALL fail closed before task submission if this ordering cannot be guaranteed or verified.
+The extension SHALL read only plural `skills:` from the resolved agent definition as an ordered comma-separated allowlist.
+It SHALL normalize and validate every name, reject duplicate entries, resolve each name against Pi's effective skill resources, and fail before queueing if a name is missing or has multiple matches.
+It SHALL restrict the child resource set to selected canonical skill paths and SHALL NOT synthesize initial `/skill:<name>` prompts.
+An explicitly loaded child companion SHALL advertise selected metadata inside exactly one standard `<available_skills>` container, created when absent, before normally discovered permission-system sanitization runs.
+Launch SHALL fail closed before task submission if this ordering cannot be guaranteed or verified.
 
 #### Scenario: multiple selected skills are metadata only
 
@@ -176,26 +199,35 @@ The extension SHALL read only plural `skills:` from the resolved agent definitio
 
 ### Requirement: agent-owned tool visibility and child controls
 
-The agent definition's `tools:` SHALL be authoritative and SHALL NOT be widened per call. In a child process, this extension SHALL expose only `subagent_done` and `caller_ping`; it SHALL hide and hard-deny `subagent`, `subagent_interrupt`, and `subagent_resume` regardless of agent configuration. `subagents_list` SHALL NOT exist.
+The agent definition's `tools:` SHALL be authoritative and SHALL NOT be widened per call except for the child completion protocol.
+In a parent process, this extension SHALL register only `subagent`.
+In a child process, this extension SHALL expose only `subagent_done`; it SHALL hide and hard-deny `subagent` regardless of agent configuration.
+`subagent_interrupt`, `subagent_resume`, `caller_ping`, `subagents_list`, and replacement model-facing lifecycle or discovery tools SHALL NOT exist.
+
+#### Scenario: parent has one extension tool
+
+- **WHEN** the extension loads in a parent session
+- **THEN** it registers `subagent` and does not register interrupt, resume, ping, list, or replacement lifecycle tools
 
 #### Scenario: child cannot manage subagents
 
 - **WHEN** the extension loads with `PI_SUBAGENT_ID` set
-- **THEN** parent lifecycle tools are not registered and cannot be restored by tools or permission configuration
+- **THEN** `subagent` is not registered and cannot be restored by tools or permission configuration
 
 #### Scenario: child control tools remain available
 
 - **WHEN** a valid child tool allowlist is constructed
-- **THEN** `subagent_done` and `caller_ping` are included as protocol controls, subject to any stricter permission-system denial
+- **THEN** `subagent_done` is included as the sole extension protocol control, subject to any stricter permission-system denial
 
 #### Scenario: no list tool
 
-- **WHEN** the parent extension registers its tools
-- **THEN** no `subagents_list` or replacement model-facing discovery tool is registered
+- **WHEN** parent and child extension registrations are inspected
+- **THEN** neither `caller_ping`, `subagents_list`, nor a replacement model-facing discovery tool is registered
 
 ### Requirement: permission frontmatter coexistence
 
-The extension SHALL treat `permission:` as a reserved compatibility key in agent markdown, preserve it untouched, and leave its interpretation exclusively to `@gotgenes/pi-permission-system`. The child SHALL inherit the parent's exact Pi agent directory, carry canonical `<active_agent>` identity, and set `PI_SUBAGENT_PARENT_SESSION` on spawn and resume.
+The extension SHALL treat `permission:` as a reserved compatibility key in agent markdown, preserve it untouched, and leave its interpretation exclusively to `@gotgenes/pi-permission-system`.
+The child SHALL inherit the parent's exact Pi agent directory, carry canonical `<active_agent>` identity, and set `PI_SUBAGENT_PARENT_SESSION` on spawn.
 
 #### Scenario: per-agent permission applies
 
@@ -212,61 +244,21 @@ The extension SHALL treat `permission:` as a reserved compatibility key in agent
 - **WHEN** child policy resolves to `ask` and its Herdr Pi has a UI
 - **THEN** the permission dialog renders in the child pane while `PI_SUBAGENT_PARENT_SESSION` remains available for no-UI forwarding
 
-### Requirement: caller ping help requests
-
-The child-only `caller_ping` tool SHALL write a ping sidecar and exit. Async pings SHALL be delivered as background notifications; blocking pings SHALL settle the foreground run and resolve its suspended tool call with the help message and resumable path. A later `subagent_resume` SHALL be a new background-class entry, subject to background capacity and FIFO order; it SHALL NOT restore the prior foreground classification. Canonical agent identity SHALL come from persisted ownership metadata.
-
-#### Scenario: ping answered by resume
-
-- **WHEN** a child calls `caller_ping` and the parent later calls `subagent_resume` with guidance
-- **THEN** the same owned session and canonical permission identity resume with the guidance
-
-#### Scenario: blocking ping resumes as background work
-
-- **WHEN** a blocking child pings, its foreground tool result returns, and the parent resumes the supplied path
-- **THEN** the foreground slot has already released and the resume is admitted or queued in the background class with the same canonical identity
-
-### Requirement: exclusive permission-compatible resume
-
-`subagent_resume` SHALL accept a conventional path parameter, optional follow-up message/label, and surface options. It SHALL canonicalize and permission-gate the path, require versioned owner-only session metadata, recover canonical agent identity, revalidate the agent definition, and acquire an exclusive session lease. It SHALL NOT accept caller-selected model, thinking, tools, skills, system prompt, seed, cwd, or agent identity.
-
-#### Scenario: valid resume
-
-- **WHEN** an owned settled session path is resumed
-- **THEN** it enters the background admission path and launches with the persisted canonical `<active_agent>` identity
-
-#### Scenario: concurrent duplicate resume
-
-- **WHEN** a session path is already queued, starting, running, interrupted, or finalizing
-- **THEN** another resume of the same canonical path is rejected before pane creation
-
-#### Scenario: unowned session
-
-- **WHEN** a session lacks valid ownership metadata
-- **THEN** resume fails rather than opening it as a bare or caller-selected agent
-
-#### Scenario: resume path is gated
-
-- **WHEN** `path` or `external_directory` policy denies the supplied resume path
-- **THEN** the permission system blocks the resume tool before the file is opened
-
-### Requirement: interrupt keeps session alive
-
-The extension SHALL register `subagent_interrupt`, verify that the target pane exists, and send Escape to the active child turn without releasing its slot or session lease.
-
-#### Scenario: interrupt active child
-
-- **WHEN** `subagent_interrupt` targets a running child
-- **THEN** Escape is sent and the pane, watcher, capacity slot, session JSONL, canonical metadata, and lease remain until later settlement or resume-safe cleanup
-
 ### Requirement: always visible and auto-exiting Pi children
 
-Every admitted launch SHALL run Pi in a real Herdr pane and SHALL set auto-exit so the process ends when the task, done tool, or ping settles. Agent frontmatter SHALL NOT provide co-pilot or alternate-backend modes.
+Every admitted launch SHALL run Pi in a real Herdr pane or tab and SHALL set auto-exit so the process ends when the task or `subagent_done` settles.
+Agent frontmatter SHALL NOT provide co-pilot or alternate-backend modes.
+While the pane remains open, the user SHALL be able to interact with its Pi session directly through Herdr.
 
 #### Scenario: visible blocking or background run
 
 - **WHEN** a foreground or background entry is admitted
-- **THEN** it runs as Pi in a visible pane and closes on settlement while its owned session remains resumable
+- **THEN** it runs as Pi in a visible pane or tab and closes on ordinary settlement while its session JSONL remains available for diagnostics
+
+#### Scenario: user controls a visible child
+
+- **WHEN** the user focuses an open child pane or tab
+- **THEN** interruption and follow-up input are performed directly in that surface without a parent-agent lifecycle tool
 
 #### Scenario: legacy co-pilot keys
 
@@ -275,7 +267,9 @@ Every admitted launch SHALL run Pi in a real Herdr pane and SHALL set auto-exit 
 
 ### Requirement: no package runtime config
 
-The extension SHALL NOT require, ship, or read a package-root `config.json` or `config.json.example` for status, model routing, blocking default, layout, surface, or direction. Runtime defaults SHALL be code-owned. Agent definitions under trusted project and global Pi agent directories remain the only user-authored configuration for model and profile.
+The extension SHALL NOT require, ship, or read a package-root `config.json` or `config.json.example` for status, model routing, blocking default, layout, surface, or direction.
+Runtime defaults SHALL be code-owned.
+Agent definitions under trusted project and global Pi agent directories remain the only user-authored configuration for model and profile.
 
 #### Scenario: extension starts without package JSON
 

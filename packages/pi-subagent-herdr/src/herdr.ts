@@ -6,8 +6,9 @@ const execFileAsync = promisify(execFile);
 const commandAvailability = new Map<string, boolean>();
 
 function hasCommand(command: string): boolean {
-	if (commandAvailability.has(command)) {
-		return commandAvailability.get(command)!;
+	const cached = commandAvailability.get(command);
+	if (cached !== undefined) {
+		return cached;
 	}
 
 	let available = false;
@@ -146,34 +147,54 @@ function getHerdrParentPaneId(): string {
 	return paneId;
 }
 
-function getHerdrCurrentPaneInfo(): {
-	pane_id: string;
-	tab_id: string;
-	workspace_id: string;
-} {
-	const paneId = process.env.HERDR_PANE_ID;
-	const tabId = process.env.HERDR_TAB_ID;
-	const workspaceId = process.env.HERDR_WORKSPACE_ID;
+export type HerdrPaneInfo = { pane_id: string; tab_id: string; workspace_id: string };
 
-	// Fall back to `herdr pane current` if any identity env var is missing —
-	// older herdr versions may not set all three.
-	if (!paneId || !tabId || !workspaceId) {
-		const output = herdrExec(["pane", "current"]);
-		const parsed = parseHerdrJson(output);
-		const pane = (parsed as { result?: { pane?: unknown } } | null)?.result?.pane as
-			| { pane_id?: string; tab_id?: string; workspace_id?: string }
-			| undefined;
-		if (!pane?.pane_id || !pane?.tab_id || !pane?.workspace_id) {
-			throw new Error(`Unexpected herdr pane current output: ${output.trim() || "(empty)"}`);
-		}
-		return {
-			pane_id: pane.pane_id,
-			tab_id: pane.tab_id,
-			workspace_id: pane.workspace_id,
-		};
-	}
+export function getHerdrCurrentPaneInfo(): HerdrPaneInfo {
+	return paneInfoFromEnvironment() ?? paneInfoFromCurrentCommand();
+}
 
-	return { pane_id: paneId, tab_id: tabId, workspace_id: workspaceId };
+function paneInfoFromEnvironment(): HerdrPaneInfo | undefined {
+	const pane_id = process.env.HERDR_PANE_ID;
+	const tab_id = process.env.HERDR_TAB_ID;
+	const workspace_id = process.env.HERDR_WORKSPACE_ID;
+	if (!pane_id || !tab_id || !workspace_id) return undefined;
+	return { pane_id, tab_id, workspace_id };
+}
+
+function paneInfoFromCurrentCommand(): HerdrPaneInfo {
+	const output = herdrExec(["pane", "current"]);
+	const pane = (parseHerdrJson(output) as { result?: { pane?: unknown } } | null)?.result?.pane;
+	const paneInfo = parsePaneInfo(pane);
+	if (!paneInfo) throw unexpectedPaneInfoError(output);
+	return paneInfo;
+}
+
+function parsePaneInfo(value: unknown): HerdrPaneInfo | undefined {
+	const pane = recordValue(value);
+	return pane ? paneInfoFromRecord(pane) : undefined;
+}
+
+function paneInfoFromRecord(pane: Record<string, unknown>): HerdrPaneInfo | undefined {
+	const pane_id = nonEmptyString(pane.pane_id);
+	if (!pane_id) return undefined;
+	const tab_id = nonEmptyString(pane.tab_id);
+	if (!tab_id) return undefined;
+	const workspace_id = nonEmptyString(pane.workspace_id);
+	if (!workspace_id) return undefined;
+	return { pane_id, tab_id, workspace_id };
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	return value || undefined;
+}
+
+function unexpectedPaneInfoError(output: string): Error {
+	return new Error(`Unexpected herdr pane current output: ${output.trim() || "(empty)"}`);
 }
 
 function buildTabCreateArgs(name: string, cwd: string, workspaceId: string): string[] {
@@ -235,56 +256,59 @@ export interface HerdrPaneLayout {
 	panes: HerdrLayoutPane[];
 }
 
+type HerdrLayoutResponse = { result?: { layout?: unknown } };
+
 /** Query `herdr pane layout --pane <id>`; returns null when unavailable/malformed. */
 export function getHerdrPaneLayout(paneId: string): HerdrPaneLayout | null {
 	try {
-		const output = herdrExec(["pane", "layout", "--pane", paneId]);
-		const parsed = parseHerdrJson(output) as {
-			result?: {
-				layout?: {
-					area?: Partial<HerdrPaneRect>;
-					panes?: Array<{ pane_id?: unknown; focused?: unknown; rect?: Partial<HerdrPaneRect> }>;
-				};
-			};
-		} | null;
-		const layout = parsed?.result?.layout;
-		if (!layout || !Array.isArray(layout.panes)) return null;
-		const panes: HerdrLayoutPane[] = [];
-		for (const entry of layout.panes) {
-			if (typeof entry?.pane_id !== "string" || !entry.pane_id) continue;
-			const r = entry.rect;
-			if (
-				!r ||
-				typeof r.x !== "number" ||
-				typeof r.y !== "number" ||
-				typeof r.width !== "number" ||
-				typeof r.height !== "number"
-			) {
-				continue;
-			}
-			panes.push({
-				paneId: entry.pane_id,
-				rect: { x: r.x, y: r.y, width: r.width, height: r.height },
-				focused: entry.focused === true,
-			});
-		}
-		const area =
-			layout.area &&
-			typeof layout.area.x === "number" &&
-			typeof layout.area.y === "number" &&
-			typeof layout.area.width === "number" &&
-			typeof layout.area.height === "number"
-				? {
-						x: layout.area.x,
-						y: layout.area.y,
-						width: layout.area.width,
-						height: layout.area.height,
-					}
-				: undefined;
-		return { area, panes };
+		return parseHerdrPaneLayout(herdrExec(["pane", "layout", "--pane", paneId]));
 	} catch {
 		return null;
 	}
+}
+
+function parseHerdrPaneLayout(output: string): HerdrPaneLayout | null {
+	const layout = (parseHerdrJson(output) as HerdrLayoutResponse | null)?.result?.layout;
+	return parseHerdrLayout(layout);
+}
+
+function parseHerdrLayout(value: unknown): HerdrPaneLayout | null {
+	const layout = recordValue(value);
+	if (!layout) return null;
+	const panes = parseHerdrLayoutPanes(layout.panes);
+	return panes ? { area: parseHerdrPaneRect(layout.area), panes } : null;
+}
+
+function parseHerdrLayoutPanes(value: unknown): HerdrLayoutPane[] | null {
+	if (!Array.isArray(value)) return null;
+	return value.map(parseHerdrLayoutPane).filter(isDefined);
+}
+
+function parseHerdrLayoutPane(value: unknown): HerdrLayoutPane | undefined {
+	const pane = recordValue(value);
+	if (!pane) return undefined;
+	const paneId = nonEmptyString(pane.pane_id);
+	if (!paneId) return undefined;
+	const rect = parseHerdrPaneRect(pane.rect);
+	if (!rect) return undefined;
+	return { paneId, rect, focused: pane.focused === true };
+}
+
+function parseHerdrPaneRect(value: unknown): HerdrPaneRect | undefined {
+	const rect = recordValue(value);
+	if (!rect) return undefined;
+	const values = [rect.x, rect.y, rect.width, rect.height];
+	if (!values.every(isNumber)) return undefined;
+	const [x, y, width, height] = values;
+	return { x, y, width, height };
+}
+
+function isNumber(value: unknown): value is number {
+	return typeof value === "number";
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+	return value !== undefined;
 }
 
 /** Synchronous pane existence check via `herdr pane get`. */
@@ -327,58 +351,111 @@ export async function readHerdrScreenAsync(surface: string, lines = 50): Promise
 	return herdrExecAsync(["pane", "read", surface, "--source", "visible", "--lines", String(lines)]);
 }
 
-export type { HerdrAgentStatus, PaneInspection } from "./lifecycle.ts";
-
 type PaneInspectionResult =
 	| { kind: "present"; agent?: string; agentStatus: "idle" | "working" | "blocked" | "done" | "unknown" }
 	| { kind: "missing"; error?: string }
 	| { kind: "unavailable"; error: string };
 
+type PaneGetPayload = {
+	result?: { pane?: unknown };
+	error?: { code?: unknown; message?: unknown };
+};
+
+const herdrAgentStatuses = new Set(["idle", "working", "blocked", "done", "unknown"]);
+
 function parsePaneGetOutput(output: string, surface: string): PaneInspectionResult {
-	const parsed = parseHerdrJson(output) as {
-		result?: { pane?: unknown };
-		error?: { code?: unknown; message?: unknown };
-	} | null;
-	const errorObj = parsed?.error;
-	if (errorObj?.code === "pane_not_found" || errorObj?.code === "not_found") {
-		return { kind: "missing", error: typeof errorObj.message === "string" ? errorObj.message : "pane not found" };
-	}
-	const pane = parsed?.result?.pane;
-	if (!pane || typeof pane !== "object") return { kind: "unavailable", error: "pane get returned no pane record" };
-	const record = pane as { pane_id?: unknown; agent?: unknown; agent_status?: unknown };
-	if (record.pane_id !== surface) return { kind: "unavailable", error: "pane id mismatch" };
-	const agent = typeof record.agent === "string" ? record.agent : undefined;
-	const rawStatus = typeof record.agent_status === "string" ? record.agent_status : "unknown";
-	const agentStatus =
-		rawStatus === "idle" ||
-		rawStatus === "working" ||
-		rawStatus === "blocked" ||
-		rawStatus === "done" ||
-		rawStatus === "unknown"
-			? rawStatus
-			: "unknown";
-	return { kind: "present", ...(agent ? { agent } : {}), agentStatus };
+	const payload = parseHerdrJson(output) as PaneGetPayload | null;
+	return missingPaneFromPayload(payload) ?? presentPaneFromPayload(payload, surface);
+}
+
+function missingPaneFromPayload(payload: PaneGetPayload | null): PaneInspectionResult | undefined {
+	const message = missingPanePayloadMessage(payload);
+	return message ? missingPaneResult(message) : undefined;
+}
+
+function missingPanePayloadMessage(payload: PaneGetPayload | null): string | undefined {
+	const error = payload?.error;
+	if (!isMissingPaneCode(error?.code)) return undefined;
+	return errorMessageOrFallback(error?.message, "pane not found");
+}
+
+function isMissingPaneCode(code: unknown): boolean {
+	return code === "pane_not_found" || code === "not_found";
+}
+
+function missingPaneResult(error: string): PaneInspectionResult {
+	return { kind: "missing", error };
+}
+
+function presentPaneFromPayload(payload: PaneGetPayload | null, surface: string): PaneInspectionResult {
+	const pane = recordValue(payload?.result?.pane);
+	if (!pane) return unavailablePane("pane get returned no pane record");
+	if (pane.pane_id !== surface) return unavailablePane("pane id mismatch");
+	return { kind: "present", ...optionalPaneAgent(pane.agent), agentStatus: paneAgentStatus(pane.agent_status) };
+}
+
+function unavailablePane(error: string): PaneInspectionResult {
+	return { kind: "unavailable", error };
+}
+
+function optionalPaneAgent(value: unknown): { agent?: string } {
+	return typeof value === "string" ? { agent: value } : {};
+}
+
+function paneAgentStatus(value: unknown): Extract<PaneInspectionResult, { kind: "present" }>["agentStatus"] {
+	return typeof value === "string" && herdrAgentStatuses.has(value) ? (value as any) : "unknown";
 }
 
 function parsePaneGetError(error: any): PaneInspectionResult {
-	for (const raw of [error?.stderr, error?.stdout]) {
-		if (typeof raw !== "string" || !raw.trim()) continue;
-		try {
-			const parsed = parsePaneGetOutput(raw, "");
-			if (parsed.kind === "missing") return parsed;
-		} catch {
-			// A CLI may emit plain diagnostics on one stream and structured JSON on
-			// the other. Parse each stream independently before giving up.
-		}
-		// Older/alternate Herdr builds may print the stable error code as plain
-		// text rather than JSON. Only match explicit identifiers, not generic
-		// prose such as "pane unavailable".
-		if (/\b(?:pane_not_found|not_found)\b/.test(raw)) {
-			return { kind: "missing", error: raw.trim() };
-		}
+	return (
+		missingPaneFromCommandStreams(error) ??
+		unavailablePane(errorMessageOrFallback(error?.message, "herdr pane get failed"))
+	);
+}
+
+function missingPaneFromCommandStreams(error: any): PaneInspectionResult | undefined {
+	return firstMissingPane(commandOutputStreams(error));
+}
+
+function commandOutputStreams(error: any): unknown[] {
+	return [error?.stderr, error?.stdout];
+}
+
+function firstMissingPane(outputs: unknown[]): PaneInspectionResult | undefined {
+	for (const output of outputs) {
+		const missing = missingPaneFromCommandOutput(output);
+		if (missing) return missing;
 	}
-	const message = error?.message ? String(error.message) : "herdr pane get failed";
-	return { kind: "unavailable", error: message };
+	return undefined;
+}
+
+function missingPaneFromCommandOutput(output: unknown): PaneInspectionResult | undefined {
+	const text = nonBlankOutput(output);
+	if (!text) return undefined;
+	return parseMissingPaneOutput(text) ?? plainMissingPaneOutput(text);
+}
+
+function nonBlankOutput(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	return value.trim() ? value : undefined;
+}
+
+function plainMissingPaneOutput(output: string): PaneInspectionResult | undefined {
+	return /\b(?:pane_not_found|not_found)\b/.test(output) ? missingPaneResult(output.trim()) : undefined;
+}
+
+function parseMissingPaneOutput(output: string): PaneInspectionResult | undefined {
+	try {
+		const parsed = parsePaneGetOutput(output, "");
+		return parsed.kind === "missing" ? parsed : undefined;
+	} catch {
+		// A CLI may write JSON to one stream and plain diagnostics to the other.
+		return undefined;
+	}
+}
+
+function errorMessageOrFallback(value: unknown, fallback: string): string {
+	return typeof value === "string" && value ? value : fallback;
 }
 
 /**

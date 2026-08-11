@@ -16,9 +16,8 @@ const TERMINAL_SENTINEL = /__SUBAGENT_DONE_(\d+)__/;
 export const DEFAULT_COMPLETION_TIMEOUT_MS = 4 * 60 * 60_000;
 
 export interface CompletionResult {
-	reason: "done" | "ping" | "sentinel" | "error" | "timeout";
+	reason: "done" | "sentinel" | "error" | "timeout";
 	exitCode: number;
-	ping?: { name: string; message: string };
 	errorMessage?: string;
 	runId?: string;
 }
@@ -54,17 +53,6 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
 	};
 
 	const runId = typeof payload?.runId === "string" ? payload.runId : undefined;
-	if (payload?.type === "ping") {
-		return {
-			reason: "ping",
-			exitCode: 0,
-			ping: {
-				name: typeof payload.name === "string" ? payload.name : "subagent",
-				message: typeof payload.message === "string" ? payload.message : "",
-			},
-			...(runId ? { runId } : {}),
-		};
-	}
 
 	if (payload?.type === "error") {
 		const errorMessage =
@@ -215,85 +203,122 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
 	});
 }
 
+type WatchTiming = { startedAt: number; timeoutMs: number; deadline: number };
+
 export async function waitForCompletion(signal: AbortSignal, options: CompletionOptions): Promise<CompletionResult> {
-	const startedAt = Date.now();
-	const timeoutMs = options.timeoutMs ?? DEFAULT_COMPLETION_TIMEOUT_MS;
-	const deadline = timeoutMs > 0 ? startedAt + timeoutMs : Number.POSITIVE_INFINITY;
-
+	const timing = createWatchTiming(options);
 	for (;;) {
-		if (signal.aborted) throw new Error(ABORT_MESSAGE);
-
-		// Hard cap: never watch forever. A pane that neither publishes completion
-		// evidence nor disappears (hung child, unwritten sidecar, wedged herdr)
-		// would otherwise strand the watcher and leave the delivery permanently
-		// "pending". Sweep every evidence source first — a run that finished must
-		// never be reported as unwitnessed — then settle as an explicit timeout so
-		// the run still flows through the normal delivery path instead of hanging.
-		if (Date.now() >= deadline) {
-			const raced = await sweepFinalEvidence(signal, options);
-			if (raced) return raced;
-			return {
-				reason: "timeout",
-				exitCode: 1,
-				errorMessage:
-					`Subagent recorded no completion evidence within ${formatTimeoutBudget(timeoutMs)}; ` +
-					"stopped watching. The pane may still be open — inspect it directly.",
-			};
-		}
-
-		const sidecarResult = consumeExitSidecar(options.sessionFile, options.expectedRunId);
-		if (sidecarResult) return sidecarResult;
-
-		if (options.sentinelFile && existsSync(options.sentinelFile)) {
-			const preferred = await waitForPreferredSidecar(signal, options, { reason: "sentinel", exitCode: 0 });
-			if (preferred) return preferred;
-		}
-
-		// Inspect the pane BEFORE reading the terminal tail. A hung or slow
-		// `pane read` (e.g. when the pane is in a transitional state during
-		// closure, or the herdr subprocess is unresponsive) would otherwise block
-		// the pane-missing detection below indefinitely, stranding the watcher
-		// and leaving the subagent's delivery permanently "pending".
-		if (options.inspectPane) {
-			let inspection: import("./lifecycle.ts").PaneInspection;
-			try {
-				inspection = (await probeWithTimeout(options.inspectPane(), probeTimeoutFor(options))) ?? {
-					kind: "unavailable",
-					error: "inspectPane exceeded probe timeout",
-				};
-			} catch {
-				inspection = { kind: "unavailable", error: "inspectPane threw" };
-			}
-			const observedAt = Date.now();
-			options.onPaneInspection?.(inspection, observedAt);
-			if (inspection.kind === "missing") {
-				// Pane closure and atomic artifact publication are separate operations.
-				// Allow a short bounded grace window before declaring evidence lost.
-				const racedCompletion = await waitForPreferredSidecar(signal, options, null);
-				if (racedCompletion) return racedCompletion;
-				return {
-					reason: "error",
-					exitCode: 1,
-					errorMessage: "Subagent pane disappeared before completion evidence was recorded.",
-				};
-			}
-		}
-
-		try {
-			const tail = await probeWithTimeout(options.readTerminalTail(), probeTimeoutFor(options));
-			const exitCode = tail == null ? null : terminalExitCode(tail);
-			if (exitCode !== null) {
-				const preferred = await waitForPreferredSidecar(signal, options, { reason: "sentinel", exitCode });
-				if (preferred) return preferred;
-			}
-		} catch {
-			// Terminal reads are only sentinel/output probes; pane inspection above
-			// is the authoritative completion signal.
-		}
-
-		options.onTick?.(Math.floor((Date.now() - startedAt) / 1000));
+		throwIfAborted(signal);
+		const deadlineResult = await completionAtDeadline(signal, options, timing);
+		if (deadlineResult) return deadlineResult;
+		const evidence = await pollCompletionEvidence(signal, options);
+		if (evidence) return evidence;
+		options.onTick?.(elapsedWatchSeconds(timing.startedAt));
 		await abortableDelay(options.intervalMs, signal);
 	}
+}
+
+function createWatchTiming(options: CompletionOptions): WatchTiming {
+	const startedAt = Date.now();
+	const timeoutMs = options.timeoutMs ?? DEFAULT_COMPLETION_TIMEOUT_MS;
+	return {
+		startedAt,
+		timeoutMs,
+		deadline: timeoutMs > 0 ? startedAt + timeoutMs : Number.POSITIVE_INFINITY,
+	};
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+	if (signal.aborted) throw new Error(ABORT_MESSAGE);
+}
+
+async function completionAtDeadline(
+	signal: AbortSignal,
+	options: CompletionOptions,
+	timing: WatchTiming,
+): Promise<CompletionResult | null> {
+	if (Date.now() < timing.deadline) return null;
+	return (await sweepFinalEvidence(signal, options)) ?? timeoutResult(timing.timeoutMs);
+}
+
+function timeoutResult(timeoutMs: number): CompletionResult {
+	return {
+		reason: "timeout",
+		exitCode: 1,
+		errorMessage:
+			`Subagent recorded no completion evidence within ${formatTimeoutBudget(timeoutMs)}; ` +
+			"stopped watching. The pane may still be open — inspect it directly.",
+	};
+}
+
+async function pollCompletionEvidence(
+	signal: AbortSignal,
+	options: CompletionOptions,
+): Promise<CompletionResult | null> {
+	const sidecar = consumeExitSidecar(options.sessionFile, options.expectedRunId);
+	if (sidecar) return sidecar;
+	const sentinel = await sentinelFileEvidence(signal, options);
+	if (sentinel) return sentinel;
+	const pane = await paneInspectionEvidence(signal, options);
+	if (pane) return pane;
+	return terminalTailEvidence(signal, options);
+}
+
+async function sentinelFileEvidence(signal: AbortSignal, options: CompletionOptions): Promise<CompletionResult | null> {
+	if (!options.sentinelFile || !existsSync(options.sentinelFile)) return null;
+	return waitForPreferredSidecar(signal, options, { reason: "sentinel", exitCode: 0 });
+}
+
+async function paneInspectionEvidence(
+	signal: AbortSignal,
+	options: CompletionOptions,
+): Promise<CompletionResult | null> {
+	if (!options.inspectPane) return null;
+	const inspection = await inspectCompletionPane(options);
+	options.onPaneInspection?.(inspection, Date.now());
+	if (inspection.kind !== "missing") return null;
+	const racedCompletion = await waitForPreferredSidecar(signal, options, null);
+	return racedCompletion ?? missingPaneResult();
+}
+
+async function inspectCompletionPane(options: CompletionOptions): Promise<import("./lifecycle.ts").PaneInspection> {
+	const inspectPane = options.inspectPane;
+	if (!inspectPane) return { kind: "unavailable", error: "inspectPane was unavailable" };
+	try {
+		return (
+			(await probeWithTimeout(inspectPane(), probeTimeoutFor(options))) ?? {
+				kind: "unavailable",
+				error: "inspectPane exceeded probe timeout",
+			}
+		);
+	} catch {
+		return { kind: "unavailable", error: "inspectPane threw" };
+	}
+}
+
+function missingPaneResult(): CompletionResult {
+	return {
+		reason: "error",
+		exitCode: 1,
+		errorMessage: "Subagent pane disappeared before completion evidence was recorded.",
+	};
+}
+
+async function terminalTailEvidence(signal: AbortSignal, options: CompletionOptions): Promise<CompletionResult | null> {
+	try {
+		const tail = await probeWithTimeout(options.readTerminalTail(), probeTimeoutFor(options));
+		const exitCode = tail == null ? null : terminalExitCode(tail);
+		return exitCode === null
+			? null
+			: await waitForPreferredSidecar(signal, options, { reason: "sentinel", exitCode });
+	} catch {
+		// Terminal reads are only sentinel/output probes; pane inspection is authoritative.
+		return null;
+	}
+}
+
+function elapsedWatchSeconds(startedAt: number): number {
+	return Math.floor((Date.now() - startedAt) / 1000);
 }
 
 /** Render a watch budget for a human-facing message: "4h", "90m", "45s", "40ms".

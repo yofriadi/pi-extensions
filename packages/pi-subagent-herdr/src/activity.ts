@@ -10,6 +10,7 @@ export type SubagentActivityEvent =
 	| "before_agent_start"
 	| "agent_start"
 	| "agent_end"
+	| "agent_interrupted"
 	| "turn_start"
 	| "turn_end"
 	| "before_provider_request"
@@ -20,7 +21,6 @@ export type SubagentActivityEvent =
 	| "tool_execution_update"
 	| "tool_result"
 	| "tool_execution_end"
-	| "caller_ping"
 	| "subagent_done"
 	| "session_shutdown";
 
@@ -50,6 +50,8 @@ export interface SubagentActivityState {
 	toolName?: string;
 	toolStartedAt?: number;
 	toolEndedAt?: number;
+	interruptedAt?: number;
+	interruptedSequence?: number;
 }
 
 export type ActivityReadResult =
@@ -64,6 +66,7 @@ export interface SubagentActivityRecorder {
 	beforeAgentStart(): void;
 	agentStart(): void;
 	agentEndWaiting(): void;
+	agentEndInterrupted(): void;
 	agentEndDone(): void;
 	turnStart(turnIndex?: number): void;
 	turnEnd(turnIndex?: number): void;
@@ -77,7 +80,6 @@ export interface SubagentActivityRecorder {
 	toolExecutionEnd(toolCallId?: string, toolName?: string): void;
 	compaction(): void;
 	contextUsage(tokens: number | null, contextWindow: number, percent: number | null): void;
-	callerPing(): void;
 	subagentDone(): void;
 	sessionShutdown(reason: SubagentShutdownReason): void;
 }
@@ -92,6 +94,7 @@ const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
 	"before_agent_start",
 	"agent_start",
 	"agent_end",
+	"agent_interrupted",
 	"turn_start",
 	"turn_end",
 	"before_provider_request",
@@ -102,7 +105,6 @@ const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
 	"tool_execution_update",
 	"tool_result",
 	"tool_execution_end",
-	"caller_ping",
 	"subagent_done",
 	"session_shutdown",
 ]);
@@ -191,6 +193,8 @@ function validateActivity(value: unknown, expectedRunningChildId: string): Activ
 		validateOptionalActivityString(object, "messageEventType"),
 		validateOptionalActivityString(object, "toolCallId"),
 		validateOptionalActivityString(object, "toolName"),
+		validateOptionalFiniteNumber(object, "interruptedAt"),
+		validateOptionalInteger(object, "interruptedSequence"),
 	].find((error) => error != null);
 	if (validationError) return invalidActivity(validationError);
 
@@ -237,6 +241,7 @@ function createNoopRecorder(): SubagentActivityRecorder {
 		beforeAgentStart() {},
 		agentStart() {},
 		agentEndWaiting() {},
+		agentEndInterrupted() {},
 		agentEndDone() {},
 		turnStart() {},
 		turnEnd() {},
@@ -250,7 +255,6 @@ function createNoopRecorder(): SubagentActivityRecorder {
 		toolExecutionEnd() {},
 		compaction() {},
 		contextUsage() {},
-		callerPing() {},
 		subagentDone() {},
 		sessionShutdown() {},
 	};
@@ -314,21 +318,27 @@ export function createSubagentActivityRecorder(params: {
 
 	const now = params.now ?? (() => Date.now());
 	const createdAt = now();
-	const activity: SubagentActivityState = {
-		version: 1,
-		runningChildId,
-		createdAt,
-		updatedAt: createdAt,
-		sequence: 0,
-		latestEvent: "session_start",
-		phase: "starting",
-		agentActive: false,
-		turnActive: false,
-		providerActive: false,
-		toolActive: false,
-		toolCount: 0,
-		compactionCount: 0,
-	};
+	const previous = readSubagentActivityFile(activityFile, runningChildId);
+	// A child extension reload recreates this recorder but retains its run-specific
+	// artifact. Preserve the existing state so activity sequences stay monotonic
+	// for the parent lifecycle observer.
+	const activity: SubagentActivityState = previous.ok
+		? { ...previous.activity }
+		: {
+				version: 1,
+				runningChildId,
+				createdAt,
+				updatedAt: createdAt,
+				sequence: 0,
+				latestEvent: "session_start",
+				phase: "starting",
+				agentActive: false,
+				turnActive: false,
+				providerActive: false,
+				toolActive: false,
+				toolCount: 0,
+				compactionCount: 0,
+			};
 
 	let disabled = false;
 	let failureCount = 0;
@@ -373,6 +383,22 @@ export function createSubagentActivityRecorder(params: {
 		}, remainingMs);
 	}
 
+	function startTurnActivity(
+		current: SubagentActivityState,
+		observedAt: number,
+		turnIndex: number | undefined,
+	): void {
+		current.agentActive = true;
+		current.turnActive = true;
+		if (turnIndex != null) current.turnIndex = turnIndex;
+		markActive(current, activeTurnScope(current), observedAt);
+	}
+
+	function activeTurnScope(current: SubagentActivityState): SubagentActivityScope {
+		if (!current.toolActive && !current.providerActive) return "turn";
+		return current.activeScope ?? "turn";
+	}
+
 	function record(
 		latestEvent: SubagentActivityEvent,
 		update: (current: SubagentActivityState, now: number) => void,
@@ -386,6 +412,10 @@ export function createSubagentActivityRecorder(params: {
 		activity.updatedAt = observedAt;
 		activity.sequence += 1;
 		update(activity, observedAt);
+		if (latestEvent === "agent_interrupted") {
+			activity.interruptedAt = observedAt;
+			activity.interruptedSequence = activity.sequence;
+		}
 
 		if (flush === "immediate") flushNow();
 		else scheduleFlush();
@@ -425,6 +455,8 @@ export function createSubagentActivityRecorder(params: {
 				(current, observedAt) => {
 					current.agentActive = true;
 					markActive(current, "agent", observedAt);
+					delete current.interruptedAt;
+					delete current.interruptedSequence;
 				},
 				"immediate",
 			);
@@ -435,6 +467,8 @@ export function createSubagentActivityRecorder(params: {
 				(current, observedAt) => {
 					current.agentActive = true;
 					markActive(current, "agent", observedAt);
+					delete current.interruptedAt;
+					delete current.interruptedSequence;
 				},
 				"immediate",
 			);
@@ -450,6 +484,17 @@ export function createSubagentActivityRecorder(params: {
 				"immediate",
 			);
 		},
+		agentEndInterrupted() {
+			record(
+				"agent_interrupted",
+				(current, observedAt) => {
+					clearActiveState(current);
+					current.phase = "waiting";
+					current.waitingSince = observedAt;
+				},
+				"immediate",
+			);
+		},
 		agentEndDone() {
 			markDone("agent_end");
 		},
@@ -457,14 +502,7 @@ export function createSubagentActivityRecorder(params: {
 			record(
 				"turn_start",
 				(current, observedAt) => {
-					current.agentActive = true;
-					current.turnActive = true;
-					if (turnIndex != null) current.turnIndex = turnIndex;
-					markActive(
-						current,
-						current.toolActive || current.providerActive ? (current.activeScope ?? "turn") : "turn",
-						observedAt,
-					);
+					startTurnActivity(current, observedAt, turnIndex);
 				},
 				"immediate",
 			);
@@ -598,9 +636,6 @@ export function createSubagentActivityRecorder(params: {
 				},
 				"throttled",
 			);
-		},
-		callerPing() {
-			markDone("caller_ping");
 		},
 		subagentDone() {
 			markDone("subagent_done");

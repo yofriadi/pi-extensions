@@ -414,7 +414,7 @@ describe("rederive and vanished panes", () => {
 		});
 		assert.ok(state);
 		assert.deepEqual(
-			state!.panes.map((p) => ({ paneId: p.paneId, depth: p.depth, ord: p.ord })),
+			state?.panes.map((p) => ({ paneId: p.paneId, depth: p.depth, ord: p.ord })),
 			[
 				{ paneId: "c", depth: 2, ord: 0 },
 				{ paneId: "a", depth: 1, ord: 1 },
@@ -429,7 +429,7 @@ describe("rederive and vanished panes", () => {
 			}),
 		});
 		assert.deepEqual(
-			partial!.panes.map((p) => ({ paneId: p.paneId, ord: p.ord, depth: p.depth })),
+			partial?.panes.map((p) => ({ paneId: p.paneId, ord: p.ord, depth: p.depth })),
 			[
 				{ paneId: "x", ord: 0, depth: 0 },
 				{ paneId: "y", ord: 1, depth: 0 },

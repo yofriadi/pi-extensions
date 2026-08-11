@@ -1,0 +1,24 @@
+#:schema https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json
+
+# Package-scoped fallow: extends the repo root config (rules, health, ignore
+# deps) but narrows entry to this package so `fallow` run from here analyzes
+# only pi-subagent-herdr. Arrays replace the parent's, so entry overrides the
+# root's `packages/*` globs.
+extends = ["../../.fallow.toml"]
+entry = ["src/index.ts", "test/integration/reload-trigger.ts"]
+
+[health]
+# `c8` reports generated-source-map branch columns as -1. Normalize those
+# sentinel columns after each coverage run; statement, branch, and function counts
+# remain untouched in the Istanbul map used for CRAP scoring.
+coverage = "coverage/coverage-final.json"
+
+# Arrays replace the inherited value, so this restates the sole root test entry
+# verbatim and adds the complexity/CRAP ceilings required for test helpers.
+[[health.thresholdOverrides]]
+files = ["**/*.test.*", "**/*.spec.*", "**/test/**", "**/tests/**"]
+maxUnitSize = 500
+maxCyclomatic = 20
+maxCognitive = 20
+maxCrap = 200.0
+reason = "describe()/it() callbacks are whole-suite closures; relax the unit-size ceiling for test files so health stays prod-focused (complexity/CRAP checks unchanged). Test helpers additionally need bounded complexity/CRAP ceilings."

@@ -2,11 +2,12 @@
 
 ## Context
 
-The parent-window widget (`renderSubagentWidgetLines` in `packages/pi-subagent-herdr/src/index.ts`) is a bordered box: one row per run with elapsed time, name, run ID, admission class, runtime plan, and a lifecycle label; queued and pending-delivery entries as additional rows. It refreshes on a 1s tick and consumes a versioned JSON sidecar (`subagent-activity/<id>.json`) written by the child session's activity recorder (`packages/pi-subagent-herdr/src/activity.ts`, 500ms throttled atomic writes) and read via `observeRunningSubagent` into `running.activity`.
+The parent-window widget (`renderSubagentWidgetLines` in `packages/pi-subagent-herdr/src/index.ts`) is a bordered box: one row per run with elapsed time, name, run ID, admission class, runtime plan, and a lifecycle label; queued and pending-delivery entries as additional rows.
+It refreshes on a 1s tick and consumes a versioned JSON sidecar (`subagent-activity/<id>.json`) written by the child session's activity recorder (`packages/pi-subagent-herdr/src/activity.ts`, 500ms throttled atomic writes) and read via `observeRunningSubagent` into `running.activity`.
 
 Target layout (approved by user):
 
-```
+```text
 ● Subagents · 3 active · 1 open · 4 queued
 ├─ ⠹ Plan Reviewer · [a1b2] · foreground · 12.3s
 │    ⎿  adversarial review · ↻5 · ⚙5 · ◈33.8k (62%)
@@ -19,7 +20,7 @@ Target layout (approved by user):
 
 Terminal layout — success clears, failure persists (approved by user):
 
-```
+```text
 ○ Subagents
 ├─ ✗ Plan Reviewer · [a1b2] · foreground · 12.3s
 │    ⎿  adversarial review · ↻5 · ⚙5 · ◈33.8k (62%)
@@ -144,3 +145,4 @@ No deployment or data migration: activity files are ephemeral per-run sidecars. 
 ## Open Questions
 
 None blocking. (Resolved during exploration and review: pending-delivery rows stay visible with last error; header retains the counts segment in the live state and is bare in the hollow state; queued and sticky caps are 3; blocked joins the two-line family with a static glyph; `formatElapsedDuration` stays model-facing and untouched; stalled stays a live-only state; ping renders as ■ stopped.)
+```

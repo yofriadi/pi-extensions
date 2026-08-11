@@ -1,9 +1,9 @@
 /**
- * Integration tests for blocking mode, abort-during-blocking, resume-region,
- * and attached layout (1–4 children) — OpenSpec task 8.2.
+ * Integration tests for blocking mode, abort-during-blocking, and attached
+ * layout (1–4 children) — OpenSpec task 8.2.
  *
  * Requires real herdr + PI_TEST_MODEL. Run with:
- *   PI_TEST_MODEL="tokenrouter/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 \
+ *   PI_TEST_MODEL="deepseek-v4-flash-free" PI_TEST_TIMEOUT=180000 \
  *     node --test --test-concurrency=1 test/integration/blocking-layout.test.ts
  */
 
@@ -159,61 +159,6 @@ for (const backend of backends) {
 			}
 		});
 
-		// ── Resume opens region ──
-		it("subagent_resume opens a pane in the parent's attached region", async () => {
-			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-resume-${id}.txt`;
-			const sessionPathFile = `/tmp/pi-integ-resume-sess-${id}.txt`;
-			const followFile = `/tmp/pi-integ-resume-follow-${id}.txt`;
-			trackTempFile(env, markerFile);
-			trackTempFile(env, sessionPathFile);
-			trackTempFile(env, followFile);
-
-			// Keep the seed and resume in one Pi process. Owner metadata binds the
-			// resumable child to this exact parent session identity.
-			const sessionsDir = join(env.dir, ".pi-sessions");
-			mkdirSync(sessionsDir, { recursive: true });
-			const parentSession = join(sessionsDir, `parent-resume-${id}.jsonl`);
-			writeFileSync(parentSession, "", "utf8");
-			trackTempFile(env, parentSession);
-			const surface = createTrackedSurface(env, `resume-${id}`);
-			await sleep(800);
-
-			const task = [
-				`Call the subagent tool with these EXACT parameters:`,
-				`  label: "ResumeSeed-${id}"`,
-				`  agent: "test-echo"`,
-				`  blocking: true`,
-				`  task: "Run this bash: echo 'SEED_${id}' > '${markerFile}'; echo $PI_SUBAGENT_SESSION > '${sessionPathFile}'"`,
-				`When the blocking result returns, it includes the exact Session path. Immediately call subagent_resume with that path,`,
-				`  label: "ResumeFollow-${id}"`,
-				`  message: "Run: echo 'FOLLOW_${id}' > '${followFile}'"`,
-				`Do not start another parent session. After the resume completes, say RESUME_REGION_DONE_${id}.`,
-			].join("\n");
-
-			const { identity } = startPi(surface, env.dir, task, { sessionFile: parentSession });
-			await waitForFile(markerFile, PI_TIMEOUT, /SEED_/);
-			const sessionPath = (await waitForFile(sessionPathFile, PI_TIMEOUT, /\.jsonl/)).trim();
-			assert.ok(existsSync(sessionPath), `seed session should exist: ${sessionPath}`);
-			// The seed marker and session path are durable; the parent may already have
-			// advanced to the resume before the transient seed acknowledgement is rendered.
-
-			const layout = await waitForChildPaneCount(identity.paneId, 1, PI_TIMEOUT);
-			const children = layout.panes.filter((p) => p.paneId !== identity.paneId);
-			assert.ok(children.length >= 1, "resume should open a child pane beside parent");
-			for (const child of children) {
-				assert.equal(getPaneIdentity(child.paneId).tabId, identity.tabId);
-			}
-
-			await waitForFile(followFile, PI_TIMEOUT, /FOLLOW_/);
-			try {
-				await waitForScreen(surface, new RegExp(`RESUME_REGION_DONE_${id}`), Math.min(PI_TIMEOUT, 60_000));
-			} catch {
-				// FOLLOW marker is the hard assertion; phrase is best-effort under model variance
-			}
-			assert.equal(getPaneIdentity(surface).tabId, identity.tabId);
-		});
-
 		it("delivers one async completion through an actual extension reload", async () => {
 			const id = uniqueId();
 			const markerFile = `/tmp/pi-integ-reload-async-${id}.txt`;
@@ -260,25 +205,6 @@ for (const backend of backends) {
 			const content = await waitForFile(secondFile, PI_TIMEOUT, /SECOND_/);
 			assert.match(content, new RegExp(`SECOND_${id}`));
 			assert.equal(herdrPaneExists(identity.paneId), true);
-		});
-
-		it("blocking ping settles foreground and later resume runs as background", async () => {
-			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-ping-resume-${id}.txt`;
-			trackTempFile(env, markerFile);
-			const surface = createTrackedSurface(env, `ping-resume-${id}`);
-			await sleep(800);
-			const task = [
-				`Call subagent with agent: "test-ping-resume", label: "PingResume-${id}", blocking: true, task: "INITIAL_PING ${id}".`,
-				`When the blocking result says NEED_RESUME and gives a Session path, call subagent_resume with that path,`,
-				`label: "PingResume-${id}", and message: "Run: echo 'PING_RESUMED_${id}' > '${markerFile}'".`,
-				`After the async resume completion arrives, say PING_RESUME_DONE_${id}.`,
-			].join("\n");
-			startPi(surface, env.dir, task);
-			const content = await waitForFile(markerFile, PI_TIMEOUT, /PING_RESUMED_/);
-			assert.match(content, new RegExp(`PING_RESUMED_${id}`));
-			const screen = await waitForScreen(surface, /PING_RESUME_DONE|resumed|completed/i, PI_TIMEOUT, 300);
-			assert.match(screen, /NEED_RESUME|resumed|completed/i);
 		});
 
 		it("attached layout stacks long-lived children beside main (direction:right)", async () => {

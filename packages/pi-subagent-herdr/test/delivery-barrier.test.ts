@@ -25,17 +25,17 @@ describe("foreground delivery barrier", () => {
 		assert.deepEqual(sent, ["a:false", "b:true"]);
 	});
 
-	it("releases a blocking ping before one background wake-up", async () => {
+	it("returns a blocking result before one background wake-up", async () => {
 		const barrier = new ForegroundDeliveryBarrier();
 		const foreground = barrier.enter();
 		const order: string[] = [];
 		const pending = barrier.deliver((wake) => {
 			order.push(`background:${wake}`);
 		});
-		order.push("blocking-ping-result");
+		order.push("blocking-result");
 		foreground.release();
 		await pending;
-		assert.deepEqual(order, ["blocking-ping-result", "background:true"]);
+		assert.deepEqual(order, ["blocking-result", "background:true"]);
 	});
 
 	it("retries failed API acceptance within a bounded budget", async () => {
@@ -63,18 +63,18 @@ describe("foreground delivery barrier", () => {
 		assert.equal(calls, 2);
 	});
 
-	it("flushes simultaneous async completions and ping in settlement order with one wake", async () => {
+	it("flushes simultaneous async completions in settlement order with one wake", async () => {
 		const barrier = new ForegroundDeliveryBarrier();
 		const foreground = barrier.enter();
 		const sent: string[] = [];
-		const deliveries = ["result-a", "ping-b", "result-c"].map((name) =>
+		const deliveries = ["result-a", "result-b", "result-c"].map((name) =>
 			barrier.deliver((wake) => {
 				sent.push(`${name}:${wake}`);
 			}),
 		);
 		foreground.release();
 		await Promise.all(deliveries);
-		assert.deepEqual(sent, ["result-a:false", "ping-b:false", "result-c:true"]);
+		assert.deepEqual(sent, ["result-a:false", "result-b:false", "result-c:true"]);
 	});
 
 	it("keeps failed acceptance pending until bounded retry rejects and supports shutdown suppression", async () => {

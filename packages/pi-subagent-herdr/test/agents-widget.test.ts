@@ -8,7 +8,6 @@ import { type SubagentActivityState, writeSubagentActivityFile } from "../src/ac
 import * as subagentsModule from "../src/index.ts";
 import {
 	createLifecycle,
-	markCompleted,
 	markCompletionDetected,
 	markDelivery,
 	markFailed,
@@ -255,7 +254,7 @@ describe("agents dashboard rows", () => {
 });
 
 describe("sticky terminal dashboard behavior", () => {
-	it("maps failure, interrupt-dominant stop, ping, and abandoned-watch outcomes", () => {
+	it("maps failure, interrupt-dominant stop, and timeout-dominant abandoned-watch outcomes", () => {
 		const failed = baseRun({ id: "failed", lifecycle: markFailed(createLifecycle(1_000), "boom", 5_000, 1) });
 		const interrupted = baseRun({
 			id: "interrupted",
@@ -270,35 +269,32 @@ describe("sticky terminal dashboard behavior", () => {
 				130,
 			),
 		});
-		const ping = baseRun({
-			id: "ping",
-			lifecycle: markCompleted(
-				markCompletionDetected(workingLifecycle(), { reason: "ping", exitCode: 0 }, 5_000),
-				5_000,
-			),
-		});
 		const abandoned = baseRun({
 			id: "abandoned",
 			lifecycle: markFailed(createLifecycle(1_000), "timeout", 5_000, 1),
 		});
+		const interruptedAbandoned = baseRun({
+			id: "interrupted-abandoned",
+			lifecycle: markInterruptRequested(workingLifecycle(), 4_000),
+		});
 
 		assert.equal(testApi.captureStickyTerminalRun(failed, { exitCode: 1 }, 5_000), true);
 		assert.equal(testApi.captureStickyTerminalRun(interrupted, { exitCode: 130 }, 5_100), true);
+		assert.equal(testApi.captureStickyTerminalRun(abandoned, { exitCode: 1, watchAbandoned: true }, 5_300), true);
 		assert.equal(
-			testApi.captureStickyTerminalRun(ping, { exitCode: 0, ping: { name: "reviewer", message: "help" } }, 5_200),
+			testApi.captureStickyTerminalRun(interruptedAbandoned, { exitCode: 1, watchAbandoned: true }, 5_400),
 			true,
 		);
-		assert.equal(testApi.captureStickyTerminalRun(abandoned, { exitCode: 1, watchAbandoned: true }, 5_300), true);
 
 		assert.equal(testApi.stickyTerminalRuns.get("failed").kind, "failed");
 		assert.equal(testApi.stickyTerminalRuns.get("interrupted").kind, "stopped");
-		assert.equal(testApi.stickyTerminalRuns.get("ping").kind, "stopped");
 		assert.equal(testApi.stickyTerminalRuns.get("abandoned").kind, "watch-abandoned");
+		assert.equal(testApi.stickyTerminalRuns.get("interrupted-abandoned").kind, "watch-abandoned");
 		const renderSticky = (id: string) => render([], 120, [], [], [testApi.stickyTerminalRuns.get(id)]).join("\n");
 		assert.match(renderSticky("failed"), /✗ Reviewer · \[failed\]/);
 		assert.match(renderSticky("interrupted"), /■ Reviewer · \[interrupted\]/);
-		assert.match(renderSticky("ping"), /■ Reviewer · \[ping\]/);
 		assert.match(renderSticky("abandoned"), /⚠ Reviewer · \[abandoned\]/);
+		assert.match(renderSticky("interrupted-abandoned"), /⚠ Reviewer · \[interrupted-abandoned\]/);
 	});
 
 	it("freezes duration and telemetry at capture while success, suppression, and shutdown aborts leave no row", () => {
@@ -356,7 +352,7 @@ describe("sticky terminal dashboard behavior", () => {
 		}
 	});
 
-	it("evicts all rows on the next admission and one correlated row on manual-resume completion", () => {
+	it("evicts all rows on the next admission", () => {
 		for (const id of ["one", "two"]) {
 			testApi.captureStickyTerminalRun(
 				baseRun({ id, lifecycle: markFailed(createLifecycle(1_000), "boom", 2_000, 1) }),
@@ -366,51 +362,6 @@ describe("sticky terminal dashboard behavior", () => {
 		}
 		testApi.clearStickyTerminalsOnAdmission();
 		assert.equal(testApi.stickyTerminalRuns.size, 0);
-
-		for (const id of ["old", "other", "failed-resume", "ping-resume", "abandoned-resume"]) {
-			testApi.captureStickyTerminalRun(
-				baseRun({ id, lifecycle: markFailed(createLifecycle(1_000), "boom", 2_000, 1) }),
-				{ exitCode: 1 },
-				2_000,
-			);
-		}
-		testApi.evictResumedStickyTerminal(
-			baseRun({
-				id: "new",
-				resumedStickyId: "old",
-				activity: telemetry({ latestEvent: "subagent_done", phase: "done" }),
-			}),
-			{ exitCode: 0 },
-		);
-		testApi.evictResumedStickyTerminal(
-			baseRun({
-				id: "failed-new",
-				resumedStickyId: "failed-resume",
-				activity: telemetry({ latestEvent: "subagent_done", phase: "done" }),
-			}),
-			{ exitCode: 1 },
-		);
-		testApi.evictResumedStickyTerminal(
-			baseRun({
-				id: "ping-new",
-				resumedStickyId: "ping-resume",
-				activity: telemetry({ latestEvent: "caller_ping", phase: "done" }),
-			}),
-			{ exitCode: 0, ping: { name: "reviewer", message: "help" } },
-		);
-		testApi.evictResumedStickyTerminal(
-			baseRun({
-				id: "abandoned-new",
-				resumedStickyId: "abandoned-resume",
-				activity: telemetry({ latestEvent: "turn_end" }),
-			}),
-			{ exitCode: 1, watchAbandoned: true },
-		);
-		assert.equal(testApi.stickyTerminalRuns.has("old"), false);
-		assert.equal(testApi.stickyTerminalRuns.has("other"), true);
-		assert.equal(testApi.stickyTerminalRuns.has("failed-resume"), true);
-		assert.equal(testApi.stickyTerminalRuns.has("ping-resume"), true);
-		assert.equal(testApi.stickyTerminalRuns.has("abandoned-resume"), true);
 	});
 
 	it("orders newest sticky rows first, caps at three, and uses a bare hollow header", () => {
@@ -467,7 +418,7 @@ describe("agents dashboard narrow-width degradation", () => {
 			([, line]) => line.includes("this is a deliberately long presentation label") && !line.includes("19s"),
 		);
 		assert.ok(durationDropped, "a width keeps the full name after dropping duration");
-		const narrower = outputs.get(Math.max(20, durationDropped![0] - 8)) ?? "";
+		const narrower = outputs.get(Math.max(20, durationDropped?.[0] - 8)) ?? "";
 		assert.doesNotMatch(narrower, /this is a deliberately long presentation label/);
 	});
 

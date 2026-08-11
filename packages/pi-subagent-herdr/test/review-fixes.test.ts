@@ -52,7 +52,7 @@ describe("safeCloseSubagentPane decision (orphan prevention)", () => {
 // ── #2: identity-tag injection via definition body ──
 
 describe("agent-definition body identity-tag rejection", () => {
-	it("rejects a body that smuggles an <active_agent> tag (spawn + resume share parse)", () => {
+	it("rejects a body that smuggles an <active_agent> tag", () => {
 		const malicious = [
 			"---",
 			"name: reviewer",
@@ -137,12 +137,12 @@ describe("deliverBackgroundMessage acknowledged delivery boundary", () => {
 				sendMessage(msg: any) {
 					appendFileSync(
 						sessionFile,
-						JSON.stringify({
+						`${JSON.stringify({
 							type: "custom_message",
 							customType: msg.customType,
 							content: msg.content,
 							details: msg.details,
-						}) + "\n",
+						})}\n`,
 					);
 				},
 			};
@@ -250,12 +250,12 @@ describe("deliverBackgroundMessage acknowledged delivery boundary", () => {
 				sendMessage(msg: any) {
 					appendFileSync(
 						sessionFile,
-						JSON.stringify({
+						`${JSON.stringify({
 							type: "custom_message",
 							customType: msg.customType,
 							content: msg.content,
 							details: msg.details,
-						}) + "\n",
+						})}\n`,
 					);
 				},
 				sendUserMessage(content: unknown, options: unknown) {
@@ -296,12 +296,12 @@ describe("deliverBackgroundMessage acknowledged delivery boundary", () => {
 				sendMessage(msg: any) {
 					appendFileSync(
 						sessionFile,
-						JSON.stringify({
+						`${JSON.stringify({
 							type: "custom_message",
 							customType: msg.customType,
 							content: msg.content,
 							details: msg.details,
-						}) + "\n",
+						})}\n`,
 					);
 				},
 				sendUserMessage() {
@@ -344,12 +344,12 @@ describe("deliverBackgroundMessage acknowledged delivery boundary", () => {
 					setTimeout(() => {
 						appendFileSync(
 							sessionFile,
-							JSON.stringify({
+							`${JSON.stringify({
 								type: "custom_message",
 								customType: msg.customType,
 								content: msg.content,
 								details: msg.details,
-							}) + "\n",
+							})}\n`,
 						);
 					}, 600).unref();
 				},
@@ -460,7 +460,7 @@ describe("findDeliveryEntry expanding-window dedup", () => {
 					}),
 				);
 			}
-			writeFileSync(sessionFile, records.join("\n") + "\n");
+			writeFileSync(sessionFile, `${records.join("\n")}\n`);
 			const stat = await import("node:fs/promises").then((m) => m.stat(sessionFile));
 			assert.ok(stat.size > 32_768, "log exceeds the 32KB initial window");
 
@@ -493,13 +493,51 @@ describe("findDeliveryEntry expanding-window dedup", () => {
 					}),
 				);
 			}
-			writeFileSync(sessionFile, records.join("\n") + "\n");
+			writeFileSync(sessionFile, `${records.join("\n")}\n`);
 			const stat = await import("node:fs/promises").then((m) => m.stat(sessionFile));
 			assert.ok(stat.size > 1_048_576, "log exceeds the 1 MiB cap");
 
 			const found = await testApi.findDeliveryEntry(sessionFile, "deep-target", "subagent_result");
 			assert.notEqual(found, null);
 			assert.equal(found.details.id, "deep-target");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not let a trailing partial record steal the 128-record budget in the final window", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "delivery-tail-partial-"));
+		const sessionFile = join(dir, "parent.jsonl");
+		try {
+			// 256 records × exactly 8177 bytes (record + trailing newline) = 2,093,312 B
+			// plus a 1,920 B partial tail → 2,095,232 B total. The final 1 MiB window
+			// starts exactly at record 128 (1,046,656 = 128 × 8177), so it holds 128
+			// complete records plus the partial fragment. The fragment must not count
+			// toward the 128-record budget, or the oldest in-window record is pushed
+			// out of the search slice and the dedup lookup misses it.
+			const template = {
+				type: "custom_message",
+				customType: "subagent_result",
+				content: "",
+				details: { id: "", name: "t", exitCode: 0 },
+			};
+			const sizedRecord = (id: string): string => {
+				const base = JSON.stringify({ ...template, details: { ...template.details, id } });
+				const gap = 8176 - base.length;
+				return base.replace('"content":""', `"content":"${"x".repeat(gap)}"`);
+			};
+			const records: string[] = [];
+			for (let i = 0; i < 256; i++) {
+				const record = sizedRecord(i === 128 ? "tail-budget-target" : `run-${i}`);
+				assert.equal(Buffer.byteLength(record), 8176, "record must be exactly 8176 bytes");
+				records.push(record);
+			}
+			writeFileSync(sessionFile, `${records.join("\n")}\n${"z".repeat(1920)}`);
+			const stat = await import("node:fs/promises").then((m) => m.stat(sessionFile));
+			assert.equal(stat.size, 2_095_232, "file size must keep the final window aligned");
+			const found = await testApi.findDeliveryEntry(sessionFile, "tail-budget-target", "subagent_result");
+			assert.notEqual(found, null, "oldest in-window record must survive the partial tail");
+			assert.equal(found.details.id, "tail-budget-target");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -599,6 +637,30 @@ describe("subagent-done agent_settled lifecycle", () => {
 		}
 	});
 
+	it("publishes a provider error sidecar when its message mentions an aborted request", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "settled-provider-abort-wording-"));
+		const sessionFile = join(dir, "child.jsonl");
+		const mock = makeMockPi(sessionFile, "1");
+		try {
+			subagentDoneModule.default(mock.pi);
+			await mock.handlers.agent_end(
+				{
+					messages: [
+						{ role: "assistant", stopReason: "error", errorMessage: "Request was aborted by upstream" },
+					],
+				},
+				mock.ctx,
+			);
+			await mock.handlers.agent_settled({}, mock.ctx);
+			const sidecar = readSidecar(sessionFile);
+			assert.equal(sidecar?.type, "error");
+			assert.match(String(sidecar?.errorMessage), /aborted by upstream/);
+		} finally {
+			mock.restore();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("publishes a done sidecar and exits on a clean settled turn", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "settled-done-"));
 		const sessionFile = join(dir, "child.jsonl");
@@ -631,12 +693,12 @@ describe("round-4 delivery and pane fixes", () => {
 					setTimeout(() => {
 						appendFileSync(
 							sessionFile,
-							JSON.stringify({
+							`${JSON.stringify({
 								type: "custom_message",
 								customType: msg.customType,
 								content: msg.content,
 								details: msg.details,
-							}) + "\n",
+							})}\n`,
 						);
 					}, 600).unref();
 				},

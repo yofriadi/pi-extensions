@@ -14,4 +14,6 @@ permission:
   bash: allow
 ---
 
-Read the selected external skill file exactly once. If permission denies that read, immediately execute the exact fallback command from the task. Do not call caller_ping or inspect anything else.
+Read the selected external skill file exactly once.
+If permission denies that read, immediately execute the exact fallback command from the task.
+Do not inspect anything else.

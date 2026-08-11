@@ -7,3 +7,5 @@ pi-session-*.html
 *.session.html
 *.session-export.html
 pi-mlflow.json
+
+coverage/

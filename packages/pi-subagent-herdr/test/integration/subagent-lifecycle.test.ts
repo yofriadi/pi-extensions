@@ -7,27 +7,18 @@
  *
  * Duration: ~30-120s per test, depending on the selected model.
  *
- * Run `PI_TEST_MODEL="tokenrouter/gpt-5.6-luna" PI_TEST_TIMEOUT=180000
+ * Run `PI_TEST_MODEL="deepseek-v4-flash-free" PI_TEST_TIMEOUT=180000
  * npm run test:integration` from inside herdr. The explicit model keeps
  * real-LLM runs predictable and the longer timeout covers the lifecycle suite.
  *
  * Configuration:
- *   PI_TEST_MODEL     — model for all pi sessions (default: tokenrouter/gpt-5.6-luna)
+ *   PI_TEST_MODEL     — model for all pi sessions (default: deepseek-v4-flash-free)
  *   PI_TEST_TIMEOUT   — per-test timeout in ms (default: 120000)
  */
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	symlinkSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -36,6 +27,8 @@ import {
 	createTestEnv,
 	createTrackedSurface,
 	getAvailableBackends,
+	herdrPaneExists,
+	interruptPane,
 	PERMISSION_EXTENSION,
 	PI_TIMEOUT,
 	readPane,
@@ -103,7 +96,7 @@ for (const backend of backends) {
 			const screen = await waitForScreen(surface, /INTEGRATION_COMPLETE|completed|Sub-agent.*"Echo/i, PI_TIMEOUT);
 
 			// Verify: session file was created (shown in steer result)
-			const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
+			const sessionMatch = screen.match(/Session log:\s*(\S+\.jsonl)/);
 			if (sessionMatch) {
 				const sessionFile = sessionMatch[1];
 				assert.ok(existsSync(sessionFile), `Subagent session file should exist: ${sessionFile}`);
@@ -164,6 +157,38 @@ for (const backend of backends) {
 				300,
 			);
 			assert.ok(/STATUS_TEST_DONE|completed/i.test(completionScreen));
+		});
+
+		it("projects child-pane Escape as interrupted while preserving the child pane", async () => {
+			const id = uniqueId();
+			const startFile = `/tmp/pi-integ-child-interrupt-start-${id}.txt`;
+			trackTempFile(env, startFile);
+			const surface = createTrackedSurface(env, `child-interrupt-${id}`);
+			await sleep(1_000);
+
+			const task = [
+				`Call the subagent tool with these EXACT parameters:`,
+				`  label: "ChildInterrupt-${id}"`,
+				`  agent: "test-echo"`,
+				`  blocking: true`,
+				`  task: "Run this bash command: echo 'CHILD_INTERRUPT_START_${id}' > '${startFile}'; sleep 90"`,
+				`Do not do anything else before calling subagent; wait for its tool result.`,
+			].join("\n");
+			const { identity } = startPi(surface, env.dir, task);
+			await waitForFile(startFile, PI_TIMEOUT, /CHILD_INTERRUPT_START_/);
+
+			const layout = await waitForChildPaneCount(identity.paneId, 1, PI_TIMEOUT);
+			const child = layout.panes.find((pane) => pane.paneId !== identity.paneId);
+			assert.ok(child, "expected a visible child pane before sending Escape");
+			interruptPane(child.paneId);
+
+			await waitForScreen(
+				surface,
+				/ChildInterrupt-.*interrupted|interrupted.*ChildInterrupt-/is,
+				PI_TIMEOUT,
+				300,
+			);
+			assert.equal(herdrPaneExists(child.paneId), true, "child pane remains available for direct user recovery");
 		});
 
 		// ── Parallel subagent spawn ──
@@ -236,7 +261,7 @@ for (const backend of backends) {
 			// Receiving the result proves the agent-owned fork seed auto-exited and finalized.
 
 			// Verify: the forked session has a parent link
-			const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
+			const sessionMatch = screen.match(/Session log:\s*(\S+\.jsonl)/);
 			if (sessionMatch) {
 				const sessionFile = sessionMatch[1];
 				assert.ok(existsSync(sessionFile), `Fork session file should exist: ${sessionFile}`);
@@ -251,34 +276,6 @@ for (const backend of backends) {
 				// Fork sessions include parent context (model_change entries etc.)
 				assert.ok(entries.length >= 2, "Fork session should have context entries beyond header");
 			}
-		});
-
-		// ── caller_ping ──
-
-		it("subagent caller_ping sends notification back to the parent", async () => {
-			const id = uniqueId();
-
-			const surface = createTrackedSurface(env, `ping-${id}`);
-			await sleep(1000);
-
-			const task = [
-				`Call the subagent tool with these EXACT parameters:`,
-				`  label: "Ping-${id}"`,
-				`  agent: "test-ping"`,
-				`  task: "PING_TEST_${id}"`,
-				`Just call the subagent tool once. Do not do anything else before calling it.`,
-			].join("\n");
-
-			startPi(surface, env.dir, task);
-
-			// The test-ping agent calls caller_ping, which steers a "needs help" message
-			// back to the outer pi. Look for it on screen.
-			const screen = await waitForScreen(surface, /needs help|PING|caller_ping|ping/i, PI_TIMEOUT);
-
-			assert.ok(
-				/needs help|PING/i.test(screen),
-				`Screen should show ping notification. Got:\n${screen.slice(-800)}`,
-			);
 		});
 
 		// ── Agent discovery ──
@@ -546,7 +543,7 @@ for (const backend of backends) {
 			assert.match(content, new RegExp(`ASK_ALLOWED_${id}`));
 		});
 
-		it("keeps parent lifecycle tools hidden despite agent tools and allow policy", async () => {
+		it("keeps the parent subagent tool hidden despite agent tools and allow policy", async () => {
 			const id = uniqueId();
 			const markerFile = `/tmp/pi-integ-hidden-tools-${id}.txt`;
 			trackTempFile(env, markerFile);
@@ -555,53 +552,14 @@ for (const backend of backends) {
 			const permissionExtension = PERMISSION_EXTENSION;
 			const task = [
 				`Call the subagent tool with agent: "test-hidden", label: "Hidden-${id}",`,
-				`and task: "If parent lifecycle tools are unavailable, run: echo 'TOOLS_HIDDEN_${id}' > '${markerFile}'".`,
+				`and task: "If subagent is unavailable, run: echo 'TOOLS_HIDDEN_${id}' > '${markerFile}'".`,
 			].join("\n");
 			startPi(surface, env.dir, task, { extraArgs: `-e ${JSON.stringify(permissionExtension)}` });
 			const content = await waitForFile(markerFile, PI_TIMEOUT, /TOOLS_HIDDEN_/);
 			assert.match(content, new RegExp(`TOOLS_HIDDEN_${id}`));
 			const inspection = await waitForInspection(env, (value) => value.agent === "test-hidden");
 			assert.equal(inspection.activeTools.includes("subagent"), false);
-			assert.equal(inspection.activeTools.includes("subagent_interrupt"), false);
-			assert.equal(inspection.activeTools.includes("subagent_resume"), false);
-		});
-
-		it("lets the real permission path gate deny subagent_resume before launch", async () => {
-			const id = uniqueId();
-			const sessionPath = `/tmp/pi-integ-denied-resume-${id}.jsonl`;
-			const ownerPath = `${sessionPath}.owner.json`;
-			trackTempFile(env, sessionPath);
-			trackTempFile(env, ownerPath);
-			writeFileSync(
-				sessionPath,
-				`${JSON.stringify({ type: "session", version: 3, id: `owned-${id}`, timestamp: new Date().toISOString(), cwd: env.dir })}\n`,
-			);
-			writeFileSync(
-				ownerPath,
-				`${JSON.stringify({ version: 1, agentId: "test-echo", parentSessionId: "different-parent", parentSessionFile: sessionPath, createdAt: new Date().toISOString() })}\n`,
-				{ mode: 0o600 },
-			);
-			chmodSync(ownerPath, 0o600);
-			const projectPermissionDir = `${env.dir}/.pi/extensions/pi-permission-system`;
-			execFileSync("mkdir", ["-p", projectPermissionDir]);
-			writeFileSync(
-				`${projectPermissionDir}/config.json`,
-				JSON.stringify({ permission: { "*": "allow", path: { "*": "allow", [sessionPath]: "deny" } } }),
-			);
-			const surface = createTrackedSurface(env, `permission-resume-${id}`);
-			await sleep(1000);
-			const permissionExtension = PERMISSION_EXTENSION;
-			const task = [
-				`Call subagent_resume with path: "${sessionPath}" and label: "DeniedResume-${id}".`,
-				`After the tool responds, say PATH_GATE_DONE_${id}.`,
-			].join("\n");
-			const { identity } = startPi(surface, env.dir, task, {
-				extraArgs: `-e ${JSON.stringify(permissionExtension)}`,
-			});
-			const screen = await waitForScreen(surface, /not permitted|denied|PATH_GATE_DONE/i, PI_TIMEOUT, 300);
-			assert.match(screen, /not permitted|denied/i);
-			const layout = await waitForChildPaneCount(identity.paneId, 0, 5_000);
-			assert.equal(layout.panes.filter((pane) => pane.paneId !== identity.paneId).length, 0);
+			assert.equal(inspection.activeTools.includes("subagent_done"), true);
 		});
 
 		it("inherits the exact global agent root with real permission identity", async () => {

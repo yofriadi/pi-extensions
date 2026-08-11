@@ -13,4 +13,6 @@ permission:
   bash: allow
 ---
 
-Attempt to read the selected manual-selected SKILL.md exactly once. If permission denies the read, immediately execute the exact fallback command in the task. Do not call caller_ping or inspect anything else.
+Attempt to read the selected manual-selected SKILL.md exactly once.
+If permission denies the read, immediately execute the exact fallback command in the task.
+Do not inspect anything else.

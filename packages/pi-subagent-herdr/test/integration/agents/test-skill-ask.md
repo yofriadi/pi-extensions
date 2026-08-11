@@ -9,7 +9,7 @@ permission:
     manual-selected: ask
   bash: allow
   read: allow
-  caller_ping: deny
 ---
 
-Read only the selected manual-selected SKILL.md, then immediately execute the exact bash command in the task. Do not call caller_ping, inspect anything else, or ask the parent for help.
+Read only the selected manual-selected SKILL.md, then immediately execute the exact bash command in the task.
+Do not inspect anything else or ask the parent for help.

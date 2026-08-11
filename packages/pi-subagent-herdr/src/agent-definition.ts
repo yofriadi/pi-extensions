@@ -54,6 +54,9 @@ export function validateCanonicalAgentId(value: unknown): string {
  */
 type FrontmatterScalars = Record<string, string | null>;
 
+// The ordered quote/escape scan is intentionally kept together: splitting it obscures
+// the frontmatter parser's character-state contract without reducing risk.
+// fallow-ignore-next-line complexity -- quote/escape state machine is clearer as one ordered scan
 function stripInlineComment(value: string): string {
 	let inSingle = false;
 	let inDouble = false;
@@ -212,17 +215,17 @@ export function parseAgentDefinition(
 		throw new AgentDefinitionError(`Invalid subagent ${JSON.stringify(id)}: obsolete system-prompt frontmatter.`);
 	}
 
-	const assertedName = scalarString(scalars["name"]);
+	const assertedName = scalarString(scalars.name);
 	if (assertedName !== undefined && assertedName !== id) {
 		throw new AgentDefinitionError(`Invalid subagent ${JSON.stringify(id)}: frontmatter name must match filename.`);
 	}
 
-	const seedValue = scalarString(scalars["seed"]);
+	const seedValue = scalarString(scalars.seed);
 	if (seedValue !== undefined && seedValue !== "fresh" && seedValue !== "fork") {
 		throw new AgentDefinitionError(`Invalid subagent ${JSON.stringify(id)}: seed must be fresh or fork.`);
 	}
 
-	const tools = validateToolsProfile(scalars["tools"], id);
+	const tools = validateToolsProfile(scalars.tools, id);
 
 	const body = content.slice(match[0].length).trim();
 	rejectIdentityTagsInBody(body, id);
@@ -231,10 +234,10 @@ export function parseAgentDefinition(
 		id,
 		sourcePath,
 		source,
-		model: scalarString(scalars["model"]),
-		thinking: scalarString(scalars["thinking"]),
+		model: scalarString(scalars.model),
+		thinking: scalarString(scalars.thinking),
 		tools,
-		skills: scalarString(scalars["skills"]),
+		skills: scalarString(scalars.skills),
 		seed: (seedValue as SeedMode | undefined) ?? "fresh",
 		body,
 		frontmatter,

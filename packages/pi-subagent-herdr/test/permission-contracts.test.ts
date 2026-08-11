@@ -22,8 +22,8 @@ describe("permission contracts", () => {
 		assert.equal((prompt.content.match(/You are worker\./g) ?? []).length, 1);
 	});
 
-	it("hard-denies only parent lifecycle tools in children", () => {
-		assert.deepEqual([...testApi.lifecycleDenySet()], ["subagent", "subagent_interrupt", "subagent_resume"]);
+	it("hard-denies the parent subagent tool in children", () => {
+		assert.deepEqual([...testApi.lifecycleDenySet()], ["subagent"]);
 		assert.equal(testApi.lifecycleDenySet().has("subagents_list"), false);
 	});
 

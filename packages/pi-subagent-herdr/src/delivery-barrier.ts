@@ -13,6 +13,8 @@ interface HeldDelivery {
 const DELIVERY_BARRIER_VERSION = 2;
 
 export class ForegroundDeliveryBarrier {
+	/** Read via any-cast on legacy global instances after extension reload (see getForegroundDeliveryBarrier). */
+	// fallow-ignore-next-line unused-class-member
 	readonly version = DELIVERY_BARRIER_VERSION;
 	private readonly foregroundIds = new Set<string>();
 	private nextSequence = 0;
@@ -61,6 +63,7 @@ export class ForegroundDeliveryBarrier {
 		return this.suppressedError !== undefined;
 	}
 
+	// fallow-ignore-next-line unused-class-member -- public barrier query API preserved from HEAD
 	pendingCount(): number {
 		return this.held.length + (this.inFlight ? 1 : 0);
 	}
@@ -86,60 +89,93 @@ export class ForegroundDeliveryBarrier {
 	}
 
 	private async flush(): Promise<void> {
-		if (this.flushing || this.isActive() || this.held.length === 0 || this.suppressedError) return;
+		if (!this.canFlush()) return;
 		this.flushing = true;
 		const flushGeneration = this.suppressionGeneration;
 		try {
 			// Let deliveries scheduled in this turn join the initial batch.
 			await Promise.resolve();
-			const batch = this.held.splice(0).sort((a, b) => a.sequence - b.sequence);
-			let index = 0;
-			while (true) {
-				if (this.isActive() || this.suppressedError || flushGeneration !== this.suppressionGeneration) {
-					for (const pending of batch.slice(index))
-						pending.reject(
-							this.suppressedError ?? new Error("Foreground delivery resumed while flushing."),
-						);
-					break;
-				}
-				if (index >= batch.length) {
-					if (this.held.length === 0) break;
-					// A follower may have arrived while the previous send was in flight.
-					// Append it to this drain and reserve no second wake if one was
-					// already accepted by the parent API.
-					batch.push(...this.held.splice(0).sort((a, b) => a.sequence - b.sequence));
-				}
-				const pending = batch[index++];
-				this.inFlight = pending;
-				this.inFlightReject = pending.reject;
-				const wake = !this.wakeIssued && index === batch.length && this.held.length === 0;
-				try {
-					await retryAcceptedDelivery(() => pending.send(wake), {
-						shouldContinue: () =>
-							!this.suppressedError && !this.isActive() && flushGeneration === this.suppressionGeneration,
-						cancellationError: () =>
-							this.suppressedError ?? new Error("Foreground delivery resumed while flushing."),
-					});
-					if (wake && !this.suppressedError && flushGeneration === this.suppressionGeneration) {
-						this.wakeIssued = true;
-					}
-					if (this.suppressedError || flushGeneration !== this.suppressionGeneration) {
-						pending.reject(this.suppressedError ?? new Error("Subagent delivery suppressed."));
-					} else {
-						pending.resolve();
-					}
-				} catch (error) {
-					pending.reject(error instanceof Error ? error : new Error(String(error)));
-				} finally {
-					this.inFlight = undefined;
-					this.inFlightReject = undefined;
-				}
-			}
+			await this.drainHeldDeliveries(flushGeneration);
 		} finally {
-			this.flushing = false;
-			if (!this.isActive() && this.held.length > 0 && !this.suppressedError) void this.flush();
-			if (this.held.length === 0 && !this.inFlight) this.wakeIssued = false;
+			this.finishFlush();
 		}
+	}
+
+	private canFlush(): boolean {
+		return !this.flushing && !this.isActive() && this.held.length > 0 && !this.suppressedError;
+	}
+
+	private async drainHeldDeliveries(flushGeneration: number): Promise<void> {
+		const drain = { batch: this.takeHeldBatch(), index: 0 };
+		for (;;) {
+			const cancellation = this.flushCancellation(flushGeneration);
+			if (cancellation) {
+				this.rejectRemainingDeliveries(drain, cancellation);
+				return;
+			}
+			const pending = this.nextHeldDelivery(drain);
+			if (!pending) return;
+			const wake = !this.wakeIssued && drain.index === drain.batch.length && this.held.length === 0;
+			await this.deliverHeldEntry(pending, wake, flushGeneration);
+		}
+	}
+
+	private takeHeldBatch(): HeldDelivery[] {
+		return this.held.splice(0).sort((a, b) => a.sequence - b.sequence);
+	}
+
+	private flushCancellation(flushGeneration: number): Error | undefined {
+		if (!this.isActive() && !this.suppressedError && flushGeneration === this.suppressionGeneration)
+			return undefined;
+		return this.suppressedError ?? new Error("Foreground delivery resumed while flushing.");
+	}
+
+	private rejectRemainingDeliveries(drain: { batch: HeldDelivery[]; index: number }, error: Error): void {
+		for (const pending of drain.batch.slice(drain.index)) pending.reject(error);
+	}
+
+	private nextHeldDelivery(drain: { batch: HeldDelivery[]; index: number }): HeldDelivery | undefined {
+		if (drain.index >= drain.batch.length) this.appendHeldFollowers(drain.batch);
+		return drain.index < drain.batch.length ? drain.batch[drain.index++] : undefined;
+	}
+
+	private appendHeldFollowers(batch: HeldDelivery[]): void {
+		if (this.held.length === 0) return;
+		// A follower may have arrived while the previous send was in flight. Keep it
+		// in this drain and reserve no second wake after an accepted parent wake.
+		batch.push(...this.takeHeldBatch());
+	}
+
+	private async deliverHeldEntry(pending: HeldDelivery, wake: boolean, flushGeneration: number): Promise<void> {
+		this.inFlight = pending;
+		this.inFlightReject = pending.reject;
+		try {
+			await retryAcceptedDelivery(() => pending.send(wake), {
+				shouldContinue: () => this.flushCancellation(flushGeneration) === undefined,
+				cancellationError: () => this.flushCancellation(flushGeneration),
+			});
+			this.settleAcceptedEntry(pending, wake, flushGeneration);
+		} catch (error) {
+			pending.reject(error instanceof Error ? error : new Error(String(error)));
+		} finally {
+			this.inFlight = undefined;
+			this.inFlightReject = undefined;
+		}
+	}
+
+	private settleAcceptedEntry(pending: HeldDelivery, wake: boolean, flushGeneration: number): void {
+		if (wake && !this.suppressedError && flushGeneration === this.suppressionGeneration) this.wakeIssued = true;
+		if (this.suppressedError || flushGeneration !== this.suppressionGeneration) {
+			pending.reject(this.suppressedError ?? new Error("Subagent delivery suppressed."));
+			return;
+		}
+		pending.resolve();
+	}
+
+	private finishFlush(): void {
+		this.flushing = false;
+		if (!this.isActive() && this.held.length > 0 && !this.suppressedError) void this.flush();
+		if (this.held.length === 0 && !this.inFlight) this.wakeIssued = false;
 	}
 }
 

@@ -46,13 +46,13 @@ describe("safeCommentValue — shell-comment injection guard", () => {
 	});
 
 	it("renders a newline-bearing session path inert in a full launch preamble", () => {
-		// Simulate the resume-preamble construction with a malicious realpath.
+		// Simulate launch-preamble construction with a malicious session path.
 		const sessionPath = "/tmp/owned\ninject-here";
 		const agentId = "test-agent";
 		const id = "deadbeef";
 		const surface = "w7:p1";
 		const preamble = [
-			`# Subagent resume script for ${safeCommentValue(agentId)}`,
+			`# Subagent launch script for ${safeCommentValue(agentId)}`,
 			`# Run: ${safeCommentValue(id)}`,
 			`# Session: ${safeCommentValue(sessionPath)}`,
 			`# Surface: ${safeCommentValue(surface)}`,

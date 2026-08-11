@@ -181,85 +181,150 @@ function selectField(
 	return { source: "parent" };
 }
 
+type ModelResolution = {
+	provider: string;
+	modelId: string;
+	selectedModel: RoutingModel | undefined;
+	selection: { value?: string; source: RuntimeSource };
+};
+
+type ThinkingResolution = {
+	thinking: ThinkingLevel;
+	selection: { value?: string; source: RuntimeSource };
+	adjustment?: ResolvedRuntimePlan["thinkingAdjustment"];
+};
+
 export function resolveRuntimePlan(
 	request: RuntimeRequest,
 	agentDefaults: RuntimeRequest,
 	parent: ParentRuntime,
 	registry: ModelRegistryAdapter,
 ): ResolvedRuntimePlan {
-	const modelSelection = selectField(request.model, agentDefaults.model);
-	let provider = parent.provider;
-	let modelId = parent.modelId;
-	let selectedModel = registry.find(provider, modelId);
+	const model = resolveModel(request, agentDefaults, parent, registry);
+	const thinking = resolveThinking(request, agentDefaults, parent, model);
+	return buildRuntimePlan(model, thinking);
+}
 
-	if (modelSelection.value) {
-		const parsed = parseExactModelRef(modelSelection.value);
-		if (!parsed) {
-			throw new RuntimeResolutionError(
-				`model ${JSON.stringify(modelSelection.value)} must be an exact authenticated provider/model-id`,
-			);
-		}
-		const found = registry.find(parsed.provider, parsed.modelId);
-		if (!found) {
-			const alternatives = registry.available().map((model) => `${model.provider}/${model.id}`);
-			throw new RuntimeResolutionError(
-				`unknown model ${JSON.stringify(modelSelection.value)}; exact registry match required. Available: ${alternatives.join(", ") || "(none)"}`,
-			);
-		}
-		if (!registry.hasConfiguredAuth(found)) {
-			throw new RuntimeResolutionError(
-				`model ${JSON.stringify(modelSelection.value)} has no configured authentication`,
-			);
-		}
-		provider = found.provider;
-		modelId = found.id;
-		selectedModel = found;
-	}
+function resolveModel(
+	request: RuntimeRequest,
+	agentDefaults: RuntimeRequest,
+	parent: ParentRuntime,
+	registry: ModelRegistryAdapter,
+): ModelResolution {
+	const selection = selectField(request.model, agentDefaults.model);
+	if (!selection.value)
+		return {
+			provider: parent.provider,
+			modelId: parent.modelId,
+			selectedModel: registry.find(parent.provider, parent.modelId),
+			selection,
+		};
+	const selectedModel = resolveRequestedModel(selection.value, registry);
+	return { provider: selectedModel.provider, modelId: selectedModel.id, selectedModel, selection };
+}
 
-	const thinkingSelection = selectField(request.thinking, agentDefaults.thinking);
-	const preferredThinking = thinkingSelection.value ?? parent.thinking;
-	if (!isThinkingLevel(preferredThinking)) {
-		throw new RuntimeResolutionError(
-			`thinking ${JSON.stringify(preferredThinking)} must be one of: ${THINKING_LEVELS.join(", ")}`,
-		);
-	}
+function resolveRequestedModel(reference: string, registry: ModelRegistryAdapter): RoutingModel {
+	const parsed = parseExactModelRef(reference);
+	if (!parsed) throw invalidModelReference(reference);
+	const selectedModel = registry.find(parsed.provider, parsed.modelId);
+	if (!selectedModel) throw unknownModelReference(reference, registry);
+	if (!registry.hasConfiguredAuth(selectedModel))
+		throw new RuntimeResolutionError(`model ${JSON.stringify(reference)} has no configured authentication`);
+	return selectedModel;
+}
 
-	let thinking = preferredThinking;
-	let thinkingAdjustment: ResolvedRuntimePlan["thinkingAdjustment"];
-	if (thinkingSelection.source !== "parent") {
-		if (!selectedModel) {
-			throw new RuntimeResolutionError(
-				`model capability information is unavailable; cannot validate explicit thinking ${JSON.stringify(preferredThinking)}`,
-			);
-		}
-		const supported = getSupportedThinkingLevels(asPiModel(selectedModel));
-		if (!supported.includes(preferredThinking as ModelThinkingLevel)) {
-			throw new RuntimeResolutionError(
-				`thinking ${JSON.stringify(preferredThinking)} is not supported by ${JSON.stringify(`${provider}/${modelId}`)}; supported: ${formatSupported(selectedModel)}`,
-			);
-		}
-	} else if (selectedModel) {
-		const clamped = clampThinkingLevel(asPiModel(selectedModel), preferredThinking);
-		thinking = clamped as ThinkingLevel;
-		if (thinking !== preferredThinking) {
-			thinkingAdjustment = {
-				from: preferredThinking,
-				to: thinking,
-				reason: selectedModel.reasoning ? "inherited-clamp" : "non-reasoning",
-			};
-		}
-	}
+function invalidModelReference(reference: string): RuntimeResolutionError {
+	return new RuntimeResolutionError(
+		`model ${JSON.stringify(reference)} must be an exact authenticated provider/model-id`,
+	);
+}
 
+function unknownModelReference(reference: string, registry: ModelRegistryAdapter): RuntimeResolutionError {
+	const alternatives = registry.available().map((model) => `${model.provider}/${model.id}`);
+	return new RuntimeResolutionError(
+		`unknown model ${JSON.stringify(reference)}; exact registry match required. Available: ${alternatives.join(", ") || "(none)"}`,
+	);
+}
+
+function resolveThinking(
+	request: RuntimeRequest,
+	agentDefaults: RuntimeRequest,
+	parent: ParentRuntime,
+	model: ModelResolution,
+): ThinkingResolution {
+	const selection = selectField(request.thinking, agentDefaults.thinking);
+	const preferredThinking = selection.value ?? parent.thinking;
+	if (!isThinkingLevel(preferredThinking)) throw invalidThinkingLevel(preferredThinking);
+	return selection.source === "parent"
+		? resolveInheritedThinking(preferredThinking, selection, model)
+		: resolveExplicitThinking(preferredThinking, selection, model);
+}
+
+function invalidThinkingLevel(value: string): RuntimeResolutionError {
+	return new RuntimeResolutionError(
+		`thinking ${JSON.stringify(value)} must be one of: ${THINKING_LEVELS.join(", ")}`,
+	);
+}
+
+function resolveExplicitThinking(
+	thinking: ThinkingLevel,
+	selection: { value?: string; source: RuntimeSource },
+	model: ModelResolution,
+): ThinkingResolution {
+	const selectedModel = model.selectedModel;
+	if (!selectedModel) throw unavailableCapabilityError(thinking);
+	const supported = getSupportedThinkingLevels(asPiModel(selectedModel));
+	if (!supported.includes(thinking as ModelThinkingLevel))
+		throw unsupportedThinkingError(thinking, model, selectedModel);
+	return { thinking, selection };
+}
+
+function unavailableCapabilityError(thinking: ThinkingLevel): RuntimeResolutionError {
+	return new RuntimeResolutionError(
+		`model capability information is unavailable; cannot validate explicit thinking ${JSON.stringify(thinking)}`,
+	);
+}
+
+function unsupportedThinkingError(
+	thinking: ThinkingLevel,
+	model: ModelResolution,
+	selectedModel: RoutingModel,
+): RuntimeResolutionError {
+	return new RuntimeResolutionError(
+		`thinking ${JSON.stringify(thinking)} is not supported by ${JSON.stringify(`${model.provider}/${model.modelId}`)}; supported: ${formatSupported(selectedModel)}`,
+	);
+}
+
+function resolveInheritedThinking(
+	thinking: ThinkingLevel,
+	selection: { value?: string; source: RuntimeSource },
+	model: ModelResolution,
+): ThinkingResolution {
+	if (!model.selectedModel) return { thinking, selection };
+	const clamped = clampThinkingLevel(asPiModel(model.selectedModel), thinking) as ThinkingLevel;
+	if (clamped === thinking) return { thinking, selection };
 	return {
-		provider,
-		modelId,
-		model: `${provider}/${modelId}`,
-		thinking,
-		modelSource: modelSelection.source,
-		thinkingSource: thinkingSelection.source,
-		...(modelSelection.value ? { requestedModel: modelSelection.value } : {}),
-		...(thinkingSelection.value ? { requestedThinking: preferredThinking } : {}),
-		...(thinkingAdjustment ? { thinkingAdjustment } : {}),
+		thinking: clamped,
+		selection,
+		adjustment: {
+			from: thinking,
+			to: clamped,
+			reason: model.selectedModel.reasoning ? "inherited-clamp" : "non-reasoning",
+		},
+	};
+}
+
+function buildRuntimePlan(model: ModelResolution, thinking: ThinkingResolution): ResolvedRuntimePlan {
+	return {
+		provider: model.provider,
+		modelId: model.modelId,
+		model: `${model.provider}/${model.modelId}`,
+		thinking: thinking.thinking,
+		modelSource: model.selection.source,
+		thinkingSource: thinking.selection.source,
+		...(model.selection.value ? { requestedModel: model.selection.value } : {}),
+		...(thinking.selection.value ? { requestedThinking: thinking.thinking } : {}),
+		...(thinking.adjustment ? { thinkingAdjustment: thinking.adjustment } : {}),
 	};
 }
 

@@ -98,7 +98,7 @@ describe("abandoned watch — lease disposition", () => {
 		}
 	});
 
-	it("keeps the session path exclusive so a live child cannot be resumed concurrently", async () => {
+	it("keeps the session path exclusive while a live child may still write", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "abandon-exclusive-"));
 		const { running, sessionFile } = makeRun(dir, "abandon-2", 40);
 		try {
@@ -158,7 +158,7 @@ describe("resolveSettlementDisposition — admission vs session", () => {
 		assert.equal(resolveSettlementDisposition("error").watchAbandoned, false);
 	});
 
-	for (const reason of ["done", "ping", "sentinel"]) {
+	for (const reason of ["done", "sentinel"]) {
 		it(`leaves a ${reason} completion on the normal close/reap path`, () => {
 			const d = resolveSettlementDisposition(reason);
 			assert.equal(d.preservePane, false);

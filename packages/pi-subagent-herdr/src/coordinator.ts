@@ -88,6 +88,8 @@ export interface AdmissionTicket {
 }
 
 export class AdmissionCoordinator {
+	/** Read via any-cast on legacy global instances after extension reload (see getAdmissionCoordinator). */
+	// fallow-ignore-next-line unused-class-member
 	readonly version = 2;
 	readonly limits = { foreground: 1, background: 4 } as const;
 	private active = { foreground: 0, background: 0 };

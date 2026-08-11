@@ -30,7 +30,6 @@ import {
 	closePane,
 	createSubagentPane,
 	getHerdrPaneLayout,
-	type HerdrLayoutPane,
 	type HerdrPaneLayout,
 	herdrPaneExists,
 	interruptPane,
@@ -45,19 +44,8 @@ import {
 type MuxBackend = "herdr";
 
 // Re-export mux primitives for tests
-export {
-	createSubagentPane,
-	runInPane,
-	runScriptInPane,
-	readPane,
-	readPaneAsync,
-	closePane,
-	interruptPane,
-	shellQuote,
-	getHerdrPaneLayout,
-	herdrPaneExists,
-};
-export type { MuxBackend, HerdrPaneLayout, HerdrLayoutPane };
+export { runInPane, runScriptInPane, readPane, readPaneAsync, closePane, interruptPane, herdrPaneExists };
+export type { MuxBackend, HerdrPaneLayout };
 
 // ── Paths ──
 
@@ -91,7 +79,7 @@ const EXTENSION_SOURCE = join(PROJECT_ROOT, "src", "index.ts");
 // ── Configuration ──
 
 /** Model used for integration tests. Override with PI_TEST_MODEL env var. */
-export const TEST_MODEL = process.env.PI_TEST_MODEL ?? "tokenrouter/gpt-5.6-luna";
+export const TEST_MODEL = process.env.PI_TEST_MODEL ?? "deepseek-v4-flash-free";
 
 /** Per-test timeout in ms. Override with PI_TEST_TIMEOUT env var. */
 export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
@@ -109,14 +97,6 @@ export function setBackend(_backend: MuxBackend): undefined {
 
 export function restoreBackend(_prev: string | undefined): void {}
 
-export function focusSurface(_backend: MuxBackend, surface: string): void {
-	// Focus the tab containing the pane — herdr has no direct "focus pane X"
-	// CLI, but focusing the tab brings it to the foreground.
-	const info = execFileSync("herdr", ["pane", "get", surface], { encoding: "utf8" });
-	const tabId = JSON.parse(info)?.result?.pane?.tab_id;
-	if (tabId) execFileSync("herdr", ["tab", "focus", tabId], { encoding: "utf8" });
-}
-
 export function getFocusedSurface(_backend: MuxBackend): string | null {
 	try {
 		const info = execFileSync("herdr", ["pane", "current"], { encoding: "utf8" });
@@ -124,27 +104,6 @@ export function getFocusedSurface(_backend: MuxBackend): string | null {
 	} catch {
 		return null;
 	}
-}
-
-export function getSurfacePane(_backend: MuxBackend, surface: string): string | null {
-	return surface;
-}
-
-export async function waitForFocusedSurface(
-	backend: MuxBackend,
-	surface: string,
-	timeout: number = PI_TIMEOUT,
-): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeout) {
-		if (getFocusedSurface(backend) === surface) return;
-		await sleep(200);
-	}
-
-	throw new Error(
-		`Timeout (${timeout}ms) waiting for focused ${backend} surface ${surface}; ` +
-			`current focus is ${getFocusedSurface(backend) ?? "unknown"}`,
-	);
 }
 
 // ── Test environment ──
@@ -207,7 +166,7 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
 	mkdirSync(join(dir, ".pi", "extensions", "pi-permission-system"), { recursive: true });
 	writeFileSync(
 		join(dir, ".pi", "extensions", "pi-permission-system", "config.json"),
-		JSON.stringify({ yoloMode: false }) + "\n",
+		`${JSON.stringify({ yoloMode: false })}\n`,
 		"utf8",
 	);
 
@@ -510,18 +469,8 @@ export async function waitForFile(
 		await sleep(2000);
 	}
 	throw new Error(
-		`Timeout (${timeout}ms) waiting for file: ${path}` + (contentPattern ? ` matching ${contentPattern}` : ""),
+		`Timeout (${timeout}ms) waiting for file: ${path}${contentPattern ? ` matching ${contentPattern}` : ""}`,
 	);
-}
-
-/**
- * Wait for the pi process in a surface to exit (sentinel detection).
- * Returns the exit code.
- */
-export async function waitForPiExit(surface: string, timeout: number = PI_TIMEOUT): Promise<number> {
-	const screen = await waitForScreen(surface, /__TEST_DONE_(\d+)__/, timeout);
-	const match = screen.match(/__TEST_DONE_(\d+)__/);
-	return match ? parseInt(match[1], 10) : -1;
 }
 
 /**

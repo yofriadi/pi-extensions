@@ -21,7 +21,7 @@
  * the parent's active completion runtime, so the async child result is
  * delivered exactly once.
  *
- * Run `PI_TEST_MODEL="tokenrouter/gpt-5.6-luna" npm run test:integration`
+ * Run `PI_TEST_MODEL="deepseek-v4-flash-free" npm run test:integration`
  * from inside herdr. The spawned half requires herdr + a live model; the
  * in-process half runs anywhere.
  */
@@ -188,7 +188,9 @@ describeSpawned("configured-package fixture: async completion delivery (spawned)
 	let env: TestEnv;
 
 	before(() => {
-		env = createTestEnv(backends[0]!);
+		const backend = backends[0];
+		if (!backend) throw new Error("A live Herdr backend is required for spawned tests.");
+		env = createTestEnv(backend);
 	});
 
 	after(() => {
@@ -202,8 +204,8 @@ describeSpawned("configured-package fixture: async completion delivery (spawned)
 			const id = uniqueId();
 			const { markerFile, skillName } = writeFixturePackage(env.dir);
 
-			// The test agent declares the fixture package's skill. `caller_ping: deny`
-			// keeps the run on the plain completion path.
+			// The test agent declares the fixture package's skill and follows the
+			// ordinary subagent completion path.
 			writeFileSync(
 				join(env.dir, ".pi", "agents", "test-package-skill.md"),
 				[
@@ -212,8 +214,6 @@ describeSpawned("configured-package fixture: async completion delivery (spawned)
 					"tools: read, bash",
 					`skills: ${skillName}`,
 					"seed: fresh",
-					"permission:",
-					"  caller_ping: deny",
 					"---",
 					`You are a package-skill integration agent. Read the explicitly selected ${skillName} SKILL.md, then immediately run the exact bash command in the task. Use no other tools, do not inspect the environment, and never use unselected skills.`,
 					"",

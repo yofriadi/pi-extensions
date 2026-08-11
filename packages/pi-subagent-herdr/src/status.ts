@@ -140,54 +140,93 @@ export function createStatusState(params: { source: SubagentStatusSource; startT
 	};
 }
 
+type PresentStatusObservation = Extract<StatusObservation, { snapshot: "present" }>;
+type ProblemStatusObservation = Exclude<StatusObservation, PresentStatusObservation>;
+
 export function observeStatus(
 	state: SubagentStatusState,
 	observation: StatusObservation,
 	now: number,
 ): SubagentStatusState {
-	if (observation.snapshot !== "present") {
-		return {
-			...state,
-			firstObservationAtMs: state.firstObservationAtMs ?? now,
-			snapshotState: observation.snapshot,
-			snapshotProblemSinceMs: state.snapshotProblemSinceMs ?? now,
-			snapshotError: observation.snapshotError ?? null,
-		};
-	}
+	return observation.snapshot === "present"
+		? observePresentStatus(state, observation, now)
+		: observeProblemStatus(state, observation, now);
+}
 
-	const updatedAt = observation.updatedAt;
-	const sequence = observation.sequence;
-	const lastActivityAtMs = state.lastActivityAtMs;
-	const lastActivitySequence = state.lastActivitySequence;
-	const olderThanLastActivity =
-		lastActivityAtMs != null &&
-		(updatedAt < lastActivityAtMs ||
-			(updatedAt === lastActivityAtMs && lastActivitySequence != null && sequence < lastActivitySequence));
-	if (olderThanLastActivity) return state;
-
-	const blockedByLocalOverride =
-		state.localOverrideAtMs != null &&
-		(updatedAt < state.localOverrideAtMs ||
-			(updatedAt === state.localOverrideAtMs &&
-				state.localOverrideSequence != null &&
-				sequence <= state.localOverrideSequence));
-	if (blockedByLocalOverride) return state;
-
-	const phase = observation.phase;
-	const activeNow = phase === "active" || observation.active === true;
-	const activeSinceMs = activeNow ? (observation.activeSince ?? state.activeSinceMs ?? updatedAt) : null;
-	const waitingSinceMs = phase === "waiting" ? (observation.waitingSince ?? state.waitingSinceMs ?? updatedAt) : null;
-
+function observeProblemStatus(
+	state: SubagentStatusState,
+	observation: ProblemStatusObservation,
+	now: number,
+): SubagentStatusState {
 	return {
 		...state,
 		firstObservationAtMs: state.firstObservationAtMs ?? now,
-		lastActivityAtMs: updatedAt,
-		lastActivitySequence: sequence,
-		activeNow,
-		activeSinceMs,
-		activeScope: activeNow ? (observation.activeScope ?? null) : null,
-		waitingSinceMs,
-		phase,
+		snapshotState: observation.snapshot,
+		snapshotProblemSinceMs: state.snapshotProblemSinceMs ?? now,
+		snapshotError: observation.snapshotError ?? null,
+	};
+}
+
+function observePresentStatus(
+	state: SubagentStatusState,
+	observation: PresentStatusObservation,
+	now: number,
+): SubagentStatusState {
+	if (isOlderActivityObservation(state, observation)) return state;
+	if (isBlockedByLocalOverride(state, observation)) return state;
+	return applyPresentStatus(state, observation, now);
+}
+
+function isOlderActivityObservation(state: SubagentStatusState, observation: PresentStatusObservation): boolean {
+	return activityObservationOrder(state, observation) < 0;
+}
+
+function isBlockedByLocalOverride(state: SubagentStatusState, observation: PresentStatusObservation): boolean {
+	return localOverrideOrder(state, observation) <= 0;
+}
+
+function activityObservationOrder(state: SubagentStatusState, observation: PresentStatusObservation): number {
+	return compareObservationOrder(
+		observation.updatedAt,
+		observation.sequence,
+		state.lastActivityAtMs,
+		state.lastActivitySequence,
+	);
+}
+
+function localOverrideOrder(state: SubagentStatusState, observation: PresentStatusObservation): number {
+	return compareObservationOrder(
+		observation.updatedAt,
+		observation.sequence,
+		state.localOverrideAtMs,
+		state.localOverrideSequence,
+	);
+}
+
+function compareObservationOrder(
+	incomingAt: number,
+	incomingSequence: number,
+	referenceAt: number | null,
+	referenceSequence: number | null,
+): number {
+	if (referenceAt == null) return 1;
+	const timeOrder = incomingAt - referenceAt;
+	return timeOrder || incomingSequence - (referenceSequence ?? -1);
+}
+
+function applyPresentStatus(
+	state: SubagentStatusState,
+	observation: PresentStatusObservation,
+	now: number,
+): SubagentStatusState {
+	const activity = presentActivityState(state, observation);
+	return {
+		...state,
+		firstObservationAtMs: state.firstObservationAtMs ?? now,
+		lastActivityAtMs: observation.updatedAt,
+		lastActivitySequence: observation.sequence,
+		...activity,
+		phase: observation.phase,
 		latestEvent: observation.latestEvent ?? null,
 		activityLabel: observation.activityLabel ?? null,
 		snapshotState: "present",
@@ -196,6 +235,35 @@ export function observeStatus(
 		localOverrideAtMs: null,
 		localOverrideSequence: null,
 	};
+}
+
+function presentActivityState(
+	state: SubagentStatusState,
+	observation: PresentStatusObservation,
+): Pick<SubagentStatusState, "activeNow" | "activeSinceMs" | "activeScope" | "waitingSinceMs"> {
+	const activeNow = observation.phase === "active" || observation.active === true;
+	return {
+		activeNow,
+		...activeActivityFields(activeNow, state, observation),
+		waitingSinceMs: waitingSince(state, observation),
+	};
+}
+
+function activeActivityFields(
+	activeNow: boolean,
+	state: SubagentStatusState,
+	observation: PresentStatusObservation,
+): Pick<SubagentStatusState, "activeSinceMs" | "activeScope"> {
+	if (!activeNow) return { activeSinceMs: null, activeScope: null };
+	return {
+		activeSinceMs: observation.activeSince ?? state.activeSinceMs ?? observation.updatedAt,
+		activeScope: observation.activeScope ?? null,
+	};
+}
+
+function waitingSince(state: SubagentStatusState, observation: PresentStatusObservation): number | null {
+	if (observation.phase !== "waiting") return null;
+	return observation.waitingSince ?? state.waitingSinceMs ?? observation.updatedAt;
 }
 
 export function forceStatusAfterInterrupt(state: SubagentStatusState, now: number): SubagentStatusState {
@@ -219,80 +287,111 @@ export function forceStatusAfterInterrupt(state: SubagentStatusState, now: numbe
 	};
 }
 
-function classifyProblemState(state: SubagentStatusState, now: number): Pick<StatusSnapshot, "kind" | "statusLabel"> {
-	const problemLabel = snapshotProblemLabel(state.snapshotState);
-	const hasValidSnapshot = state.lastActivityAtMs != null;
+type StatusClassification = Pick<StatusSnapshot, "kind" | "statusLabel">;
 
-	if (!hasValidSnapshot) {
-		const referenceMs = state.firstObservationAtMs ?? state.startTimeMs;
-		const elapsedMs = Math.max(0, now - referenceMs);
-		return elapsedMs >= SNAPSHOT_STALLED_AFTER_MS
-			? { kind: "stalled", statusLabel: problemLabel }
-			: { kind: "starting", statusLabel: null };
-	}
+function classifyProblemState(state: SubagentStatusState, now: number): StatusClassification {
+	const statusLabel = snapshotProblemLabel(state.snapshotState);
+	if (state.lastActivityAtMs == null) return classifyUnobservedProblem(state, now, statusLabel);
+	return classifyObservedProblem(state, now, statusLabel);
+}
 
-	const problemSinceMs = state.snapshotProblemSinceMs ?? now;
-	const problemMs = Math.max(0, now - problemSinceMs);
-	if (problemMs >= SNAPSHOT_STALLED_AFTER_MS) return { kind: "stalled", statusLabel: problemLabel };
+function classifyUnobservedProblem(
+	state: SubagentStatusState,
+	now: number,
+	statusLabel: string | null,
+): StatusClassification {
+	return stalledOrStarting(now - (state.firstObservationAtMs ?? state.startTimeMs), statusLabel);
+}
 
-	const lastHealthyKind = state.activeNow
-		? "active"
-		: state.waitingSinceMs != null || state.phase === "done"
-			? "waiting"
-			: state.currentKind === "stalled"
-				? "starting"
-				: state.currentKind;
-	return { kind: lastHealthyKind, statusLabel: problemLabel };
+function classifyObservedProblem(
+	state: SubagentStatusState,
+	now: number,
+	statusLabel: string | null,
+): StatusClassification {
+	if (isStatusStalled(now - (state.snapshotProblemSinceMs ?? now))) return { kind: "stalled", statusLabel };
+	return { kind: lastHealthyStatusKind(state), statusLabel };
+}
+
+function stalledOrStarting(elapsedMs: number, statusLabel: string | null): StatusClassification {
+	return isStatusStalled(elapsedMs) ? { kind: "stalled", statusLabel } : { kind: "starting", statusLabel: null };
+}
+
+function isStatusStalled(elapsedMs: number): boolean {
+	return Math.max(0, elapsedMs) >= SNAPSHOT_STALLED_AFTER_MS;
+}
+
+function lastHealthyStatusKind(state: SubagentStatusState): SubagentStatusKind {
+	return activeStatusKind(state) ?? waitingStatusKind(state) ?? unstalledStatusKind(state.currentKind);
+}
+
+function activeStatusKind(state: SubagentStatusState): SubagentStatusKind | undefined {
+	return state.activeNow ? "active" : undefined;
+}
+
+function waitingStatusKind(state: SubagentStatusState): SubagentStatusKind | undefined {
+	return state.waitingSinceMs != null || state.phase === "done" ? "waiting" : undefined;
+}
+
+function unstalledStatusKind(kind: SubagentStatusKind): SubagentStatusKind {
+	return kind === "stalled" ? "starting" : kind;
 }
 
 export function classifyStatus(state: SubagentStatusState, now: number): StatusSnapshot {
-	const elapsedMs = Math.max(0, now - state.startTimeMs);
-	const elapsedText = formatElapsedDuration(elapsedMs);
-
-	let kind: SubagentStatusKind;
-	let statusLabel: string | null = null;
-
-	if (state.snapshotState === "present") {
-		if (state.phase === "active" || state.activeNow) {
-			kind = "active";
-		} else if (state.phase === "waiting") {
-			kind = "waiting";
-		} else if (state.phase === "done") {
-			kind = "waiting";
-			statusLabel = "done";
-		} else {
-			const referenceMs = state.firstObservationAtMs ?? state.startTimeMs;
-			const elapsedSinceObservationMs = Math.max(0, now - referenceMs);
-			kind = elapsedSinceObservationMs >= SNAPSHOT_STALLED_AFTER_MS ? "stalled" : "starting";
-			statusLabel = null;
-		}
-	} else {
-		const classified = classifyProblemState(state, now);
-		kind = classified.kind;
-		statusLabel = classified.statusLabel;
-	}
-
-	const activeDurationText = state.activeSinceMs == null ? null : formatElapsedDuration(now - state.activeSinceMs);
-	const waitingDurationText = state.waitingSinceMs == null ? null : formatElapsedDuration(now - state.waitingSinceMs);
-	const snapshotProblemText =
-		state.snapshotProblemSinceMs == null ? null : formatElapsedDuration(now - state.snapshotProblemSinceMs);
-
+	const classification = classifyStatusKind(state, now);
+	const durations = statusDurations(state, now);
 	return {
-		kind,
-		elapsedMs,
-		elapsedText,
+		...durations,
+		kind: classification.kind,
 		activeSinceMs: state.activeSinceMs,
-		activeDurationText,
 		activeScope: state.activeScope,
 		waitingSinceMs: state.waitingSinceMs,
-		waitingDurationText,
 		latestEvent: state.latestEvent,
 		activityLabel: state.activityLabel,
 		snapshotState: state.snapshotState,
 		snapshotError: state.snapshotError,
-		snapshotProblemText,
-		statusLabel,
+		statusLabel: classification.statusLabel,
 	};
+}
+
+type PresentStatusClassifier = (state: SubagentStatusState, now: number) => StatusClassification;
+
+const presentStatusClassifiers: Record<StatusActivityPhase | "unknown", PresentStatusClassifier> = {
+	active: () => ({ kind: "active", statusLabel: null }),
+	waiting: () => ({ kind: "waiting", statusLabel: null }),
+	done: () => ({ kind: "waiting", statusLabel: "done" }),
+	starting: classifyPresentWithoutPhase,
+	unknown: classifyPresentWithoutPhase,
+};
+
+function classifyStatusKind(state: SubagentStatusState, now: number): StatusClassification {
+	if (state.snapshotState !== "present") return classifyProblemState(state, now);
+	const phase = state.activeNow ? "active" : (state.phase ?? "unknown");
+	return presentStatusClassifiers[phase](state, now);
+}
+
+function classifyPresentWithoutPhase(state: SubagentStatusState, now: number): StatusClassification {
+	return stalledOrStarting(now - (state.firstObservationAtMs ?? state.startTimeMs), null);
+}
+
+function statusDurations(
+	state: SubagentStatusState,
+	now: number,
+): Pick<
+	StatusSnapshot,
+	"elapsedMs" | "elapsedText" | "activeDurationText" | "waitingDurationText" | "snapshotProblemText"
+> {
+	const elapsedMs = Math.max(0, now - state.startTimeMs);
+	return {
+		elapsedMs,
+		elapsedText: formatElapsedDuration(elapsedMs),
+		activeDurationText: durationSince(state.activeSinceMs, now),
+		waitingDurationText: durationSince(state.waitingSinceMs, now),
+		snapshotProblemText: durationSince(state.snapshotProblemSinceMs, now),
+	};
+}
+
+function durationSince(since: number | null, now: number): string | null {
+	return since == null ? null : formatElapsedDuration(now - since);
 }
 
 export function advanceStatusState(
@@ -304,21 +403,33 @@ export function advanceStatusState(
 	transition: SubagentStatusTransition;
 } {
 	const snapshot = classifyStatus(state, now);
-	const transition =
-		state.currentKind !== "stalled" && snapshot.kind === "stalled"
-			? "stalled"
-			: state.currentKind === "stalled" && (snapshot.kind === "active" || snapshot.kind === "waiting")
-				? "recovered"
-				: null;
-
 	return {
 		snapshot,
-		transition,
-		nextState: {
-			...state,
-			currentKind: snapshot.kind,
-		},
+		transition: statusTransition(state.currentKind, snapshot.kind),
+		nextState: { ...state, currentKind: snapshot.kind },
 	};
+}
+
+type StatusTransitionHandler = (next: SubagentStatusKind) => SubagentStatusTransition;
+
+const statusTransitionHandlers: Record<SubagentStatusKind, StatusTransitionHandler> = {
+	starting: enteredStalledTransition,
+	running: enteredStalledTransition,
+	active: enteredStalledTransition,
+	waiting: enteredStalledTransition,
+	stalled: recoveredStatusTransition,
+};
+
+function statusTransition(previous: SubagentStatusKind, next: SubagentStatusKind): SubagentStatusTransition {
+	return statusTransitionHandlers[previous](next);
+}
+
+function enteredStalledTransition(next: SubagentStatusKind): SubagentStatusTransition {
+	return next === "stalled" ? "stalled" : null;
+}
+
+function recoveredStatusTransition(next: SubagentStatusKind): SubagentStatusTransition {
+	return next === "active" || next === "waiting" ? "recovered" : null;
 }
 
 function formatActiveDetail(snapshot: StatusSnapshot): string {
@@ -339,35 +450,27 @@ function formatStalledDetail(snapshot: StatusSnapshot): string {
 	return `stalled${duration}${detail}`;
 }
 
-export function formatStatusLine(name: string, snapshot: StatusSnapshot): string {
-	const boundedName = normalizeStatusName(name);
+type StatusLineBuilder = (name: string, snapshot: StatusSnapshot) => string;
 
-	if (snapshot.kind === "starting") {
+const statusLineBuilders: Record<SubagentStatusKind, StatusLineBuilder> = {
+	starting: (name, snapshot) => {
 		const label = snapshot.statusLabel ? ` (${snapshot.statusLabel})` : "";
-		return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}, starting${label}.`);
-	}
+		return `${name} running ${snapshot.elapsedText}, starting${label}.`;
+	},
+	running: (name, snapshot) => `${name} running ${snapshot.elapsedText}.`,
+	active: (name, snapshot) => `${name} running ${snapshot.elapsedText}, ${formatActiveDetail(snapshot)}.`,
+	waiting: (name, snapshot) =>
+		`${name} running ${snapshot.elapsedText}, ${formatWaitingDetail(snapshot)}${waitingProblem(snapshot)}.`,
+	stalled: (name, snapshot) => `${name} running ${snapshot.elapsedText}, ${formatStalledDetail(snapshot)}.`,
+};
 
-	if (snapshot.kind === "running") {
-		return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}.`);
-	}
+export function formatStatusLine(name: string, snapshot: StatusSnapshot): string {
+	return boundStatusLine(statusLineBuilders[snapshot.kind](normalizeStatusName(name), snapshot));
+}
 
-	if (snapshot.kind === "active") {
-		return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}, ${formatActiveDetail(snapshot)}.`);
-	}
-
-	if (snapshot.kind === "waiting") {
-		const problem =
-			snapshot.statusLabel && snapshot.statusLabel !== "done"
-				? ` (${snapshot.statusLabel})`
-				: snapshot.statusLabel === "done"
-					? " (done)"
-					: "";
-		return boundStatusLine(
-			`${boundedName} running ${snapshot.elapsedText}, ${formatWaitingDetail(snapshot)}${problem}.`,
-		);
-	}
-
-	return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}, ${formatStalledDetail(snapshot)}.`);
+function waitingProblem(snapshot: StatusSnapshot): string {
+	if (!snapshot.statusLabel) return "";
+	return snapshot.statusLabel === "done" ? " (done)" : ` (${snapshot.statusLabel})`;
 }
 
 export function formatTransitionLine(

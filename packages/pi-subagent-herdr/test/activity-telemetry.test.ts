@@ -123,12 +123,15 @@ describe("child telemetry event wiring", () => {
 		process.env.PI_SUBAGENT_ACTIVITY_FILE = activityFile;
 
 		const handlers = new Map<string, Function>();
+		const registeredTools: string[] = [];
 		const pi = {
 			on(name: string, handler: Function) {
 				handlers.set(name, handler);
 			},
 			registerShortcut() {},
-			registerTool() {},
+			registerTool(tool: { name: string }) {
+				registeredTools.push(tool.name);
+			},
 			getAllTools() {
 				return [];
 			},
@@ -147,6 +150,7 @@ describe("child telemetry event wiring", () => {
 
 		try {
 			subagentDoneExtension(pi as never);
+			assert.deepEqual(registeredTools, ["subagent_done"]);
 			handlers.get("session_start")?.({}, ctx);
 			handlers.get("turn_end")?.({ turnIndex: 3 }, ctx);
 			handlers.get("after_provider_response")?.({}, ctx);
@@ -163,6 +167,16 @@ describe("child telemetry event wiring", () => {
 			assert.equal(read.activity.contextTokens, 30_000);
 			assert.equal(read.activity.contextWindow, 100_000);
 			assert.equal(read.activity.contextPercent, null);
+
+			handlers.get("agent_end")?.({ messages: [{ role: "assistant", stopReason: "aborted" }] }, ctx);
+			handlers.get("agent_settled")?.({}, ctx);
+			const interrupted = readSubagentActivityFile(activityFile, "wired-child");
+			assert.equal(interrupted.ok, true);
+			if (!interrupted.ok) return;
+			assert.equal(interrupted.activity.latestEvent, "agent_interrupted");
+			assert.equal(interrupted.activity.phase, "waiting");
+			assert.equal(interrupted.activity.interruptedAt, interrupted.activity.updatedAt);
+			assert.equal(interrupted.activity.interruptedSequence, interrupted.activity.sequence);
 		} finally {
 			if (previousId == null) delete process.env.PI_SUBAGENT_ID;
 			else process.env.PI_SUBAGENT_ID = previousId;

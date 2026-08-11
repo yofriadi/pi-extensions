@@ -101,7 +101,7 @@ describe("AdmissionCoordinator", () => {
 	});
 
 	it("keeps class release independent and admits after terminal releases", async () => {
-		for (const terminal of ["ping", "failure", "cancel", "disappearance", "rollback", "shutdown"]) {
+		for (const terminal of ["success", "failure", "cancel", "disappearance", "rollback", "shutdown"]) {
 			const c = new AdmissionCoordinator();
 			const fg = ticket(c, `${terminal}-fg`, "foreground");
 			const waitingFg = ticket(c, `${terminal}-fg-next`, "foreground");
@@ -115,13 +115,13 @@ describe("AdmissionCoordinator", () => {
 		}
 	});
 
-	it("models ping-settled foreground followed by background resume", () => {
+	it("admits background work after foreground settlement", () => {
 		const c = new AdmissionCoordinator();
-		const foreground = ticket(c, "ping-run", "foreground");
+		const foreground = ticket(c, "foreground-run", "foreground");
 		foreground.lease.release();
-		const resume = ticket(c, "resume-run", "background");
-		assert.equal(resume.queued, false);
-		assert.equal(resume.lease.class, "background");
+		const background = ticket(c, "background-run", "background");
+		assert.equal(background.queued, false);
+		assert.equal(background.lease.class, "background");
 	});
 
 	it("invalidates an admitted lease through a shutdown generation", () => {

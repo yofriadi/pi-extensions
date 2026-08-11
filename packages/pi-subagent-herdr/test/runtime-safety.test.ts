@@ -71,7 +71,7 @@ afterEach(() => {
 it("snapshots queued launch inputs before the parent context can be invalidated", () => {
 	const original: any = {
 		cwd: "/project-before-reload",
-		model: { provider: "tokenrouter", id: "gpt-5.6-luna" },
+		model: { provider: "deepseek", id: "deepseek-v4-flash-free" },
 		modelRegistry: {
 			find() {
 				return undefined;
@@ -314,11 +314,11 @@ describe("process-global delivery retry scheduling", () => {
 				newPi.sends.push(message);
 				appendFileSync(
 					sessionFile,
-					JSON.stringify({
+					`${JSON.stringify({
 						type: "custom_message",
 						customType: message.customType,
 						details: message.details,
-					}) + "\n",
+					})}\n`,
 				);
 			};
 			replacementModule.default(newPi);
@@ -447,12 +447,12 @@ describe("inactive-runtime delivery deferral", () => {
 				pi.sends.push(msg);
 				appendFileSync(
 					sessionFile,
-					JSON.stringify({
+					`${JSON.stringify({
 						type: "custom_message",
 						customType: msg.customType,
 						content: msg.content,
 						details: msg.details,
-					}) + "\n",
+					})}\n`,
 				);
 			};
 			subagentsExtension(pi);
@@ -532,7 +532,7 @@ describe("inactive-runtime delivery deferral", () => {
 		assert.match(lines, /1 awaiting runtime/, "deferred counted separately");
 		assert.match(lines, /1 delivery retrying/, "ordinary retries counted separately");
 		assert.match(lines, /1 undeliverable/, "exhausted counted separately");
-		const deferredRow = lines.split("\n").find((line) => line.includes("deferred"));
+		const deferredRow = lines.split("\n").find((line: string) => line.includes("deferred"));
 		assert.match(deferredRow, /awaiting runtime/, "deferred row is never rendered as retry 0");
 		assert.doesNotMatch(deferredRow, /delivery retry 0/);
 	});
@@ -612,7 +612,7 @@ describe("inactive-runtime delivery deferral", () => {
 					],
 				)
 				.join("\n");
-			const stuckRow = lines.split("\n").find((line) => line.includes("stuck"));
+			const stuckRow = lines.split("\n").find((line: string) => line.includes("stuck"));
 			assert.match(stuckRow, /undeliverable/, "ordinary exhaustion still renders undeliverable");
 			assert.doesNotMatch(lines, /2 undeliverable/, "re-driven deferral left the undeliverable count");
 		} finally {

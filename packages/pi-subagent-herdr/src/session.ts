@@ -1,14 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import {
-	appendFileSync,
-	chmodSync,
-	copyFileSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface SessionEntry {
@@ -28,6 +19,10 @@ export interface MessageEntry extends SessionEntry {
 
 export type SeededSubagentSessionMode = "fresh" | "fork" | "lineage-only"; // lineage-only = legacy alias of fresh
 
+/**
+ * Schema for write-only session provenance. It records initial-dispatch lineage
+ * for diagnostics and must not be read to authorize lifecycle operations.
+ */
 export const SUBAGENT_OWNER_VERSION = 2;
 
 export interface SubagentSessionOwner {
@@ -50,59 +45,14 @@ export function writeSessionOwner(
 	const path = getSessionOwnerPath(sessionFile);
 	writeFileSync(
 		path,
-		JSON.stringify({
+		`${JSON.stringify({
 			version: SUBAGENT_OWNER_VERSION,
 			...owner,
 			createdAt: new Date().toISOString(),
-		}) + "\n",
+		})}\n`,
 		{ encoding: "utf8", mode: 0o600 },
 	);
 	chmodSync(path, 0o600);
-}
-
-export function readSessionOwner(sessionFile: string): {
-	sessionFile: string;
-	owner: SubagentSessionOwner;
-} {
-	const canonicalPath = realpathSync(sessionFile);
-	const ownerPath = getSessionOwnerPath(canonicalPath);
-	if ((statSync(ownerPath).mode & 0o077) !== 0) {
-		throw new Error("Invalid subagent session ownership metadata permissions.");
-	}
-	let owner: Partial<SubagentSessionOwner>;
-	try {
-		owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Partial<SubagentSessionOwner>;
-	} catch {
-		throw new Error("Invalid subagent session ownership record.");
-	}
-	const firstLine = readFileSync(canonicalPath, "utf8")
-		.split("\n")
-		.find((line) => line.trim());
-	let header: any;
-	let sessionOwner: any;
-	try {
-		header = firstLine ? JSON.parse(firstLine) : undefined;
-		sessionOwner = header?.subagentOwner;
-	} catch {
-		throw new Error("Invalid subagent session ownership record.");
-	}
-	if (
-		owner.version !== SUBAGENT_OWNER_VERSION ||
-		!/^[a-f0-9]{64}$/.test(owner.token ?? "") ||
-		typeof owner.agentId !== "string" ||
-		typeof owner.parentSessionId !== "string" ||
-		typeof owner.parentSessionFile !== "string" ||
-		typeof owner.createdAt !== "string" ||
-		sessionOwner?.version !== SUBAGENT_OWNER_VERSION ||
-		!/^[a-f0-9]{64}$/.test(sessionOwner?.token ?? "") ||
-		sessionOwner?.token !== owner.token ||
-		sessionOwner?.agentId !== owner.agentId ||
-		sessionOwner?.parentSessionId !== owner.parentSessionId ||
-		header?.parentSession !== owner.parentSessionFile
-	) {
-		throw new Error("Invalid subagent session ownership metadata.");
-	}
-	return { sessionFile: canonicalPath, owner: owner as SubagentSessionOwner };
 }
 
 function getForkContentLines(parentSessionFile: string): string[] {
@@ -162,11 +112,11 @@ export function seedSubagentSessionFile(params: {
 	const lines = [JSON.stringify(header), ...contentLines];
 
 	mkdirSync(dirname(params.childSessionFile), { recursive: true });
-	writeFileSync(params.childSessionFile, lines.join("\n") + "\n", "utf8");
+	writeFileSync(params.childSessionFile, `${lines.join("\n")}\n`, "utf8");
 	chmodSync(params.childSessionFile, 0o600);
-	if (params.agentId && params.parentSessionId) {
+	if (ownerToken && params.agentId && params.parentSessionId) {
 		writeSessionOwner(params.childSessionFile, {
-			token: ownerToken!,
+			token: ownerToken,
 			agentId: params.agentId,
 			parentSessionId: params.parentSessionId,
 			parentSessionFile: params.parentSessionFile,
@@ -271,7 +221,7 @@ export function appendBranchSummary(
 		fromId: fromId ?? branchPointId,
 		summary,
 	};
-	appendFileSync(sessionFile, JSON.stringify(entry) + "\n", "utf8");
+	appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`, "utf8");
 	return id;
 }
 
@@ -293,7 +243,7 @@ export function copySessionFile(sessionFile: string, destDir: string): string {
 export function mergeNewEntries(sourceFile: string, targetFile: string, afterLine: number): SessionEntry[] {
 	const entries = getNewEntries(sourceFile, afterLine);
 	for (const entry of entries) {
-		appendFileSync(targetFile, JSON.stringify(entry) + "\n", "utf8");
+		appendFileSync(targetFile, `${JSON.stringify(entry)}\n`, "utf8");
 	}
 	return entries;
 }

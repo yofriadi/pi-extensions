@@ -102,7 +102,7 @@ describe("resolveSettlementDisposition — pane and capacity policy", () => {
 		assert.equal(d.watchAbandoned, false);
 	});
 
-	for (const reason of ["done", "ping", "sentinel"]) {
+	for (const reason of ["done", "sentinel"]) {
 		it(`closes the pane normally for a ${reason} completion`, () => {
 			const d = resolveSettlementDisposition(reason);
 			assert.equal(d.preservePane, false, "a normal completion must still be reaped");

@@ -22,6 +22,7 @@ import {
 	withPaneRetries,
 } from "./herdr.ts";
 
+// fallow-ignore-next-line unused-type -- re-export preserved from HEAD for downstream consumers
 export type { HerdrPaneLayout, HerdrLayoutPane, HerdrPaneRect };
 export { getHerdrPaneLayout, herdrPaneExists, inspectHerdrPaneSync };
 
@@ -43,7 +44,7 @@ function assertTerminalAvailable(): void {
 }
 
 export function shellQuote(value: string): string {
-	return "'" + value.replace(/'/g, "'\\''") + "'";
+	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /** Create a new herdr tab and return its root pane ID. */
@@ -63,11 +64,13 @@ export function splitCurrentPane(
 	return createHerdrSurfaceSplit(name, direction, targetPaneId, cwd);
 }
 
+// fallow-ignore-next-line unused-export -- public terminal API preserved from HEAD
 export function renameCurrentTab(title: string): void {
 	assertTerminalAvailable();
 	renameHerdrTab(title);
 }
 
+// fallow-ignore-next-line unused-export -- public terminal API preserved from HEAD
 export function renameCurrentWorkspace(title: string): void {
 	assertTerminalAvailable();
 	renameHerdrWorkspace(title);
@@ -88,18 +91,28 @@ export function runScriptInPane(
 	command: string,
 	options?: { scriptPath?: string; scriptPreamble?: string },
 ): string {
-	const scriptPath =
-		options?.scriptPath ??
-		join(tmpdir(), "pi-subagent-herdr-scripts", `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`);
-	mkdirSync(dirname(scriptPath), { recursive: true });
-
-	const scriptLines = ["#!/bin/bash"];
-	if (options?.scriptPreamble) scriptLines.push(options.scriptPreamble.trimEnd());
-	scriptLines.push(command);
-	writeFileSync(scriptPath, `${scriptLines.join("\n")}\n`, { mode: 0o755 });
-
+	const scriptPath = options?.scriptPath ?? generatedScriptPath();
+	writePaneScript(scriptPath, command, options?.scriptPreamble);
 	runInPane(paneId, `bash ${shellQuote(scriptPath)}`);
 	return scriptPath;
+}
+
+function generatedScriptPath(): string {
+	return join(
+		tmpdir(),
+		"pi-subagent-herdr-scripts",
+		`cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`,
+	);
+}
+
+function writePaneScript(scriptPath: string, command: string, scriptPreamble: string | undefined): void {
+	mkdirSync(dirname(scriptPath), { recursive: true });
+	const lines = ["#!/bin/bash", ...preambleLines(scriptPreamble), command];
+	writeFileSync(scriptPath, `${lines.join("\n")}\n`, { mode: 0o755 });
+}
+
+function preambleLines(scriptPreamble: string | undefined): string[] {
+	return scriptPreamble ? [scriptPreamble.trimEnd()] : [];
 }
 
 export function readPane(paneId: PaneId, lines = 50): string {
@@ -111,8 +124,6 @@ export async function readPaneAsync(paneId: PaneId, lines = 50): Promise<string>
 	assertTerminalAvailable();
 	return readHerdrScreenAsync(paneId, lines);
 }
-
-export type { HerdrAgentStatus, PaneInspection } from "./lifecycle.ts";
 
 export async function inspectPane(paneId: PaneId): Promise<import("./lifecycle.ts").PaneInspection> {
 	assertTerminalAvailable();

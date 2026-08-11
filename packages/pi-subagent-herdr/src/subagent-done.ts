@@ -18,11 +18,9 @@ export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[]
 	// Manual input should not strand an auto-exit subagent. If the latest agent
 	// turn completed normally, close the session.
 	//
-	// stopReason "aborted" (Escape) and "error" (provider failure, exhausted
-	// retries) keep the pane OPEN: an unexpectedly dead worker must remain
-	// visible so the user can see something broke and inspect the session. The
-	// error sidecar is still written by the agent_end handler so the parent
-	// learns it was an error, not a clean completion.
+	// Pi reports Escape as stopReason "aborted" or the exact terminal message
+	// "This operation was aborted.". Other error text, even if it mentions an
+	// aborted request, is a provider/transport failure and must settle via .exit.
 	if (messages) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
@@ -33,6 +31,18 @@ export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[]
 	}
 
 	return true;
+}
+
+export function didLatestAssistantAbort(messages: any[] | undefined): boolean {
+	if (!messages) return false;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg?.role !== "assistant") continue;
+		if (msg.stopReason === "aborted") return true;
+		const errorMessage = typeof msg.errorMessage === "string" ? msg.errorMessage : "";
+		return msg.stopReason === "error" && /^This operation was aborted\.?$/.test(errorMessage.trim());
+	}
+	return false;
 }
 
 export interface SubagentErrorInfo {
@@ -107,22 +117,27 @@ export function parseSelectedSkillMetadata(raw: string | undefined): SelectedSki
 	if (!raw) return [];
 	const value = JSON.parse(raw) as unknown;
 	if (!Array.isArray(value)) throw new Error("Invalid selected skill metadata.");
-	return value.map((entry) => {
-		if (
-			entry == null ||
-			typeof entry !== "object" ||
-			typeof (entry as any).name !== "string" ||
-			typeof (entry as any).description !== "string" ||
-			typeof (entry as any).filePath !== "string"
-		) {
-			throw new Error("Invalid selected skill metadata.");
-		}
-		return {
-			name: (entry as any).name,
-			description: (entry as any).description,
-			filePath: (entry as any).filePath,
-		};
-	});
+	return value.map(parseSelectedSkillMetadataEntry);
+}
+
+function parseSelectedSkillMetadataEntry(entry: unknown): SelectedSkillMetadata {
+	const record = skillMetadataRecord(entry);
+	return {
+		name: requiredSkillMetadataField(record, "name"),
+		description: requiredSkillMetadataField(record, "description"),
+		filePath: requiredSkillMetadataField(record, "filePath"),
+	};
+}
+
+function skillMetadataRecord(entry: unknown): Record<string, unknown> {
+	if (!entry || typeof entry !== "object") throw new Error("Invalid selected skill metadata.");
+	return entry as Record<string, unknown>;
+}
+
+function requiredSkillMetadataField(record: Record<string, unknown>, field: string): string {
+	const value = record[field];
+	if (typeof value !== "string") throw new Error("Invalid selected skill metadata.");
+	return value;
 }
 
 export function assertSelectedSkillCompanionOrdering(
@@ -156,6 +171,51 @@ export function injectSelectedSkillMetadata(systemPrompt: string, skills: Select
 	return `${systemPrompt.trimEnd()}\n\n${container}`;
 }
 
+type SubagentWidgetData = {
+	subagentName: string;
+	subagentAgent: string;
+	toolNames: string[];
+	denied: string[];
+	expanded: boolean;
+};
+
+function renderSubagentWidgetBox(theme: any, data: SubagentWidgetData): Box {
+	const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
+	const content = data.expanded ? expandedWidgetContent(theme, data) : collapsedWidgetContent(theme, data);
+	box.addChild(new Text(content, 0, 0));
+	return box;
+}
+
+function expandedWidgetContent(theme: any, data: SubagentWidgetData): string {
+	const countInfo = theme.fg("dim", ` — ${data.toolNames.length} available`);
+	const hint = theme.fg("muted", "  (Ctrl+J to collapse)");
+	const toolList = joinWidgetNames(theme, data.toolNames, "dim");
+	return `${widgetAgentTag(theme, data)}${countInfo}${hint}\n${toolList}${deniedWidgetLine(theme, data.denied)}`;
+}
+
+function collapsedWidgetContent(theme: any, data: SubagentWidgetData): string {
+	const countInfo = theme.fg("dim", ` — ${data.toolNames.length} tools`);
+	const hint = theme.fg("muted", "  (Ctrl+J to expand)");
+	return `${widgetAgentTag(theme, data)}${countInfo}${collapsedDeniedInfo(theme, data.denied)}${hint}`;
+}
+
+function widgetAgentTag(theme: any, data: SubagentWidgetData): string {
+	const label = data.subagentAgent || data.subagentName;
+	return label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
+}
+
+function joinWidgetNames(theme: any, names: string[], color: string): string {
+	return names.map((name) => theme.fg(color, name)).join(theme.fg("muted", ", "));
+}
+
+function deniedWidgetLine(theme: any, denied: string[]): string {
+	if (denied.length === 0) return "";
+	return `\n${theme.fg("muted", "denied: ")}${joinWidgetNames(theme, denied, "error")}`;
+}
+
+function collapsedDeniedInfo(theme: any, denied: string[]): string {
+	return denied.length > 0 ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`) : "";
+}
 export default function (pi: ExtensionAPI) {
 	let toolNames: string[] = [];
 	let denied: string[] = [];
@@ -182,44 +242,8 @@ export default function (pi: ExtensionAPI) {
 	function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
 		ctx.ui.setWidget(
 			"subagent-tools",
-			(_tui: any, theme: any) => {
-				const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
-
-				const label = subagentAgent || subagentName;
-				const agentTag = label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
-
-				if (expanded) {
-					// Expanded: full tool list + denied
-					const countInfo = theme.fg("dim", ` — ${toolNames.length} available`);
-					const hint = theme.fg("muted", "  (Ctrl+J to collapse)");
-
-					const toolList = toolNames
-						.map((name: string) => theme.fg("dim", name))
-						.join(theme.fg("muted", ", "));
-
-					let deniedLine = "";
-					if (denied.length > 0) {
-						const deniedList = denied
-							.map((name: string) => theme.fg("error", name))
-							.join(theme.fg("muted", ", "));
-						deniedLine = "\n" + theme.fg("muted", "denied: ") + deniedList;
-					}
-
-					const content = new Text(`${agentTag}${countInfo}${hint}\n${toolList}${deniedLine}`, 0, 0);
-					box.addChild(content);
-				} else {
-					// Collapsed: one-line summary
-					const countInfo = theme.fg("dim", ` — ${toolNames.length} tools`);
-					const deniedInfo =
-						denied.length > 0 ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`) : "";
-					const hint = theme.fg("muted", "  (Ctrl+J to expand)");
-
-					const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
-					box.addChild(content);
-				}
-
-				return box;
-			},
+			(_tui: any, theme: any) =>
+				renderSubagentWidgetBox(theme, { subagentName, subagentAgent, toolNames, denied, expanded }),
 			{ placement: "aboveEditor" },
 		);
 	}
@@ -287,41 +311,48 @@ export default function (pi: ExtensionAPI) {
 		pendingAgentEndMessages = (event as any).messages as any[] | undefined;
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	function settleAgentRun(ctx: any): void {
 		const messages = pendingAgentEndMessages;
 		pendingAgentEndMessages = undefined;
 		const shouldExit = autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
-
-		// Surface terminal stopReason: "error" turns (auto-retry exhausted,
-		// provider overload, etc.) to the parent via the .exit sidecar so the
-		// watcher can report a clear failure with the underlying error message.
-		// Written even when the pane stays open — errors no longer auto-exit, and
-		// without the sidecar the parent would only see a stale assistant message,
-		// mistaking the crash for a still-running worker. Only settled (final)
-		// errors reach this point; transient retryable errors never publish.
-		const sessionFile = process.env.PI_SUBAGENT_SESSION;
-		if (sessionFile && (shouldExit || findLatestAssistantError(messages))) {
-			try {
-				writeCompletionSidecar(sessionFile, buildCompletionSidecar(messages));
-			} catch {
-				// Best effort — the watcher can still detect the terminal sentinel
-				// after shutdown if the completion sidecar cannot be written.
-			}
-		}
-
+		const interrupted = didLatestAssistantAbort(messages);
+		publishSettledSidecar(messages, shouldExit, interrupted);
 		if (shouldExit) {
 			recorder.agentEndDone();
 			ctx.shutdown();
 			return;
 		}
+		if (interrupted) recorder.agentEndInterrupted();
+		else recorder.agentEndWaiting();
+		if (autoExit) userTookOver = false;
+	}
 
-		recorder.agentEndWaiting();
-		if (autoExit) {
-			// Reset any recorded manual input marker. Auto-exit is decided by whether
-			// the latest agent turn completed normally, not by who initiated it.
-			userTookOver = false;
+	function publishSettledSidecar(messages: any[] | undefined, shouldExit: boolean, interrupted: boolean): void {
+		const sessionFile = sidecarSessionFile(messages, shouldExit, interrupted);
+		if (!sessionFile) return;
+		writeCompletionSidecarBestEffort(sessionFile, messages);
+	}
+
+	function sidecarSessionFile(
+		messages: any[] | undefined,
+		shouldExit: boolean,
+		interrupted: boolean,
+	): string | undefined {
+		if (interrupted) return undefined;
+		const sessionFile = process.env.PI_SUBAGENT_SESSION;
+		if (!sessionFile) return undefined;
+		return shouldExit || findLatestAssistantError(messages) ? sessionFile : undefined;
+	}
+
+	function writeCompletionSidecarBestEffort(sessionFile: string, messages: any[] | undefined): void {
+		try {
+			writeCompletionSidecar(sessionFile, buildCompletionSidecar(messages));
+		} catch {
+			// Best effort — the watcher can still detect the terminal sentinel after shutdown.
 		}
-	});
+	}
+
+	pi.on("agent_settled", (_event, ctx) => settleAgentRun(ctx));
 
 	pi.on("turn_start", (event) => {
 		recorder.turnStart((event as any).turnIndex);
@@ -380,42 +411,6 @@ export default function (pi: ExtensionAPI) {
 		handler: (ctx) => {
 			expanded = !expanded;
 			renderWidget(ctx, null);
-		},
-	});
-
-	pi.registerTool({
-		name: "caller_ping",
-		label: "Caller Ping",
-		description:
-			"Send a help request to the parent agent and exit this session. " +
-			"The parent will be notified with your message and can resume this session with a response. " +
-			"Use when you're stuck, need clarification, or need the parent to take action.",
-		parameters: Type.Object({
-			message: Type.String({ description: "What you need help with" }),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const sessionFile = process.env.PI_SUBAGENT_SESSION;
-			if (!sessionFile) {
-				throw new Error(
-					"caller_ping is only available in subagent contexts. " +
-						"PI_SUBAGENT_SESSION environment variable is not set.",
-				);
-			}
-
-			recorder.callerPing();
-			const exitData = {
-				type: "ping" as const,
-				name: process.env.PI_SUBAGENT_NAME ?? "subagent",
-				message: params.message,
-				runId: process.env.PI_SUBAGENT_ID,
-			};
-			writeCompletionSidecar(sessionFile, exitData);
-
-			ctx.shutdown();
-			return {
-				content: [{ type: "text", text: "Ping sent. Session will exit and parent will be notified." }],
-				details: {},
-			};
 		},
 	});
 

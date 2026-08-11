@@ -4,11 +4,28 @@
 
 ### Requirement: status widget includes queued and active work
 
-The extension SHALL always enable the human-only status widget. It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts. It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous. It SHALL NOT register a model-facing listing tool. It SHALL NOT require or honor a package `status.enabled` (or any other package config) toggle to disable the widget. A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected. Elapsed wait time SHALL be measured from the start of the current wait, not from run start. Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error.
+The extension SHALL always enable the human-only status widget.
+It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts.
+It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous.
+It SHALL NOT register a model-facing listing tool.
+It SHALL NOT require or honor a package `status.enabled` (or any other package config) toggle to disable the widget.
+A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected.
+Elapsed wait time SHALL be measured from the start of the current wait, not from run start.
+Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error.
 
-The widget SHALL present tracked work as a tree under a `Subagents` title. Every tracked run (starting, running, active, waiting, interrupted, blocked, stalled, finalizing) SHALL render as a two-line row: an identity line carrying a state glyph, the agent display name, compact run-ID prefix, admission class, and elapsed duration, and an indented activity line that leads with the run's current state — the run label for starting/running/active runs, `blocked` with its wait duration for permission waits, the state name with its duration for waiting/interrupted/stalled runs, and the specific delivery-wait reason with its per-wait duration for settled runs awaiting handoff — followed, when reported by the child, by turn count, tool-call count, and context-token usage. Opaque hexadecimal IDs SHALL use an eight-character widget prefix and expand only when needed to distinguish simultaneously visible entries; the full ID SHALL remain unchanged for runtime correlation and tool targeting. The glyph SHALL animate only for starting, running, and active entries; all other states SHALL use static glyphs. Queued entries SHALL render as individual rows with name, compact run-ID prefix, class, and queued state, up to three entries; entries beyond the third SHALL be summarized as a single overflow count line without claiming that a pane or process has started. Elapsed durations SHALL use an adaptive format: tenths of seconds under one minute, minutes and seconds under one hour, hours and minutes at one hour and beyond.
+The widget SHALL present tracked work as a tree under a `Subagents` title.
+Every tracked run (starting, running, active, waiting, interrupted, blocked, stalled, finalizing) SHALL render as a two-line row: an identity line carrying a state glyph, the agent display name, compact run-ID prefix, admission class, and elapsed duration, and an indented activity line that leads with the run's current state — the run label for starting/running/active runs, `blocked` with its wait duration for permission waits, the state name with its duration for waiting/interrupted/stalled runs, and the specific delivery-wait reason with its per-wait duration for settled runs awaiting handoff — followed, when reported by the child, by turn count, tool-call count, and context-token usage.
+Opaque hexadecimal IDs SHALL use an eight-character widget prefix and expand only when needed to distinguish simultaneously visible entries; the full ID SHALL remain unchanged for runtime correlation and tool targeting.
+The glyph SHALL animate only for starting, running, and active entries; all other states SHALL use static glyphs.
+Queued entries SHALL render as individual rows with name, compact run-ID prefix, class, and queued state, up to three entries; entries beyond the third SHALL be summarized as a single overflow count line without claiming that a pane or process has started.
+Elapsed durations SHALL use an adaptive format: tenths of seconds under one minute, minutes and seconds under one hour, hours and minutes at one hour and beyond.
 
-The widget SHALL distinguish terminal failure outcomes from success. A run that completes successfully SHALL leave no row once its bookkeeping completes; when nothing else is tracked the widget SHALL be removed entirely. A run that fails SHALL persist as a sticky terminal row — `✗` for failures (non-zero exit, error, watch/launch error), `■` for stopped runs (interrupted before settling, or self-paused via `caller_ping`), `⚠` for watch-abandoned runs — with its frozen duration and final telemetry, until evicted. Sticky rows SHALL render after live, queued, and pending-delivery rows, most recent first, up to three rows with a `+N more` overflow line. The whole sticky set SHALL be evicted when the next subagent launch is admitted, and a single sticky row SHALL be evicted when a completion correlated to that run arrives (manual resume followed by `subagent_done`). The header SHALL render as `● Subagents` with the counts segment while live work exists (running, queued, or actively-retrying deliveries), and as `○ Subagents` with no counts segment when only sticky rows and/or exhausted deliveries remain.
+The widget SHALL distinguish terminal failure outcomes from success.
+A run that completes successfully SHALL leave no row once its bookkeeping completes; when nothing else is tracked the widget SHALL be removed entirely.
+A run that fails SHALL persist as a sticky terminal row — `✗` for failures (non-zero exit, error, watch/launch error), `■` for stopped runs (interrupted before settling, or self-paused via `caller_ping`), `⚠` for watch-abandoned runs — with its frozen duration and final telemetry, until evicted.
+Sticky rows SHALL render after live, queued, and pending-delivery rows, most recent first, up to three rows with a `+N more` overflow line.
+The whole sticky set SHALL be evicted when the next subagent launch is admitted, and a single sticky row SHALL be evicted when a completion correlated to that run arrives (manual resume followed by `subagent_done`).
+The header SHALL render as `● Subagents` with the counts segment while live work exists (running, queued, or actively-retrying deliveries), and as `○ Subagents` with no counts segment when only sticky rows and/or exhausted deliveries remain.
 
 #### Scenario: status is always enabled
 
@@ -39,6 +56,12 @@ The widget SHALL distinguish terminal failure outcomes from success. A run that 
 
 - **WHEN** a healthy child pane is waiting on a permission dialog
 - **THEN** status projects `blocked`; it is not classified as an unhealthy inspection stall
+
+#### Scenario: settled row clears
+
+- **WHEN** delivery or suppression bookkeeping completes
+
+- **THEN** the row clears and counts update
 
 #### Scenario: settled row clears on success
 
@@ -104,6 +127,12 @@ The widget SHALL distinguish terminal failure outcomes from success. A run that 
 
 - **WHEN** no work is running, queued, or actively retrying, and only sticky terminal rows and/or exhausted deliveries remain
 - **THEN** the header renders as `○ Subagents` with no counts segment
+
+#### Scenario: deferred deliveries are shown as awaiting the runtime
+
+- **WHEN** a delivery is pending because no session-bound runtime is active and it has not exhausted its deferral budget
+
+- **THEN** it is counted and labelled as awaiting the runtime, separately from both actively-retrying and undeliverable results
 
 #### Scenario: terminal rows are capped with overflow
 

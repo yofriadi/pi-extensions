@@ -4,7 +4,9 @@
 
 ### Requirement: child sessions report run telemetry through the activity sidecar
 
-The child session SHALL record telemetry into its existing versioned activity sidecar as additive optional fields: cumulative tool-call count, cumulative compaction count, and the latest sampled context usage (context tokens, context window, context percent). Turn count SHALL come from the already-recorded turn index. Telemetry writes SHALL ride the existing throttled atomic-write path; the schema version SHALL NOT change for these additions, and unknown fields SHALL be tolerated by readers.
+The child session SHALL record telemetry into its existing versioned activity sidecar as additive optional fields: cumulative tool-call count, cumulative compaction count, and the latest sampled context usage (context tokens, context window, context percent).
+Turn count SHALL come from the already-recorded turn index.
+Telemetry writes SHALL ride the existing throttled atomic-write path; the schema version SHALL NOT change for these additions, and unknown fields SHALL be tolerated by readers.
 
 #### Scenario: tool calls are counted
 
@@ -42,7 +44,11 @@ When an activity file lacks telemetry fields (older child, pre-migration fixture
 
 ### Requirement: context utilization presentation carries urgency by color tier
 
-The widget SHALL render current context tokens as `◈` followed by a human-readable count, annotated with the window-utilization percent in parentheses when known. The percent SHALL be color-coded: below 70% dim, 70–85% warning, 85% and above error. The percent chunk SHALL be omitted when the model declares no context window or while the sidecar's latest compaction). The compaction count SHALL render as `⇊N` only when greater than zero, and SHALL always be dim regardless of the percent's tier. `⇊N` appears inside the percent's parentheses when the percent is present (`◈91.0k (84% · ⇊2)`), alone in parentheses when the percent is absent (`◈33.8k (⇊2)`), and is omitted entirely when the count is zero.
+The widget SHALL render current context tokens as `◈` followed by a human-readable count, annotated with the window-utilization percent in parentheses when known.
+The percent SHALL be color-coded: below 70% dim, 70–85% warning, 85% and above error.
+The percent chunk SHALL be omitted when the model declares no context window or while the sidecar's latest compaction).
+The compaction count SHALL render as `⇊N` only when greater than zero, and SHALL always be dim regardless of the percent's tier.
+`⇊N` appears inside the percent's parentheses when the percent is present (`◈91.0k (84% · ⇊2)`), alone in parentheses when the percent is absent (`◈33.8k (⇊2)`), and is omitted entirely when the count is zero.
 
 #### Scenario: utilization tiers
 

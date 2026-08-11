@@ -50,12 +50,7 @@ export async function resolveSelectedSkills(options: {
 
 	return names.map((name) => {
 		const winner = loaded.skills.find((skill) => skill.name === name);
-		const collision = loaded.diagnostics.find(
-			(diagnostic: any) =>
-				diagnostic.type === "collision" &&
-				diagnostic.collision?.resourceType === "skill" &&
-				diagnostic.collision?.name === name,
-		);
+		const collision = loaded.diagnostics.find((diagnostic: any) => isSkillCollision(diagnostic, name));
 		if (collision) throw new Error(`Ambiguous subagent skill ${JSON.stringify(name)}.`);
 		if (!winner) throw new Error(`Unknown subagent skill ${JSON.stringify(name)}.`);
 		return selectSkillFields(winner);
@@ -70,4 +65,10 @@ function selectSkillFields(skill: Skill): SelectedSkill {
 		baseDir: skill.baseDir,
 		disableModelInvocation: skill.disableModelInvocation,
 	};
+}
+
+function isSkillCollision(diagnostic: any, name: string): boolean {
+	if (diagnostic.type !== "collision") return false;
+	const collision = diagnostic.collision;
+	return collision?.resourceType === "skill" && collision.name === name;
 }
