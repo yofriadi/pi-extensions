@@ -47,6 +47,27 @@
 					"suspicious": { "noExplicitAny": "off" }
 				}
 			}
+		},
+		{
+			"includes": ["packages/pi-mlflow/test/**/*.ts"],
+			"linter": {
+				"rules": {
+					"style": { "noNonNullAssertion": "off" }
+				}
+			}
+		},
+		{
+			"includes": ["packages/pi-subagent-herdr/**/*.ts"],
+			"linter": {
+				"rules": {
+					"complexity": { "noBannedTypes": "off" },
+					"suspicious": {
+						"noAssignInExpressions": "off",
+						"noControlCharactersInRegex": "off",
+						"noExplicitAny": "off"
+					}
+				}
+			}
 		}
 	]
 }

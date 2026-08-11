@@ -1,0 +1,62 @@
+{
+	"name": "@yofriadi/pi-mlflow",
+	"version": "0.1.0",
+	"description": "MLflow tracing extension for the pi coding agent: traces each turn-cycle as an MLflow trace against a user-managed local MLflow Tracking Server.",
+	"keywords": [
+		"pi-package"
+	],
+	"license": "MIT",
+	"author": "Yofriadi Yahya <yofriadi.yahya@proton.me>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-mlflow"
+	},
+	"files": [
+		"src",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE",
+		"package.json",
+		"pi-mlflow.example.json"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:integration": "vitest run --config vitest.integration.config.ts",
+		"mlflow:server": "scripts/run-mlflow-server.sh",
+		"fallow": "fallow",
+		"fallow:audit": "fallow audit",
+		"fallow:health": "fallow health --score --hotspots --targets",
+		"fallow:dead-code": "fallow dead-code",
+		"fallow:dupes": "fallow dupes"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.82.0"
+	},
+	"dependencies": {
+		"@opentelemetry/api": "1.9.0",
+		"mlflow-tracing": "0.1.3"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.82.0",
+		"@opentelemetry/sdk-trace-node": "2.1.0",
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}

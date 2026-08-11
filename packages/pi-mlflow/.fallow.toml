@@ -1,0 +1,8 @@
+#:schema https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json
+
+# Package-scoped fallow: extends the repo root config (rules, health, ignore
+# deps) but narrows entry to this package so `fallow` run from here analyzes
+# only pi-mlflow. Arrays replace the parent's, so entry overrides the root's
+# `packages/*` globs.
+extends = ["../../.fallow.toml"]
+entry = ["src/index.ts"]

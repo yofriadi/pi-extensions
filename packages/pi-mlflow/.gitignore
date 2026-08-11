@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+.pi/*
+!.pi/skills/
+!.pi/settings.json
+
+pi-session-*.html
+*.session.html
+*.session-export.html
+pi-mlflow.json
+
+coverage/
