@@ -1,0 +1,11 @@
+# Dev/test tooling — not shipped
+test/
+tsconfig.json
+vitest.config.ts
+.fallow.toml
+
+# Parked accounts integration (see tsconfig.json) — exclude from the published
+# tarball until the @narumitw/pi-accounts dependency is importable.
+src/account-adapter.ts
+src/accounts-with-antigravity.ts
+scripts/verify-pack.mjs

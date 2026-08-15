@@ -1,6 +1,6 @@
 {
 	"name": "@yofriadi/pi-provider-antigravity",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"publishConfig": {
 		"access": "public"
 	},
@@ -32,10 +32,6 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"files": [
-		"scripts/**/*",
-		"src/**/*"
-	],
 	"scripts": {
 		"discover-models": "jiti scripts/discover-models.ts",
 		"test": "vitest run",

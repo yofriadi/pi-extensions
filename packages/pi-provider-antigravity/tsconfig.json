@@ -5,5 +5,7 @@
 		"noUncheckedIndexedAccess": false
 	},
 	"include": ["scripts/**/*", "src/**/*", "test/**/*"],
-	"exclude": ["node_modules", "dist"]
+	// The accounts adapter/host are parked until the pi-accounts dependency is
+	// importable (no main/exports upstream); restore when that lands.
+	"exclude": ["node_modules", "dist", "src/account-adapter.ts", "src/accounts-with-antigravity.ts"]
 }
