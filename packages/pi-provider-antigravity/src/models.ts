@@ -59,6 +59,16 @@ const MEDIUM_THINKING_LEVEL_MAP: AntigravityThinkingLevelMap = {
 };
 
 const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
+	"gemini-3.7-flash": {
+		off: "gemini-3.7-flash-low",
+		routing: {
+			minimal: "gemini-3.7-flash-low",
+			low: "gemini-3.7-flash-low",
+			medium: "gemini-3.7-flash-medium",
+			high: "gemini-3.7-flash-high",
+		},
+		defaultRequestId: "gemini-3.7-flash-low",
+	},
 	"gemini-3.6-flash": {
 		off: "gemini-3.6-flash-low",
 		routing: {
@@ -146,6 +156,19 @@ export function getAntigravityRequestModelIds(modelId: string): string[] {
 }
 
 export const ANTIGRAVITY_MODELS: AntigravityModel[] = [
+	{
+		id: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash (Antigravity)",
+		api: GOOGLE_GEMINI_CLI_API,
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_MODEL_BASE_URL,
+		reasoning: true,
+		thinkingLevelMap: GEMINI_FLASH_THINKING_LEVEL_MAP,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 65536,
+	},
 	{
 		id: "gemini-3.6-flash",
 		name: "Gemini 3.6 Flash (Antigravity)",
@@ -236,6 +259,24 @@ export interface AntigravityCliSelection {
 /** Current public `agy models` choices and their directly observed wire routes. */
 export const ANTIGRAVITY_CLI_SELECTIONS: AntigravityCliSelection[] = [
 	{
+		label: "Gemini 3.7 Flash (Low)",
+		logicalModelId: "gemini-3.7-flash",
+		reasoning: "low",
+		wireModelId: "gemini-3.7-flash-low",
+	},
+	{
+		label: "Gemini 3.7 Flash (Medium)",
+		logicalModelId: "gemini-3.7-flash",
+		reasoning: "medium",
+		wireModelId: "gemini-3.7-flash-medium",
+	},
+	{
+		label: "Gemini 3.7 Flash (High)",
+		logicalModelId: "gemini-3.7-flash",
+		reasoning: "high",
+		wireModelId: "gemini-3.7-flash-high",
+	},
+	{
 		label: "Gemini 3.6 Flash (Low)",
 		logicalModelId: "gemini-3.6-flash",
 		reasoning: "low",
@@ -307,6 +348,7 @@ const ANTIGRAVITY_CLI_MODEL_IDS = new Set([
 	"claude-opus-4-6",
 	"claude-sonnet-4-6",
 	"gemini-3.1-pro",
+	"gemini-3.7-flash",
 	"gemini-3.6-flash",
 	"gemini-3.5-flash",
 	"gpt-oss-120b",

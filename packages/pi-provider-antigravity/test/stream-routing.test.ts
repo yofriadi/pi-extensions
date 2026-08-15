@@ -10,16 +10,52 @@ const SUCCESS_STREAM = `data: ${JSON.stringify({
 	},
 })}\n\n`;
 
-describe("Gemini 3.5 Flash stream routing", () => {
+describe("Gemini Flash stream routing", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it.each([
+		["low", "gemini-3.7-flash-low"],
+		["medium", "gemini-3.7-flash-medium"],
+		["high", "gemini-3.7-flash-high"],
+	] satisfies [ThinkingLevel, string][])("routes 3.7 %s through %s", async (reasoning, expectedWireModel) => {
+		let payloadModel: string | undefined;
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+		);
+		const model = ANTIGRAVITY_MODELS.find(
+			(candidate) => candidate.id === "gemini-3.7-flash",
+		) as Model<"google-gemini-cli">;
+
+		const response = await streamSimpleGoogleGeminiCli(
+			model,
+			{ messages: [{ role: "user", content: "Reply with OK", timestamp: Date.now() }] },
+			{
+				apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+				reasoning,
+				onPayload: (payload) => {
+					if (
+						payload &&
+						typeof payload === "object" &&
+						"model" in payload &&
+						typeof payload.model === "string"
+					) {
+						payloadModel = payload.model;
+					}
+				},
+			},
+		).result();
+
+		expect(payloadModel).toBe(expectedWireModel);
+		expect(response.stopReason).toBe("stop");
 	});
 
 	it.each([
 		["low", "gemini-3.5-flash-extra-low"],
 		["medium", "gemini-3.5-flash-low"],
 		["high", "gemini-3-flash-agent"],
-	] satisfies [ThinkingLevel, string][])("routes %s through %s", async (reasoning, expectedWireModel) => {
+	] satisfies [ThinkingLevel, string][])("routes 3.5 %s through %s", async (reasoning, expectedWireModel) => {
 		let payloadModel: string | undefined;
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),

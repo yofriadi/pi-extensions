@@ -25,6 +25,7 @@ describe("Antigravity CLI model parity", () => {
 				"gemini-3.1-pro",
 				"gemini-3.5-flash",
 				"gemini-3.6-flash",
+				"gemini-3.7-flash",
 				"gpt-oss-120b",
 			].sort(),
 		);

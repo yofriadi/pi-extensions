@@ -96,7 +96,7 @@ describe("pi-provider-antigravity extension", () => {
 		const availableModels = registry.getAll();
 		const antigravityModels = availableModels.filter((m) => m.provider === "google-antigravity");
 
-		expect(antigravityModels.length).toBe(6);
+		expect(antigravityModels.length).toBe(7);
 		expect(antigravityModels.map((m) => m.id).sort()).toEqual(
 			[
 				"claude-opus-4-6",
@@ -104,6 +104,7 @@ describe("pi-provider-antigravity extension", () => {
 				"gemini-3.1-pro",
 				"gemini-3.5-flash",
 				"gemini-3.6-flash",
+				"gemini-3.7-flash",
 				"gpt-oss-120b",
 			].sort(),
 		);

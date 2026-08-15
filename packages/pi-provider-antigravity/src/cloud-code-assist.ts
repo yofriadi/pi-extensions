@@ -230,11 +230,11 @@ function needsClaudeThinkingBetaHeader(model: Model<"google-gemini-cli">): boole
 }
 
 function isGemini3ProModel(modelId: string): boolean {
-	return /gemini-3(?:\.1)?-pro/.test(modelId.toLowerCase());
+	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
 }
 
 function isGemini3FlashModel(modelId: string): boolean {
-	return /gemini-3(?:\.1)?-flash/.test(modelId.toLowerCase());
+	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
 }
 
 function isGemini3Model(modelId: string): boolean {
