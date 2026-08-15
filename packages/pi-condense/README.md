@@ -145,6 +145,7 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 | `summarizerModel` | `"default"` | Pin a cheap model instead of reusing your active one - see the plan-by-plan table in [doc/configuration.md](doc/configuration.md#choosing-a-summarizer-model) |
 | `pruneOn` | `agent-message` | Trigger mode - see Architecture above |
 | `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn` |
+| `summarizerConcurrency` | `4` | Max simultaneous summarizer calls during a flush fan-out. `0` = unbounded (previous behavior) |
 | `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md"]` | Tool names / path globs that are never pruned |
 | `spillThreshold` | `65536` | Chars above which a single oversized result spills straight to a sidecar file |
 

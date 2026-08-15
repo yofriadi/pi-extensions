@@ -43,6 +43,7 @@
  */
 
 import type { FallbackController } from "./summarizer-fallback.js";
+import type { RateLimitGate } from "./summarizer-pacing.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -214,6 +215,18 @@ export const SUMMARIZER_MAX_TIMEOUT_PRESETS: { value: string; label: string }[] 
 ];
 
 /**
+ * Cycling presets for `summarizerConcurrency` (stored as strings). "0" is the
+ * unbounded sentinel - one call per batch, started together.
+ */
+export const SUMMARIZER_CONCURRENCY_PRESETS: { value: string; label: string }[] = [
+  { value: "1", label: "1" },
+  { value: "2", label: "2" },
+  { value: "4", label: "4 (default)" },
+  { value: "8", label: "8" },
+  { value: "0", label: "0 (unbounded)" },
+];
+
+/**
  * Cycling presets for the `autoBudgetThreshold` setting (stored as strings;
  * the settings UI cycles string values). "0" is the disabled sentinel → null.
  * Other values are 0–1 fractions of the context window (e.g. "0.8" = flush at 80%).
@@ -307,6 +320,13 @@ export interface ContextPruneConfig {
    * handling as the idle timeout. 0 disables the ceiling. Default 180000.
    */
   summarizerMaxTimeoutMs: number;
+  /**
+   * Max summarizer LLM calls in flight for one `summarizeBatches` fan-out
+   * (e.g. a budget auto-flush draining a backlog). Queued batches start as
+   * in-flight calls settle. `0` = unbounded (one call per batch, started
+   * together - the pre-pacing behavior). Default 4.
+   */
+  summarizerConcurrency: number;
   /**
    * Tool names whose outputs must NEVER be pruned or summarized. Tool calls
    * with matching `toolName` are filtered out of the pruning capture path so
@@ -494,6 +514,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   recoveryGraceTurns: 3,
   summarizerIdleTimeoutMs: 20000,
   summarizerMaxTimeoutMs: 180000,
+  summarizerConcurrency: 4,
   protectedTools: [],
   protectedPaths: ["**/skills/**/*.md"],
   chainCompression: {
@@ -757,6 +778,26 @@ export interface FlushOptions {
   closingMessage?: any;
 }
 
+/**
+ * Internal pacing seam for in-place rate-limit retry (test/wiring only, not
+ * user config - same pattern as FallbackController's injected `now`). Absent
+ * fields fall back to the RATE_LIMIT_* constants in src/summarizer-pacing.ts.
+ */
+export interface SummarizerPacing {
+  /** Extra attempts after the first rate-limit-shaped failure. */
+  retries?: number;
+  /** Base of the exponential backoff in ms (doubles per attempt). */
+  baseDelayMs?: number;
+  /** Per-wait cap in ms; a parsed server delay above this is not waited out. */
+  maxWaitMs?: number;
+  /** Sleep implementation (abort-aware). */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Clock used for the retry-chain budget. */
+  now?: () => number;
+  /** Shared per-fan-out rate-limit gate. Created by summarizeBatches; absent on sequential paths. */
+  gate?: RateLimitGate;
+}
+
 /** Options for a single summarizeBatch() call. */
 export interface SummarizeBatchOptions {
   /** Receives the number of summary text characters streamed so far. */
@@ -772,6 +813,8 @@ export interface SummarizeBatchOptions {
    * (see src/summarizer-fallback.ts). Absent => today's single-attempt behavior.
    */
   controller?: FallbackController;
+  /** Internal rate-limit pacing seam (see SummarizerPacing). */
+  pacing?: SummarizerPacing;
 }
 
 /** Options for summarizeBatches() when callers want live per-batch text progress. */
@@ -789,6 +832,8 @@ export interface SummarizeBatchesOptions {
    * (see src/summarizer-fallback.ts). Absent => today's single-attempt behavior.
    */
   controller?: FallbackController;
+  /** Internal rate-limit pacing seam (see SummarizerPacing). */
+  pacing?: SummarizerPacing;
 }
 
 /**

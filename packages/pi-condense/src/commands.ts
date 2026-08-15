@@ -14,6 +14,7 @@ import {
   RECOVERY_GRACE_PRESETS,
   SUMMARIZER_IDLE_TIMEOUT_PRESETS,
   SUMMARIZER_MAX_TIMEOUT_PRESETS,
+  SUMMARIZER_CONCURRENCY_PRESETS,
   AUTO_BUDGET_PRESETS,
   ROLLING_WINDOW_PRESETS,
   PURGE_COOLDOWN_PRESETS,
@@ -211,6 +212,13 @@ function maxTimeoutDescription(config: ContextPruneConfig): string {
     return "Summarizer total-duration ceiling DISABLED - only the idle timeout bounds a call.";
   }
   return `Hard ceiling on total duration of a single summarizer call: ${Math.round(config.summarizerMaxTimeoutMs / 1000)}s. Backstop for a stream that dribbles forever without going idle. Set 0 to disable.`;
+}
+
+function concurrencyDescription(config: ContextPruneConfig): string {
+  if (config.summarizerConcurrency === 0) {
+    return "Summarizer fan-out UNBOUNDED - every queued batch fires its own LLM call at once. Only for high-quota providers; a burst can trip rate limits and flip the summarizer into fallback.";
+  }
+  return `Max ${config.summarizerConcurrency} summarizer calls in flight during a flush fan-out; queued batches start as in-flight calls settle. Bounds quota bursts on the configured summarizer model. Set 0 for unbounded.`;
 }
 
 function autoBudgetThresholdDescription(config: ContextPruneConfig): string {
@@ -599,6 +607,15 @@ export function registerCommands(
               description: maxTimeoutDescription(config),
             },
             {
+              id: "summarizerConcurrency",
+              label: "Summarizer concurrency",
+              values: SUMMARIZER_CONCURRENCY_PRESETS.map((p) => p.value),
+              currentValue: SUMMARIZER_CONCURRENCY_PRESETS.some((p) => p.value === String(config.summarizerConcurrency))
+                ? String(config.summarizerConcurrency)
+                : (SUMMARIZER_CONCURRENCY_PRESETS.find((p) => p.value === String(DEFAULT_CONFIG.summarizerConcurrency))?.value ?? SUMMARIZER_CONCURRENCY_PRESETS[0].value), // fall back to the default preset if a custom value isn't in the cycle
+              description: concurrencyDescription(config),
+            },
+            {
               id: "autoBudgetThreshold",
               label: "Auto-flush at context %",
               values: AUTO_BUDGET_PRESETS.map((p) => p.value),
@@ -758,6 +775,11 @@ export function registerCommands(
               newConfig.summarizerMaxTimeoutMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG.summarizerMaxTimeoutMs;
               const it = items.find((item) => item.id === "summarizerMaxTimeoutMs");
               if (it) it.description = maxTimeoutDescription(newConfig);
+            } else if (id === "summarizerConcurrency") {
+              const parsed = Number.parseInt(newValue, 10);
+              newConfig.summarizerConcurrency = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG.summarizerConcurrency;
+              const it = items.find((item) => item.id === "summarizerConcurrency");
+              if (it) it.description = concurrencyDescription(newConfig);
             } else if (id === "autoBudgetThreshold") {
               const parsed = Number.parseFloat(newValue);
               newConfig.autoBudgetThreshold =

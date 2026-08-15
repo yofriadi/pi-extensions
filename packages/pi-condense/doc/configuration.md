@@ -18,6 +18,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
     "summarizerThinking": "default",
     "summarizerIdleTimeoutMs": 20000,
     "summarizerMaxTimeoutMs": 180000,
+    "summarizerConcurrency": 4,
     "pruneOn": "agent-message",
     "batchingMode": "turn",
     "quietOversizedSkips": false,
@@ -55,6 +56,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | `recoveryGraceTurns` | non-negative integer (user-turn-groups), `0` disables | `3` | After a `context_tree_query` recovery, render that tool's output verbatim for this many user-turn-groups before re-stubbing it. Enforced at render time (Phase 1 + chain-compression eligibility), not at capture time. See [PRUNING.md § What Pruning Does](../PRUNING.md#what-pruning-does) |
 | `summarizerIdleTimeoutMs` | non-negative integer (ms), `0` disables | `20000` | Abort a summarizer stream call after this much silence (no stream event). Resets on every event, so it never false-aborts a flowing generation; catches a stalled connection fast. A timeout feeds the same outage-fallback retry as a provider error. `0` = no idle bound. |
 | `summarizerMaxTimeoutMs` | non-negative integer (ms), `0` disables | `180000` | Hard ceiling on total duration of a single summarizer stream call. Backstop for a stream that dribbles forever without going idle. Generous by design (clears the observed p99). `0` = no ceiling. |
+| `summarizerConcurrency` | non-negative integer, `0` = unbounded | `4` | Max summarizer LLM calls in flight during one flush fan-out. A budget auto-flush drains the whole backlog at once, so an unbounded burst of N calls can trip provider rate limits (observed: 34 simultaneous calls answered with HTTP 429) and flip the configured summarizer into session-model fallback. Bounding the width - plus in-place rate-limit retry with a shared backoff gate - keeps the flush on the configured model. `0` restores the pre-pacing unbounded behavior for high-quota providers. |
 | `protectedTools` | `string[]` | `[]` | Never-pruned tool names (e.g. `["todowrite","todoread"]`). When a protected tool's chain is range-compressed, its output is preserved verbatim inside the `<compressed-chain>` block as `<protected-output>` - protected outputs are never lost. |
 | `protectedPaths` | `string[]` | `["**/skills/**/*.md"]` | Globs matched against a tool call's `args.path`; matching outputs are never pruned (same semantics as `protectedTools`, including `<protected-output>` relocation in compressed chains). Already-summarized matching reads are repaired on the next turn; chain-compressed ones are not. Set `[]` to disable. |
 | `dedupByContentHash` | `true` / `false` | `true` | Re-reads of identical (toolName, content) skip the LLM and alias the original |
@@ -128,6 +130,22 @@ A timeout is treated exactly like a transient provider error: it feeds the
 outage-fallback retry, so if a distinct `summarizerModel` is configured the
 stalled call is retried once on the session model (itself timeout-bounded).
 Both timers can be set to `0` to disable them independently.
+
+### Flush pacing (concurrency + rate-limit retry)
+
+A flush summarizes its whole backlog in one fan-out. `summarizerConcurrency`
+(default `4`) bounds how many summarizer calls are in flight at once; queued
+batches start as in-flight calls settle. Rate-limit-shaped failures (HTTP 429,
+`resource has been exhausted`, quota/rate-limit/overloaded wording, server
+retry-delay phrases) are retried **in place on the same model** with bounded
+backoff (2 extra attempts, 2s base doubling, 30s per-wait cap - internal
+constants, not user config), and a per-fan-out gate coordinates a shared
+backoff window so the workers don't hammer the same quota wall during the
+penalty (it coordinates rather than serializes — workers can wake together
+when the window opens). Only when
+those retries are exhausted does the failure classify as transient and feed
+the outage fallback. Set `summarizerConcurrency: 0` for the old unbounded
+burst.
 
 ## Commands
 

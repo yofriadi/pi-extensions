@@ -818,6 +818,16 @@ Why we compute the ratio ourselves rather than using `ContextUsage.percent`: the
 
 Lineage: simplified take on DCP's `maxContextLimit` nudging — a single threshold that forces a flush rather than separate nudge/force thresholds.
 
+### Flush pacing (fan-out width + in-place rate-limit retry)
+
+A budget auto-flush drains the *whole* backlog in one fan-out — with `pruneOn: "on-demand"` nothing summarizes until the threshold fires, so the fan-out width would equal the entire session backlog (observed: 34 simultaneous summarizer calls, answered by `Cloud Code Assist API error (429): Resource has been exhausted`).
+
+`summarizerConcurrency` (default `4`) bounds how many summarizer LLM calls are in flight for one fan-out; queued batches start as in-flight calls settle, and results stay index-aligned with the input. `0` means unbounded (the pre-pacing behavior) for high-quota providers.
+
+On top of the bounded width, a rate-limit-shaped failure (HTTP 429, `resource has been exhausted`, quota/rate-limit/overloaded wording, server retry-delay phrases) is retried **in place on the same model** with bounded backoff — 2 extra attempts, 2s base doubling, 30s per-wait cap (internal constants, not user config; a server-requested delay above the cap is not waited out). A per-fan-out rate-limit gate coordinates a shared backoff window: the first call to hit the quota wall closes the gate, and every worker waits out that window before its next attempt instead of retrying into the same wall during the penalty (workers can wake together when the window opens — the gate coordinates rather than serializes).
+
+Interaction with the outage fallback below: pacing sits *below* it. Only a failure that survives the in-place retries (or a server delay above the wait cap — a real outage, not a burst) is classified `transient` and reaches `FallbackController`, so a self-inflicted quota burst no longer flips the configured summarizer into sticky session-model fallback, and the fallback's notify wording and tier logic are untouched. Timeouts (idle/ceiling) are never retried in place — a stall is not evidence that waiting helps.
+
 ### Budget-delta flush
 
 `budgetTurnDelta: number | null` (default `null`) is a per-turn usage-jump trigger ORed with `autoBudgetThreshold`. When set to a fraction in `(0, 1]`, the extension compares the current turn's usage fraction (`tokens / contextWindow`) to the previous turn's and forces a flush if the jump meets or exceeds the delta.
