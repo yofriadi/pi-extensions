@@ -975,11 +975,27 @@ export function buildRequest(
 		generationConfig.maxOutputTokens = options.maxTokens;
 	}
 
-	// Thinking config. Antigravity model IDs already encode their thinking
+	// Antigravity: the public model ID and the server-side request ID
+	// differ. Resolve to the upstream ID using the user's chosen effort.
+	const bodyModel = isAntigravity ? getAntigravityRequestModelId(model.id, options.antigravityEffort) : model.id;
+	const isTieredAntigravityModel = isAntigravity && bodyModel.endsWith("-tiered");
+
+	// Thinking config. Most Antigravity model IDs already encode their thinking
 	// variant (for example `*-thinking`, `*-high`, `*-low`); sending Gemini
 	// `thinkingConfig` with those IDs makes Cloud Code Assist reject the
-	// request as an invalid argument.
-	if (!isAntigravity) {
+	// request as an invalid argument. Tiered Antigravity models (`*-tiered`)
+	// are the exception: they select their thinking level per request through
+	// `thinkingConfig.thinkingLevel`.
+	if (isTieredAntigravityModel) {
+		if (options.thinking?.enabled && model.reasoning && options.thinking.level !== undefined) {
+			generationConfig.thinkingConfig = {
+				// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
+				thinkingLevel: options.thinking.level as any,
+			};
+		} else if (model.reasoning) {
+			generationConfig.thinkingConfig = getDisabledThinkingConfig(model.id);
+		}
+	} else if (!isAntigravity) {
 		if (options.thinking?.enabled && model.reasoning) {
 			generationConfig.thinkingConfig = {
 				includeThoughts: true,
@@ -1065,10 +1081,6 @@ export function buildRequest(
 			],
 		};
 	}
-
-	// Antigravity: the public model ID and the server-side request ID
-	// differ. Resolve to the upstream ID using the user's chosen effort.
-	const bodyModel = isAntigravity ? getAntigravityRequestModelId(model.id, options.antigravityEffort) : model.id;
 
 	return {
 		project: projectId,

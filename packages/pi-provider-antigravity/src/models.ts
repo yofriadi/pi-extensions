@@ -60,14 +60,14 @@ const MEDIUM_THINKING_LEVEL_MAP: AntigravityThinkingLevelMap = {
 
 const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
 	"gemini-3.7-flash": {
-		off: "gemini-3.7-flash-low",
+		off: "gemini-3.7-flash-tiered",
 		routing: {
-			minimal: "gemini-3.7-flash-low",
-			low: "gemini-3.7-flash-low",
-			medium: "gemini-3.7-flash-medium",
-			high: "gemini-3.7-flash-high",
+			minimal: "gemini-3.7-flash-tiered",
+			low: "gemini-3.7-flash-tiered",
+			medium: "gemini-3.7-flash-tiered",
+			high: "gemini-3.7-flash-tiered",
 		},
-		defaultRequestId: "gemini-3.7-flash-low",
+		defaultRequestId: "gemini-3.7-flash-tiered",
 	},
 	"gemini-3.6-flash": {
 		off: "gemini-3.6-flash-low",
@@ -262,19 +262,19 @@ export const ANTIGRAVITY_CLI_SELECTIONS: AntigravityCliSelection[] = [
 		label: "Gemini 3.7 Flash (Low)",
 		logicalModelId: "gemini-3.7-flash",
 		reasoning: "low",
-		wireModelId: "gemini-3.7-flash-low",
+		wireModelId: "gemini-3.7-flash-tiered",
 	},
 	{
 		label: "Gemini 3.7 Flash (Medium)",
 		logicalModelId: "gemini-3.7-flash",
 		reasoning: "medium",
-		wireModelId: "gemini-3.7-flash-medium",
+		wireModelId: "gemini-3.7-flash-tiered",
 	},
 	{
 		label: "Gemini 3.7 Flash (High)",
 		logicalModelId: "gemini-3.7-flash",
 		reasoning: "high",
-		wireModelId: "gemini-3.7-flash-high",
+		wireModelId: "gemini-3.7-flash-tiered",
 	},
 	{
 		label: "Gemini 3.6 Flash (Low)",

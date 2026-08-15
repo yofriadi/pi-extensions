@@ -194,7 +194,12 @@ describe("google-antigravity stream fallback", () => {
 		);
 	});
 	it("does not send Gemini thinkingConfig for Antigravity thinking variants", async () => {
-		const antigravityModel = ANTIGRAVITY_MODELS[0] as Model<"google-gemini-cli">;
+		// Use an ID-encoded thinking variant (3.6 flash routes to `*-high`); the
+		// tiered 3.7 flash legitimately sends thinkingConfig, so it is not a valid
+		// subject for this assertion.
+		const antigravityModel = ANTIGRAVITY_MODELS.find(
+			(candidate) => candidate.id === "gemini-3.6-flash",
+		) as Model<"google-gemini-cli">;
 		let firstBody = "";
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
 			if (!firstBody && typeof init?.body === "string") {
