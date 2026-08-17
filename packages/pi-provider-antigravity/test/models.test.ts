@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	ANTIGRAVITY_CLI_MODELS,
@@ -38,5 +39,21 @@ describe("Antigravity CLI model parity", () => {
 			["gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent"].sort(),
 		);
 		expect(getAntigravityRequestModelIds("gemini-3.7-flash")).toEqual(["gemini-3.7-flash-tiered"]);
+	});
+
+	it("routes efforts above the highest configured rung to the strongest route", () => {
+		// `xhigh` sits above every configured rung, and newer pi releases add a
+		// stronger `max` level that this package's pi-ai version does not declare.
+		const aboveHighestRung: ThinkingLevel[] = ["xhigh", "max" as ThinkingLevel];
+		for (const effort of aboveHighestRung) {
+			expect(getAntigravityRequestModelId("gemini-3.6-flash", effort)).toBe("gemini-3.6-flash-high");
+			expect(getAntigravityRequestModelId("gemini-3.5-flash", effort)).toBe("gemini-3-flash-agent");
+			expect(getAntigravityRequestModelId("gemini-3.1-pro", effort)).toBe("gemini-pro-agent");
+			expect(getAntigravityRequestModelId("claude-opus-4-6", effort)).toBe("claude-opus-4-6-thinking");
+		}
+	});
+
+	it("falls back to the nearest configured rung below the requested effort", () => {
+		expect(getAntigravityRequestModelId("gemini-3.1-pro", "medium")).toBe("gemini-3.1-pro-low");
 	});
 });

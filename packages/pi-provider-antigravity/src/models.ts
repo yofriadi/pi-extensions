@@ -16,8 +16,11 @@ const ANTIGRAVITY_MODEL_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
  * (or the `off` pseudo-level) into a request model ID. Keys:
  *  - `off`    — request ID when reasoning is disabled
  *  - `minimal`, `low`, `medium`, `high` — request ID per effort level
- * Missing effort keys fall back to a close neighbour (off ↔ minimal/low)
- * and finally to `defaultRequestId` / `id`.
+ * Missing effort keys resolve to the nearest configured rung at or below the
+ * requested effort, then to the nearest rung above it, and finally to
+ * `off` / `defaultRequestId` / `id`. Efforts stronger than every configured
+ * rung (`xhigh`, `max`) therefore escalate to the strongest available route
+ * instead of collapsing onto the weakest one.
  */
 interface AntigravityRouting {
 	off?: string;
@@ -57,6 +60,9 @@ const MEDIUM_THINKING_LEVEL_MAP: AntigravityThinkingLevelMap = {
 	medium: "medium",
 	high: null,
 };
+
+/** Effort rungs ordered from weakest to strongest. */
+const EFFORT_LADDER: ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
 	"gemini-3.7-flash": {
@@ -139,7 +145,18 @@ export function getAntigravityRequestModelId(modelId: string, effort: ThinkingLe
 	if (effort === undefined || effort === "off") {
 		return r.off ?? r.routing?.minimal ?? r.routing?.low ?? r.defaultRequestId ?? modelId;
 	}
-	return r.routing?.[effort] ?? r.routing?.low ?? r.routing?.minimal ?? r.off ?? r.defaultRequestId ?? modelId;
+	const requested = EFFORT_LADDER.indexOf(effort);
+	// Levels this package does not know (newer pi releases only ever add stronger
+	// ones, e.g. `max`) are treated as the top of the ladder.
+	const nearestFirst =
+		requested === -1
+			? [...EFFORT_LADDER].reverse()
+			: [...EFFORT_LADDER.slice(0, requested + 1).reverse(), ...EFFORT_LADDER.slice(requested + 1)];
+	for (const level of nearestFirst) {
+		const requestId = r.routing?.[level];
+		if (requestId !== undefined) return requestId;
+	}
+	return r.off ?? r.defaultRequestId ?? modelId;
 }
 
 /** Return every backend model ID reachable from a logical Antigravity model. */
