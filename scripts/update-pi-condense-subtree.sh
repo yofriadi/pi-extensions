@@ -61,7 +61,7 @@ worktree_added=1
 # The root lockfile belongs to the monorepo, not the fork subtree. Regenerate
 # only when the consumed package manifest changed, and validate it before the
 # candidate can advance the caller branch.
-if ! git diff --quiet "${start_head}:${prefix}/package.json" "${candidate}:${prefix}/package.json"; then
+if ! git -C "$candidate" diff --quiet "$start_head" -- "$prefix/package.json"; then
 	expected_pnpm="$(node -p "require('./package.json').packageManager.split('@')[1]")"
 	actual_pnpm="$(pnpm --version)"
 	[[ "$actual_pnpm" == "$expected_pnpm" ]] || fail "pnpm $expected_pnpm is required; found $actual_pnpm"
