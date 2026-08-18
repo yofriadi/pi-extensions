@@ -49,8 +49,10 @@ The host provider is the same composed provider Pi uses for extension-registered
 
 ```bash
 bun test src/summarizer.test.ts src/summarizer-wiring.test.ts
-bun x tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --strict --skipLibCheck --allowJs --esModuleInterop --resolveJsonModule --lib es2022 --types node index.ts
+bun run typecheck
 ```
+
+`bun run typecheck` resolves the package-owned TypeScript compiler through the local `tsconfig.json` in project mode, so it does not inherit a parent workspace configuration.
 
 After reloading the extension, the configured Gemini model should produce summaries directly. If this warning persists, the message now includes the primary's caught error after the colon, e.g.:
 ```text

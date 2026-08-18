@@ -18,7 +18,7 @@ The extension SHALL be consumed in the monorepo as a git subtree of a fork branc
 
 ### Requirement: Protected local surfaces
 
-The following SHALL be treated as local-only and MUST NOT be overwritten by a sync: `src/summarizer-pacing.ts`, `src/summarizer-pacing.test.ts`, `ANTIGRAVITY.md`, the `.pi/` tree, the `openspec/` tree, and the `package.json` identity fields (`name`, `publishConfig`). `src/summarizer.ts`, `src/summarizer-wiring.test.ts`, and `src/reload-rearm.integration.test.ts` carry protected *invariants* rather than whole-file ownership: host-registry dispatch via `ctx.modelRegistry.getProvider().streamSimple`, no `pi-ai/compat` import or `pi-ai/compat` mock, no `reasoningEffort` option. Upstream may legitimately modify these files; the sync reconciles keeping the invariants intact. `src/summarizer-fallback.ts` and `src/summarizer-fallback.test.ts` are upstream files (unchanged since 2.2.x); they follow the default adopt-as-is policy until the local fallback change is implemented on top.
+The following SHALL be treated as local-only and MUST NOT be overwritten by a sync: `src/summarizer-pacing.ts`, `src/summarizer-pacing.test.ts`, `ANTIGRAVITY.md`, `tsconfig.json`, the `.pi/` tree, the `openspec/` tree, and the `package.json` identity/typecheck fields (`name`, `publishConfig`, `scripts.typecheck`, and the TypeScript 7.0.2 / Node 22 type development dependencies). `src/summarizer.ts`, `src/summarizer-wiring.test.ts`, and `src/reload-rearm.integration.test.ts` carry protected *invariants* rather than whole-file ownership: host-registry dispatch via `ctx.modelRegistry.getProvider().streamSimple`, no `pi-ai/compat` import or `pi-ai/compat` mock, no `reasoningEffort` option. Upstream may legitimately modify these files; the sync reconciles keeping the invariants intact. `src/summarizer-fallback.ts` and `src/summarizer-fallback.test.ts` are upstream files (unchanged since 2.2.x); they follow the default adopt-as-is policy until the local fallback change is implemented on top.
 
 #### Scenario: Sync attempts to overwrite a protected file
 
@@ -33,7 +33,7 @@ The following SHALL be treated as local-only and MUST NOT be overwritten by a sy
 
 ### Requirement: Local-layer completeness
 
-Every file in the local-layer diff (`git diff --name-only 1d040e68 <phase0-tip>:packages/pi-condense` plus Phase 0's previously-untracked paths) SHALL appear in exactly one slice (subset: diff ⊆ union of slices). The slices may additionally contain a named allowlist of sync-*introduced* changes not in the diff: `.github/workflows/test.yml` (remove broken AGENTS-core step), `scripts/check-agents-core.mjs` (delete), `package.json` `check:agents-core` script (remove), `.agents/skills/release/scripts/release.sh` and `.agents/skills/release/SKILL.md` (npm-identity strings). In particular, the layer includes `src/config.ts` (the `summarizerConcurrency` normalize/clamp), `src/config.test.ts`, and `src/summarizer.test.ts` (the reasoning-vs-`reasoningEffort` unit test) — omitting them silently drops shipped behavior, and no test gate can detect an absent file.
+Every file in the local-layer diff (`git diff --name-only 1d040e68 <phase0-tip>:packages/pi-condense` plus Phase 0's previously-untracked paths) SHALL appear in exactly one slice (subset: diff ⊆ union of slices). The slices may additionally contain a named allowlist of sync-*introduced* changes not in the diff: `.github/workflows/test.yml` (remove broken AGENTS-core step), `scripts/check-agents-core.mjs` (delete), `package.json` `check:agents-core` script (remove), `.agents/skills/release/scripts/release.sh` and `.agents/skills/release/SKILL.md` (npm-identity strings). The local layer includes a tooling bootstrap (`tsconfig.json`, the `typecheck` script, TypeScript 7.0.2, and Node 22 type definitions) before functional slices so G4 is standalone. In particular, the layer includes `src/config.ts` (the `summarizerConcurrency` normalize/clamp), `src/config.test.ts`, and `src/summarizer.test.ts` (the reasoning-vs-`reasoningEffort` unit test) — omitting them silently drops shipped behavior, and no test gate can detect an absent file.
 
 #### Scenario: Completeness gate at slice tip
 
@@ -48,7 +48,7 @@ A sync SHALL resolve file conflicts according to this binding table.
 |---|---|
 | `src/summarizer.ts`, `src/summarizer-wiring.test.ts` | local wins the compat-mock/dispatch question; 3-way union otherwise |
 | `src/types.ts`, `src/commands.ts` | 3-way union |
-| `package.json` | merge: upstream version and dependencies + local identity fields |
+| `package.json` | merge: upstream version and dependencies + local identity fields, `typecheck` script, and TypeScript 7 development dependencies |
 | `CHANGELOG.md`, `README.md`, `PRUNING.md`, `doc/configuration.md` | merge narratives; in `CHANGELOG.md`, renumber the local `## [2.9.0]` section into `Unreleased` before merging upstream's own `2.9.0` section |
 | `AGENTS.md`, `AGENTS.core.md` | keep deletion; never resurrect; remove the CI step and `check:agents-core` script + `scripts/check-agents-core.mjs` that depend on them |
 | upstream tests that mock `pi-ai/compat` and drive summarization (`src/reload-rearm.integration.test.ts` this cycle) | port the harness to host-registry dispatch (`getProvider().streamSimple` fake); do not adopt as-is |
@@ -71,9 +71,14 @@ Every sync SHALL pass the gates as follows and re-run them in the monorepo after
 0. G0 clean tree before subtree operations: `git diff-index HEAD` and `git diff-index --cached HEAD` are both empty repo-wide (untracked files ignored). This is `git-subtree`'s `ensure_clean()` contract — a package-scoped check is insufficient.
 1. G1 grep: no import from `@earendil-works/pi-ai/compat` and no `reasoningEffort:` property assignment anywhere in `src/`. The `expect(...).not.toHaveProperty("reasoningEffort")` assertion in `summarizer-wiring.test.ts` is the regression coverage and is explicitly allowlisted — it *enforces* the invariant, so the gate must not trip on it.
 2. G2 targeted tests `bun test src/summarizer.test.ts src/summarizer-wiring.test.ts`; G3 full `bun test` green.
-3. G4 typecheck green with the exact `tsc` invocation from `ANTIGRAVITY.md`.
-4. G5 protected-path audit: every protected path (`.pi/`, `openspec/` complete tree, `src/summarizer-pacing.*`, `ANTIGRAVITY.md`, `package.json` identity fields) exists with local content preserved; fork-side form, two directional checks: (a) every path in `git diff --name-only <upstream-base> local/main` matches an allowlisted glob from the expected-path set (tasks.md §6); (b) every purely-local protected path (`.pi/prompts/*`, `.pi/skills/*`, `openspec/**`, `src/summarizer-pacing.*`, `ANTIGRAVITY.md`) exists on `local/main` with local content; monorepo-side form (post-pull, `<phase0-tip>` is a local ref): `git diff <phase0-tip>:packages/pi-condense/<path> HEAD:packages/pi-condense/<path>` shows only intentional edits (archive moves, changelog), never deletions.
+3. G4 typecheck green with `bun run typecheck`, whose package-local TypeScript 7.0.2 executable reads `tsconfig.json` in project mode and therefore cannot inherit a parent monorepo configuration.
+4. G5 protected-path audit: every protected path (`.pi/`, `openspec/` complete tree, `src/summarizer-pacing.*`, `ANTIGRAVITY.md`, `tsconfig.json`, and the package identity/typecheck fields) exists with local content preserved; fork-side form, two directional checks: (a) every path in `git diff --name-only <upstream-base> local/main` matches an allowlisted glob from the expected-path set (tasks.md §6); (b) every purely-local protected path (`.pi/prompts/*`, `.pi/skills/*`, `openspec/**`, `src/summarizer-pacing.*`, `ANTIGRAVITY.md`, `tsconfig.json`) exists on `local/main` with local content; monorepo-side form (post-pull, `<phase0-tip>` is a local ref): `git diff <phase0-tip>:packages/pi-condense/<path> HEAD:packages/pi-condense/<path>` shows only intentional edits (archive moves, changelog), never deletions.
 5. G6 completeness (tip only, fork): patch paths from the Phase-2 export ⊆ `git diff --name-only 125147c1 local/main`, excess only by the named sync-introduced allowlist.
+
+#### Scenario: Current TypeScript runs without parent-config leakage
+
+- **WHEN** G4 runs in the standalone fork or from the monorepo package directory
+- **THEN** it invokes the package-owned TypeScript 7.0.2 compiler through `tsconfig.json`, checks the `index.ts` graph, and does not resolve or require a parent monorepo `tsconfig.json` or global compiler.
 
 #### Scenario: A gate fails
 
