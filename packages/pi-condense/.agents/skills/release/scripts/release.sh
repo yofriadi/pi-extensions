@@ -18,7 +18,7 @@ PACKAGE_NAME="@yofriadi/pi-condense"
 REPO_SLUG="yofriadi/pi-condense"
 RELEASE_BRANCH="local/main"
 LEGACY_PACKAGE_NAMES="pi-condense,pi-context-prune"  # migrate versioned unscoped npm pins
-TEST_CMD="bun test src/"
+TEST_CMD="bun run typecheck && bun test src/"
 # ----------------------------------------------------------------------------
 
 RELEASE_WORKFLOW="release.yml"
@@ -122,10 +122,25 @@ require_release_branch() {
   fi
 }
 
+nearest_release_tag() {
+  # Baseline tags such as subtree-v2.9.0+local are intentionally excluded:
+  # only a tag that can trigger release.yml is a release comparison point.
+  local tag distance best_tag="" best_distance=""
+  while IFS= read -r tag; do
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    distance="$(git rev-list --count "${tag}..HEAD")"
+    if [[ -z "$best_distance" || "$distance" -lt "$best_distance" ]]; then
+      best_tag="$tag"
+      best_distance="$distance"
+    fi
+  done < <(git for-each-ref --merged=HEAD --format='%(refname:strip=2)' refs/tags)
+  printf '%s' "$best_tag"
+}
+
 # ---- propose ---------------------------------------------------------------
 cmd_propose() {
   local last range log count suggestion
-  last="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+  last="$(nearest_release_tag)"
   range="${last:+${last}..HEAD}"
   log="$(git --no-pager log ${range:-} --oneline)"
   count="$(printf '%s\n' "$log" | grep -c . || true)"

@@ -63,3 +63,16 @@ Read the suffix to tell a real outage from a config issue:
 - `stalled (no output for Ns)` — the stream produced no event within `summarizerIdleTimeoutMs`; a slow-to-first-token endpoint trips it.
 - `Network error: ...` — connectivity to the Antigravity endpoints.
 - `No API provider registered for api: google-gemini-cli` — the old `pi-ai/compat` regression is back (this code must dispatch via `ctx.modelRegistry`).
+
+## Authenticated live smoke
+
+Run the credential-gated helper from this repository after authenticating the Antigravity provider in your normal pi agent directory. It creates a separate agent and session directory, copies only `auth.json`, and loads the provider and pi-condense extensions explicitly:
+
+```bash
+bash scripts/smoke-antigravity.sh \
+  --model google-antigravity/gemini-3.7-flash \
+  --provider-extension /absolute/path/to/pi-provider-antigravity/src/index.ts \
+  --keep
+```
+
+It intentionally does **not** claim success automatically. Inspect its printed JSONL session artifact for `context-prune-flush-metrics` and `context-prune-summary`, verify that the configured Antigravity model summarized directly, or record the exact fallback/error suffix above. Only an operator who has inspected that authenticated run may close the live-smoke task.

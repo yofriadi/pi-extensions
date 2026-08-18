@@ -39,7 +39,7 @@
 - [x] 5.2 `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash -m "Update pi-condense subtree to upstream v2.9.0 + local layer"` — the `--squash` flag is REQUIRED: the subtree lineage is squash-based and a non-squash pull dies with `fatal: refusing to merge unrelated histories` (no common commit history with the fork)
 - [x] 5.3 Expected first-pull conflicts: the conflict-policy table's files (`AGENTS.md`, `AGENTS.core.md`, `CHANGELOG.md`, `PRUNING.md`, `README.md`, `doc/configuration.md`, `package.json`, `src/commands.ts`, `src/summarizer-wiring.test.ts`) — resolve by taking the fork side per the spec's conflict policy. This is NOT protected-surface drift; the "any conflict ⇒ pause" rule applies only to subsequent syncs.
 - [x] 5.4 Re-run gates G1–G5 in the monorepo (G6 is fork-only; G5 monorepo form: `git diff <phase0-tip>:packages/pi-condense/<path> HEAD:packages/pi-condense/<path>` per protected path — only intentional edits, never deletions)
-- [ ] 5.5 Live smoke: reload extension in a real session; Antigravity summarizer produces summaries directly; fallback warning format matches `ANTIGRAVITY.md`
+- [x] 5.5 Live smoke: passed 2026-08-18 with `google-antigravity/gemini-3.7-flash`; retained isolated session artifact `/var/folders/1p/43y8tds156zgqt2l95sz36t40000gn/T/pi-condense-antigravity-smoke.yLkX1U/sessions/2026-08-18T11-16-05-275Z_01a01495-ee1b-7951-8781-a7699b5af486.jsonl` has 3 `context-prune-summary` entries plus `context-prune-flush-metrics` `message-end`/`summarized`, with no fallback warning. The copied `auth.json` was removed before artifact retention.
 - [x] 5.6 Tag fork `subtree-v2.9.0+local` at the consumed tip; push monorepo
 
 ## 6. Gates reference

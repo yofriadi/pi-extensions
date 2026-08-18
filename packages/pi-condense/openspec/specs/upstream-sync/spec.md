@@ -69,12 +69,12 @@ A sync SHALL resolve conflicts according to this table.
 
 ### Requirement: Sync gates
 
-Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip.
+Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip. Fork test CI, release CI, and the local release preflight SHALL execute package-owned `bun run typecheck` before tests. When a subtree pull changes `packages/pi-condense/package.json`, the root lockfile SHALL be regenerated from a clean worktree with the repository's declared pnpm version, and its importer MUST represent every consumed pi-condense dependency and development dependency.
 
 1. G0 requires a repo-wide clean tracked monorepo tree before subtree operations: `git diff-index HEAD` and `git diff-index --cached HEAD` are both empty.
 2. G1 forbids imports or mocks from `@earendil-works/pi-ai/compat` and `reasoningEffort:` option assignments under `src/`. The `not.toHaveProperty("reasoningEffort")` regression assertion is allowed.
 3. G2 runs targeted summarizer tests; G3 runs the complete suite.
-4. G4 runs `bun run typecheck` through the package-owned TypeScript 7 project configuration.
+4. G4 runs `bun run typecheck` through the package-owned TypeScript 7 project configuration; test CI, release CI, and release preflight run it before package tests.
 5. G5 verifies the protected-path allowlist, that required local paths exist with local content, and the exact scoped identity, branch-qualified image URLs, release-script identity constants, test PR target, and GitHub default branch.
 6. G6 verifies exported patch completeness and the sync-introduced allowlist.
 
@@ -99,7 +99,7 @@ The fork package version SHALL be the synced upstream version with its patch inc
 
 ### Requirement: Accurate change status at close-out
 
-Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base.
+Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base. An authenticated real-session Antigravity smoke SHALL remain explicitly pending until an operator records the session artifact and configured-model/fallback outcome; mock, static, or CI gates MUST NOT be represented as a substitute.
 
 #### Scenario: Sync coexists with an unimplemented local change
 
@@ -108,7 +108,7 @@ Each sync SHALL record the accurate implementation state of other active OpenSpe
 
 ### Requirement: Subtree consumption
 
-The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only.
+The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only. The advertised `pnpm update:pi-condense` command SHALL validate the configured `pi-condense-fork` URL, fetch `local/main`, use that branch as its only subtree source, and run G1–G4 after a successful pull; it MUST NOT pull `jjuraszek/pi-condense/main` directly.
 
 #### Scenario: First re-baseline sync
 
@@ -124,3 +124,13 @@ The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi
 
 - **WHEN** any tracked monorepo file is modified or staged
 - **THEN** subtree operations do not run until the tree is cleaned, committed, or stashed
+
+#### Scenario: Scripted consumer update
+
+- **WHEN** an operator runs `pnpm update:pi-condense` in a clean monorepo
+- **THEN** it fetches and squash-pulls `pi-condense-fork/local/main`, runs G1–G4 from `packages/pi-condense`, and never contacts upstream as the subtree source
+
+#### Scenario: Automated gates complete without live credentials
+
+- **WHEN** all local, CI, and mock-based gates are green but no authenticated Antigravity session has been inspected
+- **THEN** the close-out record leaves the live-smoke task pending and identifies the required manual verification
