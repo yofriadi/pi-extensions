@@ -15,6 +15,6 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "files": ["index.ts"],
+  "files": ["index.ts", "scripts/smoke-payload-tool.ts"],
   "exclude": ["node_modules", "dist"]
 }

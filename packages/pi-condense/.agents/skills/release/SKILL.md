@@ -13,11 +13,11 @@ Use this skill when asked to release this package.
 lists it on `https://pi.dev/packages/@yofriadi/pi-condense`. Users install with
 `pi install npm:@yofriadi/pi-condense`.
 
-The release is **tag-driven and CI-executed**: pushing a `vX.Y.Z` tag triggers
-`.github/workflows/release.yml`, which gates on `tag == package.json`, verifies the
-tag commit is reachable from `local/main`, runs `bun run typecheck` and `bun test src/`,
-and runs `npm publish --provenance --access public` via **OIDC trusted publishing**. The
-local flow only assigns the version and pushes the tag; **never run `npm publish` by hand.**
+The release is **tag-driven and CI-executed**: a plain `vX.Y.Z` tag created from
+`local/main` first passes a no-OIDC provenance validation job, then enters the protected
+`npm-publish` environment to run frozen dependency installation, typecheck, tests, and
+`npm publish --provenance --access public` through **OIDC trusted publishing**. The local
+flow only assigns the version and atomically pushes branch + tag; **never run `npm publish` by hand.**
 
 Releases are cut only from `local/main`, the fork's default branch; never release the upstream-tracking `main` branch.
 
@@ -74,10 +74,10 @@ bash .agents/skills/release/scripts/release.sh current    # version already hand
 bash .agents/skills/release/scripts/release.sh --dry-run minor   # preview, no changes
 ```
 
-The script verifies `local/main` + a clean tree, bumps `package.json`, commits
-`Release <version>`, runs `bun run typecheck && bun test src/` as a pre-flight, creates
-the annotated tag, pushes `local/main` + the tag, then chains straight into verification.
-`current` tags the version already in `package.json` (commit your work first).
+The script verifies `local/main`, a clean tree, a plain `X.Y.Z` package version, and
+absence of the tag locally and on `origin`; it bumps `package.json`, runs
+`bun run typecheck && bun test src/`, creates the annotated tag, and atomically pushes
+`local/main` + the tag. `current` tags the already committed plain version.
 
 ### 4. Verification (the script runs this automatically after a push)
 
@@ -115,6 +115,7 @@ Refuse to proceed unless ALL hold; report which failed, do not silently fix:
 - releasing from `local/main`
 - the target `vX.Y.Z` tag does not already exist (the script enforces this)
 - `bun run typecheck && bun test src/` passes (the script's pre-flight; also the CI gate)
+- the target tag is absent both locally and on `origin` before any release mutation
 
 ## Red Flags - STOP
 

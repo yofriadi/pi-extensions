@@ -69,7 +69,7 @@ A sync SHALL resolve conflicts according to this table.
 
 ### Requirement: Sync gates
 
-Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip. Fork test CI, release CI, and the local release preflight SHALL execute package-owned `bun run typecheck` before tests. When a subtree pull changes `packages/pi-condense/package.json`, the root lockfile SHALL be regenerated from a clean worktree with the repository's declared pnpm version, and its importer MUST represent every consumed pi-condense dependency and development dependency.
+Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip. Fork test CI, release CI, and the local release preflight SHALL execute package-owned `bun run typecheck` before tests using the committed `bun.lock`, pinned Bun version, and frozen install. When a subtree pull changes `packages/pi-condense/package.json`, the root lockfile SHALL be regenerated in a detached candidate worktree with the repository's declared pnpm version; the candidate MUST pass frozen install and root/G1–G4 checks before the caller branch fast-forwards, and a failed candidate MUST leave the caller branch unchanged.
 
 1. G0 requires a repo-wide clean tracked monorepo tree before subtree operations: `git diff-index HEAD` and `git diff-index --cached HEAD` are both empty.
 2. G1 forbids imports or mocks from `@earendil-works/pi-ai/compat` and `reasoningEffort:` option assignments under `src/`. The `not.toHaveProperty("reasoningEffort")` regression assertion is allowed.
@@ -99,7 +99,7 @@ The fork package version SHALL be the synced upstream version with its patch inc
 
 ### Requirement: Accurate change status at close-out
 
-Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base. An authenticated real-session Antigravity smoke SHALL remain explicitly pending until an operator records the session artifact and configured-model/fallback outcome; mock, static, or CI gates MUST NOT be represented as a substitute.
+Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base. An authenticated real-session Antigravity smoke SHALL remain explicitly pending until an operator records a sanitized durable report of model, restrictive tool policy, summary count, flush outcome, warning scan, and credential cleanup; mock, static, or CI gates MUST NOT be represented as a substitute.
 
 #### Scenario: Sync coexists with an unimplemented local change
 
@@ -108,7 +108,7 @@ Each sync SHALL record the accurate implementation state of other active OpenSpe
 
 ### Requirement: Subtree consumption
 
-The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only. The advertised `pnpm update:pi-condense` command SHALL validate the configured `pi-condense-fork` URL, fetch `local/main`, use that branch as its only subtree source, and run G1–G4 after a successful pull; it MUST NOT pull `jjuraszek/pi-condense/main` directly.
+The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only. The advertised `pnpm update:pi-condense` command SHALL validate the configured `pi-condense-fork` URL, fetch `local/main`, and use that branch as its only subtree source in a detached candidate worktree. It SHALL conditionally regenerate the root lockfile for a consumed manifest change, pass frozen install plus root/G1–G4 checks, and only then fast-forward the caller branch; it MUST NOT pull `jjuraszek/pi-condense/main` directly or leave a failed candidate on the caller branch.
 
 #### Scenario: First re-baseline sync
 

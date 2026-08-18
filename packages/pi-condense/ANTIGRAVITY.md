@@ -66,7 +66,7 @@ Read the suffix to tell a real outage from a config issue:
 
 ## Authenticated live smoke
 
-Run the credential-gated helper from this repository after authenticating the Antigravity provider in your normal pi agent directory. It creates a separate agent and session directory, copies only `auth.json`, and loads the provider and pi-condense extensions explicitly:
+Run the credential-gated helper from this repository after authenticating the Antigravity provider in your normal pi agent directory. It creates a separate agent and session directory, copies only `auth.json`, and loads the provider, a no-input deterministic smoke-payload tool, and pi-condense extensions explicitly. It runs with `--no-approve`, no built-in tools, no context files, skills, or prompts; the model cannot read, write, or execute host commands.
 
 ```bash
 bash scripts/smoke-antigravity.sh \
@@ -75,4 +75,4 @@ bash scripts/smoke-antigravity.sh \
   --keep
 ```
 
-It intentionally does **not** claim success automatically. Inspect its printed JSONL session artifact for `context-prune-flush-metrics` and `context-prune-summary`, verify that the configured Antigravity model summarized directly, or record the exact fallback/error suffix above. Only an operator who has inspected that authenticated run may close the live-smoke task.
+It intentionally does **not** claim success automatically. Inspect its printed JSONL session artifact for `context-prune-flush-metrics` and `context-prune-summary`, verify that the configured Antigravity model summarized directly, or record the exact fallback/error suffix above. A failure always retains the session directory but removes the copied credential first. Only an operator who has inspected that authenticated run may close the live-smoke task.
