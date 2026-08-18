@@ -4,7 +4,6 @@
 	"references": [
 		{ "path": "./packages/pi-accounts" },
 		{ "path": "./packages/pi-provider-antigravity" },
-		{ "path": "./packages/pi-toon" },
 		{ "path": "./packages/pi-session-recap" }
 	]
 }
