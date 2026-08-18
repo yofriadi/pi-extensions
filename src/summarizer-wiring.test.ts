@@ -1,20 +1,46 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CapturedBatch } from "./types.js";
 
-// Stub pi-ai's `stream` so runSummarization can be exercised without a network
-// call. `streamImpl` is swapped per test to simulate primary/fallback outcomes.
-let streamImpl: (model: any, input?: any, opts?: any) => any = () => {
+interface TestModel {
+  id: string;
+  provider: string;
+  name: string;
+  reasoning?: boolean;
+}
+
+interface TestStreamOptions {
+  apiKey?: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  signal?: AbortSignal;
+}
+
+interface TestStreamResult {
+  stopReason: string;
+  errorMessage?: string;
+  content: Array<{ type: string; text?: string }>;
+  usage: typeof USAGE;
+}
+
+interface TestStream {
+  [Symbol.asyncIterator](): AsyncGenerator<{ type: string }>;
+  result(): Promise<TestStreamResult>;
+}
+
+type StreamImpl = (model: TestModel, input?: unknown, options?: TestStreamOptions) => TestStream;
+
+let streamImpl: StreamImpl = () => {
   throw new Error("streamImpl not set");
 };
-mock.module("@earendil-works/pi-ai/compat", () => ({
-  stream: (...args: any[]) => streamImpl(...args),
-}));
 
 const { summarizeBatch } = await import("./summarizer.js");
 const { FallbackController } = await import("./summarizer-fallback.js");
 const { DEFAULT_CONFIG } = await import("./types.js");
 
-const PRIMARY = { id: "primary-model", provider: "provider-a", name: "Primary" };
-const SESSION = { id: "session-model", provider: "provider-b", name: "Session" };
+const PRIMARY: TestModel = { id: "primary-model", provider: "provider-a", name: "Primary", reasoning: true };
+const SESSION: TestModel = { id: "session-model", provider: "provider-b", name: "Session" };
 
 const USAGE = {
   input: 1,
@@ -25,18 +51,16 @@ const USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function okStream(text: string) {
+function okStream(text: string): TestStream {
   return {
-    async *[Symbol.asyncIterator]() {
-      // no events; runOnce only needs .result()
-    },
+    async *[Symbol.asyncIterator]() {},
     async result() {
       return { stopReason: "stop", content: [{ type: "text", text }], usage: USAGE };
     },
   };
 }
 
-function errStream(message: string) {
+function errStream(message: string): TestStream {
   return {
     async *[Symbol.asyncIterator]() {},
     async result() {
@@ -45,13 +69,11 @@ function errStream(message: string) {
   };
 }
 
-// Hangs until `opts.signal` (the combined caller+timeout signal runOnce
-// passes to stream()) aborts. With no signal it never settles.
-function hangingStream(opts: any) {
-  const signal: AbortSignal | undefined = opts?.signal;
+function hangingStream(options?: TestStreamOptions): TestStream {
+  const signal = options?.signal;
   const untilAbort = () =>
     new Promise<never>((_, reject) => {
-      if (!signal) return; // no signal => never settles
+      if (!signal) return;
       if (signal.aborted) return reject(new Error("aborted"));
       signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     });
@@ -65,15 +87,8 @@ function hangingStream(opts: any) {
   };
 }
 
-// Emits `events` thinking_delta events spaced `gapMs` apart, then completes
-// successfully — UNLESS `opts.signal` aborts mid-drip, in which case the
-// current sleep rejects, exactly like a real provider stream cancelling on
-// abort. This is what gives the idle-reset test teeth: if runOnce's in-loop
-// bumpIdle() is ever removed, the idle timer fires at the configured window
-// and the combined signal aborts, so this stream rejects instead of
-// completing — the test then fails instead of passing vacuously.
-function drippingStream(opts: any, text: string, events: number, gapMs: number) {
-  const signal: AbortSignal | undefined = opts?.signal;
+function drippingStream(options: TestStreamOptions | undefined, text: string, events: number, gapMs: number): TestStream {
+  const signal = options?.signal;
   const sleepOrAbort = (ms: number) =>
     new Promise<void>((resolve, reject) => {
       if (signal?.aborted) return reject(new Error("aborted"));
@@ -105,19 +120,23 @@ interface Note {
   level: string;
 }
 
-function makeCtx(notes: Note[], sessionModel: any = SESSION, primaryModel: any = PRIMARY) {
+function makeCtx(notes: Note[], sessionModel: TestModel = SESSION, primaryModel: TestModel = PRIMARY): ExtensionContext {
   return {
     model: sessionModel,
     modelRegistry: {
       find: () => primaryModel,
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
       getProviderAuth: async () => undefined,
+      getProvider: () => ({
+        streamSimple: (model: TestModel, input: unknown, options?: TestStreamOptions) =>
+          streamImpl(model, input, options),
+      }),
     },
     ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) },
-  } as any;
+  } as unknown as ExtensionContext;
 }
 
-function makeBatch() {
+function makeBatch(): CapturedBatch {
   return {
     turnIndex: 0,
     timestamp: 0,
@@ -125,8 +144,29 @@ function makeBatch() {
     toolCalls: [
       { toolCallId: "t1", toolName: "read", args: {}, resultText: "x".repeat(50), isError: false },
     ],
-  } as any;
+  };
 }
+
+describe("runSummarization wiring - host provider dispatch", () => {
+  it("uses streamSimple with resolved auth and provider-neutral reasoning", async () => {
+    let received: TestStreamOptions | undefined;
+    streamImpl = (_model, _input, options) => {
+      received = options;
+      return okStream("- summary");
+    };
+    const notes: Note[] = [];
+    const result = await summarizeBatch(
+      makeBatch(),
+      { ...DEFAULT_CONFIG, summarizerModel: "provider-a/primary-model", summarizerThinking: "high" },
+      makeCtx(notes),
+    );
+    expect(result?.summaryText).toBe("- summary");
+    expect(received).toMatchObject({ apiKey: "k", reasoning: "high" });
+    expect(received).not.toHaveProperty("reasoningEffort");
+    expect(notes).toHaveLength(0);
+  });
+});
+
 
 const distinctConfig = { ...DEFAULT_CONFIG, summarizerModel: "provider-a/primary-model" };
 
@@ -138,6 +178,9 @@ describe("runSummarization wiring — same-model no-op (legacy path)", () => {
     const controller = new FallbackController();
     const r = await summarizeBatch(makeBatch(), { ...DEFAULT_CONFIG, summarizerModel: "default" }, ctx, {
       controller,
+      // "provider overloaded" is rate-limit-shaped: in-place retry applies, so
+      // stub the backoff sleep (instant) to keep the legacy-path assertions fast.
+      pacing: { retries: 2, baseDelayMs: 1, sleep: async () => {} },
     });
     expect(r).toBeNull();
     expect(controller.inFallback).toBe(false);
@@ -161,6 +204,7 @@ describe("runSummarization wiring — enter fallback", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0].msg).toContain("Primary");
     expect(warnings[0].msg).toContain("Session");
+    expect(warnings[0].msg).toContain("down"); // primary's caught error is surfaced in the enter warning
     expect(errors).toHaveLength(0);
   });
 
@@ -255,7 +299,9 @@ describe("runSummarization wiring — timeouts", () => {
     const r = await summarizeBatch(makeBatch(), cfg, ctx, { controller });
     expect(r?.summaryText).toBe("- rescued");
     expect(controller.inFallback).toBe(true);
-    expect(notes.filter((n) => n.level === "warning")).toHaveLength(1); // generic "enter" fallback warning
+    const warnings = notes.filter((n) => n.level === "warning");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].msg).toMatch(/stalled/); // enter warning carries the primary timeout reason
     expect(notes.filter((n) => n.level === "error")).toHaveLength(0);
   });
 

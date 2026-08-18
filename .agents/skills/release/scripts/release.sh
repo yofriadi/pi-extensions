@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ============================================================================
-# Release helper - shared skeleton across the jjuraszek pi-* repos.
-# Only the CONFIG block below differs between repos; keep the rest byte-identical
-# so the copies stay diffable. See AGENTS.md "Release model".
+# Release helper for this fork.
+# The CONFIG block below identifies the package and repository; keep the
+# remaining release mechanics stable unless their behavior needs to change.
 #
 # Tag scheme: v<major>.<minor>.<patch>. package.json version mirrors the tag
 # without the leading "v". This script assigns the version and pushes the tag;
@@ -14,9 +14,10 @@ set -euo pipefail
 # ============================================================================
 
 # ---- CONFIG (per-repo; the ONLY block that differs between pi-* repos) ------
-PACKAGE_NAME="pi-condense"
-REPO_SLUG="jjuraszek/pi-condense"
-FORMER_PACKAGE_NAME="pi-context-prune"   # pre-rename name; sync-presets flags stale pins
+PACKAGE_NAME="@yofriadi/pi-condense"
+REPO_SLUG="yofriadi/pi-condense"
+RELEASE_BRANCH="local/main"
+LEGACY_PACKAGE_NAMES="pi-condense,pi-context-prune"  # migrate versioned unscoped npm pins
 TEST_CMD="bun test src/"
 # ----------------------------------------------------------------------------
 
@@ -33,7 +34,7 @@ Commands:
                           level. Advisory only; no changes. The user picks.
   current                 Tag the version already in package.json (no bump).
   patch|minor|major       Bump package.json, commit "Release <version>", run
-                          ${TEST_CMD}, tag, push main + tag.
+                          ${TEST_CMD}, tag, push ${RELEASE_BRANCH} + tag.
   verify [X.Y.Z]          Monitor the release workflow, then poll npm and the
                           pi.dev catalog for the version (default: package.json).
   sync-presets            Report pins of ${PACKAGE_NAME} in pi settings.json
@@ -112,11 +113,11 @@ require_clean_tree() {
   fi
 }
 
-require_main() {
+require_release_branch() {
   local branch
   branch="$(git branch --show-current)"
-  if [[ "$branch" != "main" ]]; then
-    echo "error: releases run from main (on '$branch')" >&2
+  if [[ "$branch" != "$RELEASE_BRANCH" ]]; then
+    echo "error: releases run from ${RELEASE_BRANCH} (on '$branch')" >&2
     exit 1
   fi
 }
@@ -176,12 +177,12 @@ cmd_release() {
     [[ -n "$(git status --porcelain)" ]] && echo "  note: tree not clean; a real release stops until clean."
     [[ "$mode" != "current" ]] && echo "  would set package.json to $new and commit 'Release $new'"
     [[ "$SKIP_TESTS" -eq 0 ]] && echo "  would run ${TEST_CMD} before tagging"
-    echo "  would create annotated tag $tag and push main + tag to origin"
+    echo "  would create annotated tag $tag and push ${RELEASE_BRANCH} + tag to origin"
     echo "  then monitor the workflow and verify npm + pi.dev"
     exit 0
   fi
 
-  require_main
+  require_release_branch
   require_clean_tree
 
   if [[ "$mode" != "current" ]]; then
@@ -201,7 +202,7 @@ cmd_release() {
   fi
 
   run git tag -a "$tag" -m "Release ${new}"
-  run git push origin main
+  run git push origin "$RELEASE_BRANCH"
   run git push origin "$tag"
 
   sha="$(git rev-parse HEAD)"
@@ -303,35 +304,40 @@ cmd_sync_presets() {
   echo "  apply mode: $([[ "$APPLY" -eq 1 ]] && echo "ON (rewriting same-form npm pins)" || echo "off (report only)")"
   echo
 
-  APPLY="$APPLY" PACKAGE_NAME="$PACKAGE_NAME" FORMER_PACKAGE_NAME="$FORMER_PACKAGE_NAME" \
+  APPLY="$APPLY" PACKAGE_NAME="$PACKAGE_NAME" LEGACY_PACKAGE_NAMES="$LEGACY_PACKAGE_NAMES" \
   REPO_SLUG="$REPO_SLUG" VERSION="$version" \
   node -e '
     const fs = require("fs");
-    const { APPLY, PACKAGE_NAME, FORMER_PACKAGE_NAME, REPO_SLUG, VERSION } = process.env;
+    const { APPLY, PACKAGE_NAME, LEGACY_PACKAGE_NAMES, REPO_SLUG, VERSION } = process.env;
     const files = process.argv.slice(1);
-    const npmPin = new RegExp(`^npm:${PACKAGE_NAME}@`);
-    const gitPin = new RegExp(`^git:github\\.com/${REPO_SLUG}@`);
-    const formerNpm = new RegExp(`^npm:${FORMER_PACKAGE_NAME}@`);
-    const formerGit = new RegExp(`github\\.com/[^/]+/${FORMER_PACKAGE_NAME}@`);
+    const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const scopedNpmPin = new RegExp(`^npm:${escapeRegExp(PACKAGE_NAME)}@`);
+    const gitPin = new RegExp(`^git:github\\.com/${escapeRegExp(REPO_SLUG)}@`);
+    const legacyPackageNames = LEGACY_PACKAGE_NAMES.split(",").filter(Boolean);
+    const legacyNpmPins = legacyPackageNames.map((name) => new RegExp(`^npm:${escapeRegExp(name)}@`));
+    const legacyGitPin = new RegExp(`^git:github\\.com/[^/]+/(${legacyPackageNames.map(escapeRegExp).join("|")})@`);
     let touched = 0;
     for (const file of files) {
       let raw, data;
       try { raw = fs.readFileSync(file, "utf8"); data = JSON.parse(raw); }
-      catch (e) { console.log(`  ${file}\n    skip: not parseable JSON (${e.message})`); continue; }
+      catch (e) { console.log(`  ${file}\\n    skip: not parseable JSON (${e.message})`); continue; }
       const pkgs = Array.isArray(data.packages) ? data.packages : [];
       const notes = [];
       let changed = false;
       pkgs.forEach((entry, i) => {
         if (typeof entry !== "string") return;
-        if (npmPin.test(entry)) {
-          const want = `npm:${PACKAGE_NAME}@${VERSION}`;
+        const want = `npm:${PACKAGE_NAME}@${VERSION}`;
+        if (scopedNpmPin.test(entry)) {
           if (entry === want) { notes.push(`already ${want}`); return; }
           notes.push(`bump ${entry} -> ${want}`);
           if (APPLY === "1") { pkgs[i] = want; changed = true; }
+        } else if (legacyNpmPins.some((pattern) => pattern.test(entry))) {
+          notes.push(`migrate ${entry} -> ${want}`);
+          if (APPLY === "1") { pkgs[i] = want; changed = true; }
         } else if (gitPin.test(entry)) {
-          notes.push(`git pin ${entry}: migrate to npm:${PACKAGE_NAME}@${VERSION} (manual)`);
-        } else if (formerNpm.test(entry) || formerGit.test(entry)) {
-          notes.push(`stale name ${entry}: rename to ${PACKAGE_NAME} (manual)`);
+          notes.push(`git pin ${entry}: migrate to ${want} (manual)`);
+        } else if (legacyGitPin.test(entry)) {
+          notes.push(`legacy git pin ${entry}: migrate to ${want} (manual)`);
         }
       });
       if (notes.length === 0) continue;

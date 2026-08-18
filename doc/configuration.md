@@ -18,6 +18,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
     "summarizerThinking": "default",
     "summarizerIdleTimeoutMs": 20000,
     "summarizerMaxTimeoutMs": 180000,
+    "summarizerConcurrency": 4,
     "pruneOn": "agent-message",
     "batchingMode": "turn",
     "quietOversizedSkips": false,
@@ -55,13 +56,14 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | `recoveryGraceTurns` | non-negative integer (user-turn-groups), `0` disables | `3` | After a `context_tree_query` recovery, render that tool's output verbatim for this many user-turn-groups before re-stubbing it. Enforced at render time (Phase 1 + chain-compression eligibility), not at capture time. See [PRUNING.md § What Pruning Does](../PRUNING.md#what-pruning-does) |
 | `summarizerIdleTimeoutMs` | non-negative integer (ms), `0` disables | `20000` | Abort a summarizer stream call after this much silence (no stream event). Resets on every event, so it never false-aborts a flowing generation; catches a stalled connection fast. A timeout feeds the same outage-fallback retry as a provider error. `0` = no idle bound. |
 | `summarizerMaxTimeoutMs` | non-negative integer (ms), `0` disables | `180000` | Hard ceiling on total duration of a single summarizer stream call. Backstop for a stream that dribbles forever without going idle. Generous by design (clears the observed p99). `0` = no ceiling. |
+| `summarizerConcurrency` | non-negative integer, `0` = unbounded | `4` | Max summarizer LLM calls in flight during one flush fan-out. A budget auto-flush drains the whole backlog at once, so an unbounded burst of N calls can trip provider rate limits (observed: 34 simultaneous calls answered with HTTP 429) and flip the configured summarizer into session-model fallback. Bounding the width - plus in-place rate-limit retry with a shared backoff gate - keeps the flush on the configured model. `0` restores the pre-pacing unbounded behavior for high-quota providers. |
 | `protectedTools` | `string[]` | `[]` | Never-pruned tool names (e.g. `["todowrite","todoread"]`). When a protected tool's chain is range-compressed, its output is preserved verbatim inside the `<compressed-chain>` block as `<protected-output>` - protected outputs are never lost. |
 | `protectedPaths` | `string[]` | `["**/skills/**/*.md"]` | Globs matched against a tool call's `args.path`; matching outputs are never pruned (same semantics as `protectedTools`, including `<protected-output>` relocation in compressed chains). Already-summarized matching reads are repaired on the next turn; chain-compressed ones are not. Set `[]` to disable. |
 | `dedupByContentHash` | `true` / `false` | `true` | Re-reads of identical (toolName, content) skip the LLM and alias the original |
-| `autoBudgetThreshold` | fraction `0`-`1`, or `null` | `null` | Token-budget auto-flush: force a prune when context usage reaches this share of the window, regardless of `pruneOn`. `0.8` = 80%, not `80`. `null` = off. See [Token-budget auto-flush](#token-budget-auto-flush) |
+| `autoBudgetThreshold` | fraction `0`-`1`, or `null` | `null` | Token-budget auto-flush: force a prune when context usage reaches this share of the window, or 300k tokens, whichever comes first - regardless of `pruneOn`. `0.8` = 80%, not `80`. The 300k ceiling only binds on models advertising more than 300k. `null` = off. See [Token-budget auto-flush](#token-budget-auto-flush) |
 | `spillThreshold` | positive integer | `65536` | Minimum chars (`resultText.length`) for a single tool result to be spilled eagerly to a sidecar file at capture time rather than waiting for normal summarization. Non-positive / invalid values fall back to the default; to effectively disable spilling, set it above any result you expect. See [Spilled outputs](#spilled-outputs) |
 | `spillPreviewBytes` | non-negative integer | `2048` | Head preview (bytes) kept inline in the stub and index record for a spilled result. Full body is on disk. |
-| `budgetTurnDelta` | fraction `0`-`1`, or `null` | `null` | Force a flush when a single turn's context-usage fraction jumps by at least this amount, ORed with `autoBudgetThreshold`. Catches sudden spikes a static threshold would miss until the next turn. `null` = off. |
+| `budgetTurnDelta` | fraction `0`-`1`, or `null` | `null` | Force a flush when a single turn's context-usage fraction jumps by at least this amount, ORed with `autoBudgetThreshold`. The fraction is measured against `min(context window, 300k)`, so `0.1` = +30k tokens in one turn on any model at or above 300k (+20k on a 200k model). Catches sudden spikes a static threshold would miss until the next turn. `null` = off. |
 | `chainCompression.enabled` | `true` / `false` | `true` | Master toggle for chain-level range compression |
 | `chainCompression.rollingWindow` | positive integer | `3` | Keep this many most-recent closed chains raw; compress older ones |
 | `chainCompression.stripFinalAssistantThinking` | `true` / `false` | `true` | Strip thinking blocks from the kept final text-only assistant when compressing |
@@ -76,9 +78,11 @@ The three pre-flush features (`minBatchChars`, `protectedTools`, `dedupByContent
 
 ### Token-budget auto-flush
 
-When `autoBudgetThreshold` is set to a value in `(0, 1]`, the extension checks context usage at the end of every tool-using turn. If `tokens / contextWindow` reaches the threshold, ALL pending batches are flushed immediately - regardless of `pruneOn` mode. This is an **additional** trigger layered on top of `pruneOn`, not a replacement.
+When `autoBudgetThreshold` is set to a value in `(0, 1]`, the extension checks context usage at the end of every tool-using turn. If `tokens` reaches `min(300_000, threshold * contextWindow)`, ALL pending batches are flushed immediately - regardless of `pruneOn` mode. This is an **additional** trigger layered on top of `pruneOn`, not a replacement.
 
 - `0.8` means 80% of the context window - it is a **fraction**, not a percentage. `0.8 != 80`.
+- **The trigger point is capped at 300,000 tokens** (`MAX_BUDGET_WINDOW` in `src/budget.ts`). Without it, an advertised 1M window makes every setting unreachable: `0.9` would mean 900k tokens, so a session ends before pruning ever fires. The ceiling never binds on a model advertising 300k or less - a 256k window at `0.9` still fires at 230.4k - so only huge-window models change behavior, and they flush earlier.
+- `budgetTurnDelta` applies the same ceiling in the other shape: growth is measured against `min(context window, 300k)`, because a 300k ceiling on a single turn's *growth* could never bind.
 - The trigger is a no-op when `tokens` is `null` (right after a provider-side compaction); it resumes once usage is known again.
 - Editable live via `/pruner settings` (row "Auto-flush at context %", presets Off / 60 / 70 / 80 / 90%).
 - Default `null` = off.
@@ -87,7 +91,7 @@ Inspired by DCP's `maxContextLimit` nudging; simplified to a single threshold th
 
 ### Spilled outputs
 
-Single tool results larger than `spillThreshold` chars are written to `<session-dir>/<sessionId>-blobs/<toolCallId>.txt` at capture time and replaced in context with a short stub (tool name, byte size, head preview, file path). The full body is recoverable via the native `read` tool at the embedded path (offset/limit supported) or via `context_tree_query` by id, which falls back to the inline preview if the sidecar is missing. Moving a session `.jsonl` without its `-blobs/` directory loses only the giant-blob recovery path; bodies under `spillThreshold` stay inline in the index entry as usual.
+Single tool results larger than `spillThreshold` chars are written to `<session-dir>/<sessionId>-blobs/<key>.txt` at capture time and replaced in context with a short stub (tool name, byte size, head preview, file path). `<key>` is the sanitized occurrence key `id@resultTimestamp` (`@` becomes `_`, so `bash_23@1150` -> `bash_23_1150.txt`), not the bare `toolCallId` - keying on the bare id alone would let two occurrences of one reused provider id share a path and the second overwrite the first's blob. Recovery reads the `spillPath` persisted on the record rather than re-deriving it from the id, so a bare-id-named sidecar (no occurrence timestamp) still resolves. See [PRUNING.md § Occurrence Identity](../PRUNING.md#occurrence-identity). The full body is recoverable via the native `read` tool at the embedded path (offset/limit supported) or via `context_tree_query` by id, which falls back to the inline preview if the sidecar is missing. Moving a session `.jsonl` without its `-blobs/` directory loses only the giant-blob recovery path; bodies under `spillThreshold` stay inline in the index entry as usual.
 
 ### Choosing a summarizer model
 
@@ -129,6 +133,22 @@ outage-fallback retry, so if a distinct `summarizerModel` is configured the
 stalled call is retried once on the session model (itself timeout-bounded).
 Both timers can be set to `0` to disable them independently.
 
+### Flush pacing (concurrency + rate-limit retry)
+
+A flush summarizes its whole backlog in one fan-out. `summarizerConcurrency`
+(default `4`) bounds how many summarizer calls are in flight at once; queued
+batches start as in-flight calls settle. Rate-limit-shaped failures (HTTP 429,
+`resource has been exhausted`, quota/rate-limit/overloaded wording, server
+retry-delay phrases) are retried **in place on the same model** with bounded
+backoff (2 extra attempts, 2s base doubling, 30s per-wait cap - internal
+constants, not user config), and a per-fan-out gate coordinates a shared
+backoff window so the workers don't hammer the same quota wall during the
+penalty (it coordinates rather than serializes — workers can wake together
+when the window opens). Only when
+those retries are exhausted does the failure classify as transient and feed
+the outage fallback. Set `summarizerConcurrency: 0` for the old unbounded
+burst.
+
 ## Commands
 
 | Command | Effect |
@@ -136,7 +156,7 @@ Both timers can be set to `0` to disable them independently.
 | `/pruner` | Interactive picker over all subcommands |
 | `/pruner settings` | Settings overlay (toggle / cycle every option) |
 | `/pruner on` / `off` | Enable / disable pruning |
-| `/pruner status` | Show mode, model, trigger, cumulative stats |
+| `/pruner status` | Show mode, model, trigger, cumulative stats, and a `--- context ---` block (see below) |
 | `/pruner stats` | Detailed cumulative summarizer token/cost stats |
 | `/pruner model [id[:thinking]]` | Get / set summarizer model (and optionally thinking level) |
 | `/pruner thinking [level]` | Get / set summarizer reasoning effort |
@@ -156,18 +176,42 @@ Both timers can be set to `0` to disable them independently.
 
 **`context_tree_query`** - always available when the extension is loaded. Pruned summaries end with short refs like `Summarized tool refs: \`t1\`, \`t2\`. Use \`context_tree_query\` with these refs to retrieve the original full outputs.` The model passes those refs (or full `toolCallId`s) and gets back the original tool result text from the session index. Each per-tool bullet in the summary also carries its own inline `` `tN` `` ref, so recovering a specific tool is a single hop; the footer still lists every ref as a fallback. Content-hash-deduped duplicates resolve to the original's record automatically.
 
+Short refs (`tN`) always resolve 1:1 and are the primary, recommended path; a reused `toolCallId` returns every matching occurrence instead of silently picking one, including occurrences deduplicated to an earlier record. See [PRUNING.md § Occurrence Identity](../PRUNING.md#occurrence-identity) for multi-occurrence recovery mechanics.
+
 ## Footer status widget
 
 A footer widget shows the current state, controlled by `showPruneStatusLine`:
 
-Every rendered state is wrapped in `| ... |` so the segment stays visually isolated in the shared footer regardless of where other extensions' status segments land (load-order independent).
+Every rendered state is prefixed with a single leading `|` divider so the segment stays visually isolated in the shared footer regardless of where other extensions' status segments land (load-order independent); there is no trailing divider - the footer's own space-join between segments already provides one.
 
-- `| prune: OFF |` - disabled
-- `| prune: ON |` - enabled, no flushes yet
-- `| prune: ON . 92k->14k (-85%) |` - enabled; live reclaim ratio (estimated tokens before->after, percent reduction). Updates on every `pruneMessages` call.
-- `| prune: 3 pending |` - batches queued, waiting for the trigger
-- `| prune: summarizing... |` - flush in progress
+- `| prune: OFF` - disabled
+- `| prune: ON` - enabled, no flushes yet
+- `| prune: ON . 92.0k->14.0k (-85%)` - enabled; live reclaim ratio (estimated tokens before->after, percent reduction). Updates on every `pruneMessages` call.
+- `| prune: 3 pending` - batches queued, waiting for the trigger
+- `| prune: summarizing...` - flush in progress
+- `| prune: ON . 92.0k->14.0k (-85%) . diag u1/o2` - same as above, plus a self-hiding diagnostic segment (`u`/`m`/`o` counters, each hidden at zero). See [PRUNING.md § Diagnostics](../PRUNING.md#diagnostics).
+- `| prune: ON . think 3.2k . gap 5.1k . chain 41%` - a context-pressure suffix, shown only when `frontierGapTokens > 0` (nothing to append when the frontier is fully caught up). All three are chars/4 token estimates, same convention as the reclaim ratio above:
+  - `think` - `openCycleThinkingTokens`: thinking-block tokens trapped in the still-open cycle (after the last text-only assistant reply), not yet eligible for pruning.
+  - `gap` - `frontierGapTokens`: summarization-eligible tool-result tokens sitting past the persisted prune frontier.
+  - `chain` - `largestChainSharePct`: the largest single chain's (or the open segment's) share of total branch chars.
+  See [PRUNING.md § Single-chain sessions](../PRUNING.md#single-chain-sessions) for exact definitions.
+- `| prune: recovered pending (reload)` - shown at `agent_end` when a session reload found recoverable unflushed work but no new turn re-queued it. See [PRUNING.md § Reload rearm](../PRUNING.md#reload-rearm) for what "recovered" means and when it actually flushes.
 
 Setting `showPruneStatusLine: false` hides the widget and silences the queued-turn notice; pruning still runs.
 
-Cost no longer appears on the status line. Full token/cost detail is available via `/pruner stats`. The extension also emits cumulative session cost on the `cost:external` pi.events channel for external aggregators - see [README § External cost channel](../README.md#external-cost-channel).
+The status line does not show cost. Full token/cost detail is available via `/pruner stats`. The extension also emits cumulative session cost on the `cost:external` pi.events channel for external aggregators - see [README § External cost channel](../README.md#external-cost-channel).
+
+### `/pruner status` context block
+
+When context metrics are available, `/pruner status` appends a `--- context ---` block below the settings summary:
+
+```
+--- context ---
+thinking:     3.2k tokens (open segment)
+chain share:  41%
+frontier gap: 5.1k tokens
+rearmed:      yes
+```
+
+- `thinking` / `chain share` / `frontier gap` are the same `openCycleThinkingTokens` / `largestChainSharePct` / `frontierGapTokens` metrics shown in the footer suffix above, formatted as full labels here instead of a compact suffix.
+- `rearmed: yes` appears only while the reload-rearm flag is armed (cleared the moment any flush attempt runs). See [PRUNING.md § Reload rearm](../PRUNING.md#reload-rearm).

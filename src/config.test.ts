@@ -125,3 +125,43 @@ describe("loadConfig backward compatibility with removed thinkingStrip key", () 
     expect(written.contextPrune.thinkingStrip).toEqual(stale);
   });
 });
+
+describe("loadConfig summarizerConcurrency normalization", () => {
+  it("defaults to 4 when unset", async () => {
+    await writeContextPrune({});
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(4);
+    expect(config.summarizerConcurrency).toBe(DEFAULT_CONFIG.summarizerConcurrency);
+  });
+
+  it("preserves an explicit 0 (unbounded sentinel)", async () => {
+    await writeContextPrune({ summarizerConcurrency: 0 });
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(0);
+  });
+
+  it("falls back to the default for a negative value", async () => {
+    await writeContextPrune({ summarizerConcurrency: -3 });
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(DEFAULT_CONFIG.summarizerConcurrency);
+  });
+
+  it("falls back to the default for a non-numeric value", async () => {
+    await writeContextPrune({ summarizerConcurrency: "8" });
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(DEFAULT_CONFIG.summarizerConcurrency);
+  });
+
+  it("falls back to the default for a non-finite value", async () => {
+    // JSON can't carry Infinity literally, but 1e999 parses to Infinity.
+    await writeFile(settingsPath(), '{"contextPrune":{"summarizerConcurrency":1e999}}');
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(DEFAULT_CONFIG.summarizerConcurrency);
+  });
+
+  it("floors a fractional value", async () => {
+    await writeContextPrune({ summarizerConcurrency: 2.7 });
+    const config = await loadConfig();
+    expect(config.summarizerConcurrency).toBe(2);
+  });
+});

@@ -5,6 +5,8 @@ import {
   type CapturedBatch,
   type ChainCompressionEntry,
   type FlushOptions,
+  type DiagnosticKind,
+  type ContextMetricsSnapshot,
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
@@ -14,6 +16,7 @@ import {
   RECOVERY_GRACE_PRESETS,
   SUMMARIZER_IDLE_TIMEOUT_PRESETS,
   SUMMARIZER_MAX_TIMEOUT_PRESETS,
+  SUMMARIZER_CONCURRENCY_PRESETS,
   AUTO_BUDGET_PRESETS,
   ROLLING_WINDOW_PRESETS,
   PURGE_COOLDOWN_PRESETS,
@@ -22,6 +25,7 @@ import {
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
+import { MAX_BUDGET_WINDOW } from "./budget.js";
 import { formatTokens, formatCost, formatCharProgress, formatCompactCount } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -57,25 +61,44 @@ class SettingsOverlay extends Container {
 
 // ── Status widget text ──────────────────────────────────────────────────────
 
-export function pruneStatusText(config: ContextPruneConfig, reclaim?: LiveReclaim): string {
+export function pruneStatusText(
+  config: ContextPruneConfig,
+  reclaim?: LiveReclaim,
+  diagnostics?: Record<DiagnosticKind, number>,
+  metrics?: ContextMetricsSnapshot,
+): string {
   if (!config.enabled) return "prune: OFF";
-  if (!reclaim || reclaim.beforeChars <= 0) return "prune: ON";
+  const diag = diagnostics
+    ? [
+        diagnostics["unresolved-range"] ? `u${diagnostics["unresolved-range"]}` : "",
+        diagnostics["range-id-mismatch"] ? `m${diagnostics["range-id-mismatch"]}` : "",
+        diagnostics["orphan-sweep"] ? `o${diagnostics["orphan-sweep"]}` : "",
+        diagnostics["backfill-empty"] ? `b${diagnostics["backfill-empty"]}` : "",
+      ].filter(Boolean)
+    : [];
+  const suffix = diag.length > 0 ? ` \u00b7 diag ${diag.join("/")}` : "";
+  const metricsSuffix = metrics && metrics.frontierGapTokens > 0
+    ? ` \u00b7 think ${formatCompactCount(metrics.openCycleThinkingTokens)} \u00b7 gap ${formatCompactCount(metrics.frontierGapTokens)} \u00b7 chain ${metrics.largestChainSharePct}%`
+    : "";
+  if (!reclaim || reclaim.beforeChars <= 0) return `prune: ON${suffix}${metricsSuffix}`;
   const beforeTok = Math.round(reclaim.beforeChars / 4);
   const afterTok = Math.round(reclaim.afterChars / 4);
   const reduction = Math.max(0, Math.round((1 - afterTok / beforeTok) * 100));
-  return `prune: ON \u00b7 ${formatCompactCount(beforeTok)}->${formatCompactCount(afterTok)} (-${reduction}%)`;
+  return `prune: ON \u00b7 ${formatCompactCount(beforeTok)}->${formatCompactCount(afterTok)} (-${reduction}%)${suffix}${metricsSuffix}`;
 }
 
 export function setPruneStatusWidget(
   ctx: { ui: { setStatus: (id: string, text?: string) => void } },
   config: ContextPruneConfig,
   value?: LiveReclaim | string,
+  diagnostics?: Record<DiagnosticKind, number>,
+  metrics?: ContextMetricsSnapshot,
 ): void {
   if (!config.showPruneStatusLine) {
     ctx.ui.setStatus(STATUS_WIDGET_ID, undefined);
     return;
   }
-  const text = typeof value === "string" ? value : pruneStatusText(config, value);
+  const text = typeof value === "string" ? value : pruneStatusText(config, value, diagnostics, metrics);
   // Leading-only separator: the footer joins extension status segments with a
   // single space, so a trailing divider collides with the next segment's leading
   // one and renders doubled. One leading bar yields single dividers between
@@ -213,11 +236,20 @@ function maxTimeoutDescription(config: ContextPruneConfig): string {
   return `Hard ceiling on total duration of a single summarizer call: ${Math.round(config.summarizerMaxTimeoutMs / 1000)}s. Backstop for a stream that dribbles forever without going idle. Set 0 to disable.`;
 }
 
-function autoBudgetThresholdDescription(config: ContextPruneConfig): string {
-  if (config.autoBudgetThreshold == null) {
-    return `Token-budget auto-flush: force a prune when context usage reaches this share of the window, regardless of prune-on mode. Currently off. Pick a percentage to enable.`;
+function concurrencyDescription(config: ContextPruneConfig): string {
+  if (config.summarizerConcurrency === 0) {
+    return "Summarizer fan-out UNBOUNDED - every queued batch fires its own LLM call at once. Only for high-quota providers; a burst can trip rate limits and flip the summarizer into fallback.";
   }
-  return `Token-budget auto-flush: force a prune when context usage reaches ${Math.round(config.autoBudgetThreshold * 100)}% of the window, regardless of prune-on mode. Set to Off to disable.`;
+  return `Max ${config.summarizerConcurrency} summarizer calls in flight during a flush fan-out; queued batches start as in-flight calls settle. Bounds quota bursts on the configured summarizer model. Set 0 for unbounded.`;
+}
+
+function autoBudgetThresholdDescription(config: ContextPruneConfig): string {
+  const cap = `${MAX_BUDGET_WINDOW / 1000}k`;
+  if (config.autoBudgetThreshold == null) {
+    return `Token-budget auto-flush: force a prune when context usage reaches this share of the window (or ${cap} tokens, whichever comes first), regardless of prune-on mode. Currently off. Pick a percentage to enable.`;
+  }
+  const pct = Math.round(config.autoBudgetThreshold * 100);
+  return `Token-budget auto-flush: force a prune when context usage reaches ${pct}% of the window or ${cap} tokens, whichever comes first, regardless of prune-on mode. The ${cap} ceiling keeps this reachable on huge-window models. Set to Off to disable.`;
 }
 
 function protectedToolsDisplay(list: string[]): string {
@@ -455,6 +487,10 @@ export function registerCommands(
   getLiveReclaim: () => LiveReclaim | undefined,
   indexer: ToolCallIndexer,
   compactChains: (ctx: ExtensionCommandContext) => Promise<{ compressedEntries: ChainCompressionEntry[]; skipped: number }>,
+  getDiagnosticCounts?: () => Record<DiagnosticKind, number>,
+  getContextMetrics?: (ctx: ExtensionCommandContext) => ContextMetricsSnapshot,
+  getCachedMetrics?: () => ContextMetricsSnapshot | undefined,
+  getRearmed?: () => boolean,
 ): void {
   // Register the /pruner command
   pi.registerCommand("pruner", {
@@ -597,6 +633,15 @@ export function registerCommands(
                 ? String(config.summarizerMaxTimeoutMs)
                 : (SUMMARIZER_MAX_TIMEOUT_PRESETS.find((p) => p.value === String(DEFAULT_CONFIG.summarizerMaxTimeoutMs))?.value ?? SUMMARIZER_MAX_TIMEOUT_PRESETS[0].value), // fall back to the default preset if a custom value isn't in the cycle
               description: maxTimeoutDescription(config),
+            },
+            {
+              id: "summarizerConcurrency",
+              label: "Summarizer concurrency",
+              values: SUMMARIZER_CONCURRENCY_PRESETS.map((p) => p.value),
+              currentValue: SUMMARIZER_CONCURRENCY_PRESETS.some((p) => p.value === String(config.summarizerConcurrency))
+                ? String(config.summarizerConcurrency)
+                : (SUMMARIZER_CONCURRENCY_PRESETS.find((p) => p.value === String(DEFAULT_CONFIG.summarizerConcurrency))?.value ?? SUMMARIZER_CONCURRENCY_PRESETS[0].value), // fall back to the default preset if a custom value isn't in the cycle
+              description: concurrencyDescription(config),
             },
             {
               id: "autoBudgetThreshold",
@@ -758,6 +803,11 @@ export function registerCommands(
               newConfig.summarizerMaxTimeoutMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG.summarizerMaxTimeoutMs;
               const it = items.find((item) => item.id === "summarizerMaxTimeoutMs");
               if (it) it.description = maxTimeoutDescription(newConfig);
+            } else if (id === "summarizerConcurrency") {
+              const parsed = Number.parseInt(newValue, 10);
+              newConfig.summarizerConcurrency = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG.summarizerConcurrency;
+              const it = items.find((item) => item.id === "summarizerConcurrency");
+              if (it) it.description = concurrencyDescription(newConfig);
             } else if (id === "autoBudgetThreshold") {
               const parsed = Number.parseFloat(newValue);
               newConfig.autoBudgetThreshold =
@@ -801,7 +851,7 @@ export function registerCommands(
             }
             currentConfig.value = newConfig;
             saveConfig(newConfig);
-            setPruneStatusWidget(ctx, newConfig, getLiveReclaim());
+            setPruneStatusWidget(ctx, newConfig, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
             settingsList?.invalidate();
           };
 
@@ -836,7 +886,7 @@ export function registerCommands(
           currentConfig.value = { ...currentConfig.value, enabled: true };
           saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning enabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
           break;
         }
 
@@ -845,7 +895,7 @@ export function registerCommands(
           currentConfig.value = { ...currentConfig.value, enabled: false };
           saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning disabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
           break;
         }
 
@@ -858,8 +908,12 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           const fmtTimeout = (ms: number) => (ms === 0 ? "disabled" : `${Math.round(ms / 1000)}s`);
+          const m = getContextMetrics?.(ctx);
+          const contextLine = m
+            ? `\n  --- context ---\n  thinking:     ${formatTokens(m.openCycleThinkingTokens)} tokens (open segment)\n  chain share:  ${m.largestChainSharePct}%\n  frontier gap: ${formatTokens(m.frontierGapTokens)} tokens${getRearmed?.() ? "\n  rearmed:      yes" : ""}`
+            : "";
           ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  idle to:  ${fmtTimeout(cfg.summarizerIdleTimeoutMs)}\n  max to:   ${fmtTimeout(cfg.summarizerMaxTimeoutMs)}\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  dedup:    ${cfg.dedupByContentHash ? "on" : "off"}\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}${statsLine}`,
+            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  idle to:  ${fmtTimeout(cfg.summarizerIdleTimeoutMs)}\n  max to:   ${fmtTimeout(cfg.summarizerMaxTimeoutMs)}\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  dedup:    ${cfg.dedupByContentHash ? "on" : "off"}\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}${statsLine}${contextLine}`,
           );
           break;
         }
@@ -964,7 +1018,7 @@ export function registerCommands(
             currentConfig.value = { ...currentConfig.value, pruneOn: modeArg as ContextPruneConfig["pruneOn"] };
           }
           saveConfig(currentConfig.value);
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
           break;
         }
 
@@ -1011,7 +1065,7 @@ export function registerCommands(
             // tool-result savings; but assistant-message savings (thinking + toolCall args + text)
             // are not counted at all, so the two errors partly cancel. Treat as a rough proxy.
             const droppedChars = compressedEntries.reduce((total, entry) => {
-              const records = indexer.lookupToolCalls(entry.droppedToolCallIds);
+              const records = indexer.lookupToolCalls(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds);
               return total + records.reduce((s, r) => s + r.resultText.length, 0);
             }, 0);
             const reclaimedTokens = Math.ceil(droppedChars / 4);
@@ -1037,6 +1091,11 @@ export function registerCommands(
           const batches = capturePendingBatches(ctx);
           if (batches.length === 0) {
             ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
+            // Still invoke flushPending so its finally-emitted flush-metrics entry
+            // records this attempt (outcome "empty") — the incident's exact
+            // undiagnosable "nothing pending" report is precisely what this log
+            // exists to make diagnosable on recurrence.
+            await flushPending(ctx, { previewedBatches: batches, trigger: "manual" });
             break;
           }
 
@@ -1061,7 +1120,7 @@ export function registerCommands(
 
           // Remove the widget and restore the normal footer status.
           clearWidget();
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { CapturedBatch, CapturedToolCall } from "./types.js";
 import type { ToolCallIndexer } from "./indexer.js";
 import { hashToolResult } from "./content-hash.js";
+import { occKey } from "./occurrence-key.js";
 
 /** Replace anything outside [A-Za-z0-9_-] so the id can't escape the blob dir. */
 export function sanitizeId(toolCallId: string): string {
@@ -35,6 +36,24 @@ interface SpillConfig {
   dedupByContentHash: boolean;
 }
 
+interface SpillableRecord {
+  toolName: string;
+  resultText: string;
+  spillBytes?: number;
+  resultPreview?: string;
+  spillPath?: string;
+  contentHash?: string;
+}
+
+/** Mutates `record` in place: spillBytes/resultPreview/spillPath/contentHash set, resultText emptied. */
+export function applySpill(record: SpillableRecord, spillPath: string, previewBytes: number): void {
+  record.spillBytes = Buffer.byteLength(record.resultText, "utf8");
+  record.resultPreview = headPreview(record.resultText, previewBytes);
+  record.spillPath = spillPath;
+  record.contentHash = hashToolResult(record.toolName, record.resultText);
+  record.resultText = "";
+}
+
 export async function spillOversizedBatch(args: {
   batch: CapturedBatch;
   indexer: ToolCallIndexer;
@@ -50,18 +69,18 @@ export async function spillOversizedBatch(args: {
   for (const tc of batch.toolCalls) {
     if (tc.resultText.length < config.spillThreshold) continue;
 
-    const hash = hashToolResult(tc.toolName, tc.resultText);
+    const key = occKey(tc.toolCallId, tc.resultTimestamp);
 
     if (config.dedupByContentHash) {
       const original = indexer.lookupByContent(tc.toolName, tc.resultText);
-      if (original && original !== tc.toolCallId) {
-        indexer.registerDuplicate(tc.toolCallId, original, appendEntry);
+      if (original && original !== key) {
+        indexer.registerDuplicate(key, original, appendEntry);
         handled.add(tc.toolCallId);
         continue;
       }
     }
 
-    const path = blobPathFor(sessionDir, sessionId, tc.toolCallId);
+    const path = blobPathFor(sessionDir, sessionId, key);
     try {
       await mkdir(blobDirFor(sessionDir, sessionId), { recursive: true });
       await writeFile(path, tc.resultText, "utf-8");
@@ -70,11 +89,7 @@ export async function spillOversizedBatch(args: {
       continue;
     }
 
-    tc.spillBytes = Buffer.byteLength(tc.resultText, "utf8");
-    tc.resultPreview = headPreview(tc.resultText, config.spillPreviewBytes);
-    tc.spillPath = path;
-    tc.contentHash = hash;
-    tc.resultText = "";
+    applySpill(tc, path, config.spillPreviewBytes);
     toIndex.push(tc);
     handled.add(tc.toolCallId);
   }

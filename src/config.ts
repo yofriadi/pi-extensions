@@ -70,6 +70,12 @@ function normalize(existing: Partial<ContextPruneConfig>): ContextPruneConfig {
       merged.summarizerMaxTimeoutMs >= 0
         ? Math.floor(merged.summarizerMaxTimeoutMs)
         : DEFAULT_CONFIG.summarizerMaxTimeoutMs,
+    summarizerConcurrency:
+      typeof merged.summarizerConcurrency === "number" &&
+      Number.isFinite(merged.summarizerConcurrency) &&
+      merged.summarizerConcurrency >= 0
+        ? Math.floor(merged.summarizerConcurrency)
+        : DEFAULT_CONFIG.summarizerConcurrency,
     recoveryGraceTurns:
       typeof merged.recoveryGraceTurns === "number" &&
       Number.isFinite(merged.recoveryGraceTurns) &&
