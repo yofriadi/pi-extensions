@@ -90,12 +90,20 @@ current_version() {
   node -p "require('./package.json').version"
 }
 
+assert_plain_version() {
+  local version="$1"
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: package.json version must be plain X.Y.Z for a release (got $version)" >&2
+    exit 1
+  fi
+}
+
 compute_next_version() {
   local cur="$1" mode="$2"
   node -e '
     const [cur, mode] = process.argv.slice(1);
     if (mode === "current") { process.stdout.write(cur); process.exit(0); }
-    const m = cur.match(/^(\d+)\.(\d+)\.(\d+)/);
+    const m = cur.match(/^(\d+)\.(\d+)\.(\d+)$/);
     if (!m) { console.error(`current version ${cur} is not semver`); process.exit(1); }
     let [maj, min, pat] = [Number(m[1]), Number(m[2]), Number(m[3])];
     if (mode === "major") { maj += 1; min = 0; pat = 0; }
@@ -174,11 +182,11 @@ cmd_propose() {
 cmd_release() {
   local mode="$1" old new tag sha
   old="$(current_version)"
+  assert_plain_version "$old"
   new="$(compute_next_version "$old" "$mode")"
   tag="v${new}"
-
   if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-    echo "error: tag ${tag} already exists" >&2
+    echo "error: local tag ${tag} already exists" >&2
     exit 1
   fi
 
@@ -199,6 +207,10 @@ cmd_release() {
 
   require_release_branch
   require_clean_tree
+  if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+    echo "error: remote tag ${tag} already exists on origin" >&2
+    exit 1
+  fi
 
   if [[ "$mode" != "current" ]]; then
     node -e '
@@ -217,8 +229,7 @@ cmd_release() {
   fi
 
   run git tag -a "$tag" -m "Release ${new}"
-  run git push origin "$RELEASE_BRANCH"
-  run git push origin "$tag"
+  run git push --atomic origin "$RELEASE_BRANCH" "refs/tags/$tag"
 
   sha="$(git rev-parse HEAD)"
   cat <<EOF

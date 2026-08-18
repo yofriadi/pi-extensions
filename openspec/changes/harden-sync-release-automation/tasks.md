@@ -11,10 +11,17 @@
 
 ## 3. Monorepo consumer and reproducibility
 
-- [ ] 3.1 Replace the direct-upstream `update:pi-condense` wrapper with a guarded `pi-condense-fork local/main --squash` consumer that runs post-pull G1–G4.
-- [ ] 3.2 Regenerate `pnpm-lock.yaml` from a clean isolated monorepo worktree; review every changed importer against committed manifests and verify frozen installation/type checking.
-- [ ] 3.3 Pull the committed fork hardening change through the guarded subtree flow without direct package edits, validate exact fork-tree identity, and commit/push the monorepo consumer and lockfile changes.
+- [x] 3.1 Replace the direct-upstream `update:pi-condense` wrapper with a guarded `pi-condense-fork local/main --squash` consumer that runs post-pull G1–G4.
+- [x] 3.2 Regenerate `pnpm-lock.yaml` from a clean isolated monorepo worktree; reviewed the pi-condense, pi-mlflow, and pi-subagent-herdr importer reconciliation against committed manifests; frozen install and package typecheck passed in the clean worktree.
+- [x] 3.3 Pull the committed fork hardening change through the guarded subtree flow without direct package edits, validate exact fork-tree identity, and commit/push the monorepo consumer and lockfile changes.
 
 ## 4. Authenticated live verification
 
-- [x] 4.1 Authenticated smoke passed on 2026-08-18 with `google-antigravity/gemini-3.7-flash`: session artifact `/var/folders/1p/43y8tds156zgqt2l95sz36t40000gn/T/pi-condense-antigravity-smoke.yLkX1U/sessions/2026-08-18T11-16-05-275Z_01a01495-ee1b-7951-8781-a7699b5af486.jsonl` contains 3 `context-prune-summary` entries and one `context-prune-flush-metrics` entry (`message-end`/`summarized`); no fallback warning occurred. Copied credentials were removed before artifact retention.
+- [x] 4.1 Passed 2026-08-18 with the no-input deterministic payload tool (no approval or built-in shell); sanitized model/configuration, summary count, flush outcome, warning scan, and credential-cleanup facts are in `doc/validation/2026-08-18-antigravity-smoke.md`.
+
+## 5. Adversarial review remediation
+
+- [x] 5.1 Pin Bun, commit `bun.lock`, use `bun install --frozen-lockfile` in fork test/release CI, and validate the lock-backed package checks.
+- [x] 5.2 Enforce plain release versions, remote tag absence, and atomic branch/tag pushes; keep OIDC out of the first provenance-validation job and protect `v*` tag creation.
+- [x] 5.3 Run smoke-helper regression coverage in all fork workflows and verify failed live runs retain artifacts without copied credentials.
+- [ ] 5.4 Make `pnpm update:pi-condense` transactionally validate a candidate fork pull, lock refresh/frozen install, and G1–G4 before advancing the caller branch; retarget root CI to `master` and provision pinned Bun.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/smoke-antigravity.sh --model <google-antigravity/model> [--prompt <text>] [--provider-extension <path>] [--agent-dir <path>] [--keep]
+Usage: scripts/smoke-antigravity.sh --model <google-antigravity/model> [--provider-extension <path>] [--agent-dir <path>] [--keep]
 
 Run a real, authenticated pi-condense smoke in an isolated session. This helper
 never claims that the configured summarizer succeeded: inspect the printed
@@ -14,7 +14,7 @@ Required:
   --model MODEL                 A google-antigravity/<model> identifier.
 
 Optional:
-  --prompt TEXT                 Prompt that asks Pi to run a large tool call, then /pruner now.
+  (The prompt and tool payload are fixed and deterministic; callers cannot grant general shell access.)
   --provider-extension PATH     Antigravity provider extension (default: $PI_ANTIGRAVITY_EXTENSION).
   --agent-dir PATH              Existing authenticated pi agent dir to copy auth.json from
                                 (default: ${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}).
@@ -27,7 +27,7 @@ EOF
 }
 
 MODEL=""
-PROMPT='Use the bash tool to print a 6000-character deterministic string, then run /pruner now. Briefly report the result.'
+PROMPT='Call pi_condense_smoke_payload exactly once, then briefly report its result.'
 PROVIDER_EXTENSION="${PI_ANTIGRAVITY_EXTENSION:-}"
 SOURCE_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 KEEP=0
@@ -35,7 +35,6 @@ KEEP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="${2:-}"; shift 2 ;;
-    --prompt) PROMPT="${2:-}"; shift 2 ;;
     --provider-extension) PROVIDER_EXTENSION="${2:-}"; shift 2 ;;
     --agent-dir) SOURCE_AGENT_DIR="${2:-}"; shift 2 ;;
     --keep) KEEP=1; shift ;;
@@ -104,12 +103,17 @@ printf 'Running authenticated Antigravity smoke for %s...\n' "$MODEL"
 printf 'Running isolated smoke session...\n'
 set +e
 PI_CODING_AGENT_DIR="$AGENT_DIR" pi \
-  --approve \
+  --no-approve \
   --no-extensions \
+  --no-builtin-tools \
+  --no-context-files \
+  --no-skills \
+  --no-prompt-templates \
   --extension "$PROVIDER_EXTENSION" \
+  --extension "$REPO_ROOT/scripts/smoke-payload-tool.ts" \
   --extension "$REPO_ROOT/index.ts" \
   --model "$MODEL" \
-  --tools bash \
+  --tools pi_condense_smoke_payload \
   --session-dir "$SESSION_DIR" \
   --name pi-condense-antigravity-smoke \
   --print "$PROMPT"
@@ -117,6 +121,11 @@ status=$?
 set -e
 
 session_file="$(find "$SESSION_DIR" -type f -name '*.jsonl' -print -quit || true)"
+if [[ "$status" -ne 0 ]]; then
+  # A failed provider call is the primary debugging artifact, so retain it even
+  # without --keep. cleanup still removes the copied auth.json.
+  KEEP=1
+fi
 printf '\nSmoke command exit: %s\n' "$status"
 printf 'Session artifact: %s\n' "${session_file:-none created}"
 if [[ "$KEEP" -eq 1 ]]; then
@@ -129,9 +138,6 @@ printf '%s\n' '  1. Inspect the session artifact for context-prune-flush-metrics
 printf '%s\n' '  2. Confirm the configured google-antigravity model produced the summary directly.'
 printf '%s\n' '  3. If fallback occurred, compare its complete warning suffix with ANTIGRAVITY.md; record the observed provider/quota/network error.'
 printf '%s\n' '  4. Only then mark the live-smoke task complete.'
-
-# Keep artifacts whenever pi failed so the operator can inspect the real error.
 if [[ "$status" -ne 0 ]]; then
-  KEEP=1
   exit "$status"
 fi

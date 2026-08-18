@@ -32,6 +32,8 @@
   "files": [
     "index.ts",
     "src/**/*.ts",
+    "scripts/**/*.sh",
+    "scripts/**/*.ts",
     "README.md",
     "CHANGELOG.md",
     "PRUNING.md"

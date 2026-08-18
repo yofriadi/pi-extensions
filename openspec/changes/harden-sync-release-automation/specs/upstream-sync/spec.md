@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Subtree consumption
-The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only. The advertised `pnpm update:pi-condense` command SHALL invoke a wrapper that uses the named `pi-condense-fork` remote, verifies that its configured URL is the fork URL, fetches `local/main`, and executes this squash pull; it MUST NOT pull `jjuraszek/pi-condense/main` directly. After a successful pull, the wrapper SHALL run G1, G2, G3, and G4 from `packages/pi-condense` before reporting success.
+The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi-condense pi-condense-fork local/main --squash`. The monorepo's tracked tree SHALL be clean repo-wide before the operation. The upstream remote remains for fetching and tag reference only. The advertised `pnpm update:pi-condense` command SHALL validate the named `pi-condense-fork` URL, fetch `local/main`, and construct the squash pull in a detached candidate worktree; it MUST NOT pull `jjuraszek/pi-condense/main` directly. If the consumed manifest changed, the candidate SHALL regenerate the root lockfile with the repository's declared pnpm version. The candidate SHALL pass frozen installation, root check, and G1–G4 before the caller branch fast-forwards; any pull, lock, or gate failure SHALL remove the candidate and leave the caller branch unchanged.
 
 #### Scenario: Routine future sync
 - **WHEN** upstream advances and the fork has rebased after the first re-baseline
@@ -13,10 +13,10 @@ The monorepo SHALL consume the fork using `git subtree pull --prefix=packages/pi
 
 #### Scenario: Scripted subtree update
 - **WHEN** an operator runs `pnpm update:pi-condense` in a clean monorepo
-- **THEN** the wrapper fetches `pi-condense-fork/local/main`, performs a squash subtree pull from that branch, runs G1–G4, and never contacts upstream as the subtree source
+- **THEN** the wrapper fetches `pi-condense-fork/local/main`, validates a candidate squash subtree pull, conditional lock refresh/frozen install, root check, and G1–G4 before fast-forwarding the caller branch, and never contacts upstream as the subtree source
 
 ### Requirement: Sync gates
-Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip. The monorepo lockfile SHALL be regenerated with the repository's declared pnpm version whenever a subtree pull changes `packages/pi-condense/package.json`, and its `packages/pi-condense` importer MUST exactly represent the consumed manifest's dependencies and development dependencies. Regeneration SHALL occur from a clean worktree so unrelated lockfile edits are not incorporated.
+Every sync SHALL run the gates in the fork and rerun the applicable gates in the monorepo after the subtree pull. G4 runs for each thematic slice; G1, G3, and G5 run at the slice tip and after the subtree pull; G6 runs once at the fork tip. Fork validation SHALL use the committed `bun.lock`, pinned Bun version, and frozen install. Whenever a subtree pull changes `packages/pi-condense/package.json`, the monorepo candidate SHALL regenerate the root lockfile with the repository's declared pnpm version, ensure its importer represents every consumed pi-condense dependency and development dependency, pass frozen installation and root checks, and only then advance the caller branch.
 
 1. G0 requires a repo-wide clean tracked monorepo tree before subtree operations: `git diff-index HEAD` and `git diff-index --cached HEAD` are both empty.
 2. G1 forbids imports or mocks from `@earendil-works/pi-ai/compat` and `reasoningEffort:` option assignments under `src/`. The `not.toHaveProperty("reasoningEffort")` regression assertion is allowed.
@@ -38,7 +38,7 @@ Every sync SHALL run the gates in the fork and rerun the applicable gates in the
 - **THEN** the lockfile is regenerated from a clean worktree and committed before frozen workspace installation is treated as reproducible
 
 ### Requirement: Accurate change status at close-out
-Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base. An authenticated real-session Antigravity smoke SHALL remain explicitly pending until an operator runs it and records the session artifact and observed configured-model/fallback outcome; automated mocks and static gates MUST NOT be represented as its substitute.
+Each sync SHALL record the accurate implementation state of other active OpenSpec changes. Spec-only changes SHALL not be represented as shipped; the fork's resulting `local/main` tip SHALL be recorded as their new implementation base. An authenticated real-session Antigravity smoke SHALL remain explicitly pending until an operator records a sanitized durable report naming the model, restrictive tool policy, summary count, flush outcome, warning scan, and credential-cleanup result; automated mocks and static gates MUST NOT be represented as its substitute.
 
 #### Scenario: Sync coexists with an unimplemented local change
 - **WHEN** a sync completes while another active change remains spec-only
