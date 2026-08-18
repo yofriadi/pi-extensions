@@ -24,4 +24,4 @@
 - [x] 5.1 Pin Bun, commit `bun.lock`, use `bun install --frozen-lockfile` in fork test/release CI, and validate the lock-backed package checks.
 - [x] 5.2 Enforce plain release versions, remote tag absence, and atomic branch/tag pushes; keep OIDC out of the first provenance-validation job and protect `v*` tag creation.
 - [x] 5.3 Run smoke-helper regression coverage in all fork workflows and verify failed live runs retain artifacts without copied credentials.
-- [ ] 5.4 Make `pnpm update:pi-condense` transactionally validate a candidate fork pull, lock refresh/frozen install, and G1–G4 before advancing the caller branch; retarget root CI to `master` and provision pinned Bun.
+- [x] 5.4 Make `pnpm update:pi-condense` transactionally validate a candidate fork pull, lock refresh/frozen install, and G1–G4 before advancing the caller branch; root CI targets `master` with pinned Bun. The no-op and secure-fork update paths both passed without leaving a failed candidate on the caller branch.
