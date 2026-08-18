@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jjuraszek/pi-condense.git"
+    "url": "git+https://github.com/yofriadi/pi-condense.git"
   },
-  "homepage": "https://github.com/jjuraszek/pi-condense#readme",
+  "homepage": "https://github.com/yofriadi/pi-condense#readme",
   "bugs": {
-    "url": "https://github.com/jjuraszek/pi-condense/issues"
+    "url": "https://github.com/yofriadi/pi-condense/issues"
   },
   "keywords": [
     "pi-package",
@@ -37,7 +37,6 @@
     "PRUNING.md"
   ],
   "scripts": {
-    "check:agents-core": "node scripts/check-agents-core.mjs",
     "test": "bun test src/",
     "typecheck": "tsc --project tsconfig.json"
   },
@@ -45,7 +44,7 @@
     "extensions": [
       "./index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/jjuraszek/pi-condense/main/pi-condense.png"
+    "image": "https://raw.githubusercontent.com/yofriadi/pi-condense/local/main/pi-condense.png"
   },
   "funding": {
     "type": "buymeacoffee",

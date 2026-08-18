@@ -1,5 +1,9 @@
 # Spec: summarizer-pacing
 
+## Purpose
+
+Bound summarizer flush fan-out and absorb rate-limit bursts on the configured model before they enter outage fallback.
+
 ## Requirements
 
 ### Requirement: Bounded summarizer fan-out

@@ -27,12 +27,15 @@
    - [Budget-delta flush](#budget-delta-flush)
 10. [Chain Compression](#chain-compression)
     - [Protected-output relocation](#protected-output-relocation)
-11. [Error Purge](#error-purge)
-12. [Why Summarization Works: Research Evidence](#why-summarization-works-research-evidence)
+11. [Occurrence Identity](#occurrence-identity)
+12. [Error Purge](#error-purge)
+13. [Orphan Sweep](#orphan-sweep)
+14. [Diagnostics](#diagnostics)
+15. [Why Summarization Works: Research Evidence](#why-summarization-works-research-evidence)
     - [SUPO — Summarization augmented Policy Optimization](#supo--summarization-augmented-policy-optimization)
     - [ReSum — Recursive Summarization for Long-Horizon Agents](#resum--recursive-summarization-for-long-horizon-agents)
     - [ACON — Agent Context Optimization](#acon--agent-context-optimization)
-13. [Summary](#summary)
+16. [Summary](#summary)
 
 ---
 
@@ -197,7 +200,7 @@ Pruning does **not** delete data. It moves raw tool results out of the hot path 
 There are two separate things happening during pruning:
 
 1. **Context filtering:** future requests stop including the old `toolResult` messages.
-2. **Index preservation:** the extension stores each summarized tool call in the pruner index, keyed by `toolCallId`.
+2. **Index preservation:** the extension stores each summarized tool call in the pruner index, keyed by its occurrence key (`id@resultTimestamp`, or the bare id for legacy records - see [Occurrence Identity](#occurrence-identity)).
 
 That distinction is the core idea:
 
@@ -310,7 +313,7 @@ batch gets summarized
         ├─► summary message added to context
         │      └─► includes short refs (`t1`, `t2`, …)
         │
-        ├─► tool results indexed by toolCallId
+        ├─► tool results indexed by occurrence key (id@resultTimestamp)
         │      └─► full raw resultText stored in index/session
         │
         └─► old toolResult messages removed from future context
@@ -605,7 +608,7 @@ Properties:
 - `role: "toolResult"` and the original `toolCallId` / `toolName` / `timestamp` are preserved — role alternation is intact; no synthetic-result injection.
 - `isError: false`, so the model does not interpret the stub as a tool failure.
 - The stub references the **short ref** (`t1`, `t2`, …) the indexer assigned at summary time. Legacy entries from before short-refs landed fall back to the raw `toolCallId`.
-- Deterministic per `toolCallId` — the stub text never changes across calls, so the prefix cache continues to hit on the pruned range.
+- Deterministic per occurrence key — the stub text never changes across renders of the same `toolResult`, so the prefix cache continues to hit on the pruned range. A reused `toolCallId` is a *different* occurrence (different `resultTimestamp`) and gets its own stub and its own short ref.
 
 Implementation: `src/pruner.ts` `pruneMessages(messages, indexer)` returns `{ messages, pruned }`. When `pruned === false`, the original array reference is returned and the `context` handler skips reconstruction entirely.
 
@@ -659,9 +662,10 @@ Mechanism:
 
 1. When a batch enters `flushPending`, each tool call is hashed by `SHA-1(toolName + "\0" + normalize(resultText))`.
 2. The indexer's `contentHashToOriginal` map (populated by every earlier `addBatch` / `reconstructFromSession`) is consulted.
-3. A hit means an earlier prune already covered identical content. The duplicate is registered as an alias of the original via `indexer.registerDuplicate(newId, originalId, appendEntry)`:
-   - `dedupAliasToOriginal[newId] = originalId` (so `isSummarized(newId) === true` and `resolveToolCallId(newId) === originalId`).
-   - `toolCallIdToAlias[newId] = toolCallIdToAlias[originalId]` (so `getShortRefForToolCallId(newId)` returns the **same** `tN` as the original).
+3. A hit means an earlier prune already covered identical content. The duplicate is registered as an alias of the original via `indexer.registerDuplicate(newKey, originalKey, appendEntry)`, where both are occurrence keys (or legacy bare ids):
+   - `dedupAliasToOriginal[newKey] = originalKey` (so `isSummarized(newKey) === true` and `resolveToolCallId(newKey) === originalKey`).
+   - `toolCallIdToAlias[newKey] = toolCallIdToAlias[originalKey]` (so `getShortRefForToolCallId(newKey)` returns the **same** `tN` as the original).
+   - Keying by occurrence key, not bare id, means a duplicate is only ever aliased to the specific earlier *occurrence* it matches byte-for-byte - a reused id whose later occurrence has different content is not conflated with the stale one.
    - A `context-prune-dedup-alias` custom entry is persisted so `reconstructFromSession` rebuilds the maps after a restart.
 4. The duplicate is removed from the batch — no summarizer call, no new index entry.
 5. Later, `pruneMessages` stub-replaces the duplicate's `ToolResultMessage` using the original's short ref, and `context_tree_query` returns the original's record whether the model passes the duplicate's id or the original's.
@@ -687,7 +691,7 @@ The last attempted prune boundary is persisted as `context-prune-frontier` so `f
 - **Tree browser (`/pruner tree`):** interactive, foldable tree of pruned tool calls grouped under their summaries. `Ctrl-O` on a summary node opens the full markdown summary in a bordered overlay.
 - **Configurable summarizer thinking (`summarizerThinking`):** trade summary cost / latency for quality (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`). `default` omits the option entirely so the provider chooses.
 - **Cumulative stats:** `context-prune-stats` entries track input/output tokens and cost of every summarizer call; full detail surfaces in `/pruner stats`. Cost is also emitted on the `cost:external` pi.events channel for external aggregators (cumulative per session, live only).
-- **Live reclaim ratio:** measured once per `pruneMessages` call via `sizeMessages(messages) = JSON.stringify(messages).length`, comparing the input array before pruning to the result after. Estimated tokens = chars / 4. The measurement covers all three reclaim mechanisms in a single point (stub-replace, error-purge, chain-range-prune); appears on the status line as `│ prune: ON · 92k->14k (-85%) │` once at least one prune has occurred (the `│ … │` wrapper keeps the segment visually isolated in the shared footer, load-order independent).
+- **Live reclaim ratio:** measured once per `pruneMessages` call via `sizeMessages(messages) = JSON.stringify(messages).length`, comparing the input array before pruning to the result after. Estimated tokens = chars / 4. The measurement covers all four phases in a single point (stub-replace, error-purge, chain-range-prune, orphan-sweep); appears on the status line as `│ prune: ON · 92.0k->14.0k (-85%)` once at least one prune has occurred (the leading `│` keeps the segment visually isolated in the shared footer, load-order independent - there is no trailing divider, since the footer's own space-join between segments already provides one).
 - **Live progress for `/pruner now`:** an `aboveEditor` widget shows one row per pending batch with braille spinner, streamed summary-char count, and ✓ / ⚠ status.
 
 ### Summarizer outage fallback
@@ -812,9 +816,11 @@ ACON demonstrates that **compression not only saves tokens but can improve agent
 
 ### Token-budget auto-flush trigger
 
-`autoBudgetThreshold` (default `null`) is an ADDITIONAL flush trigger orthogonal to `pruneOn`. When set to a fraction in `(0, 1]`, the extension evaluates `tokens / contextWindow` at the end of every tool-using turn; when the ratio meets the threshold, all pending batches are flushed immediately regardless of the configured `pruneOn` mode.
+`autoBudgetThreshold` (default `null`) is an ADDITIONAL flush trigger orthogonal to `pruneOn`. When set to a fraction in `(0, 1]`, the extension evaluates context usage at the end of every tool-using turn; when `tokens` reaches `min(MAX_BUDGET_WINDOW, threshold * contextWindow)` - i.e. the configured share of the model's window, or 300,000 tokens, whichever comes first - all pending batches are flushed immediately regardless of the configured `pruneOn` mode.
 
-Why we compute the ratio ourselves rather than using `ContextUsage.percent`: the provider's `percent` field is a 0–100 value, and both it and `tokens` are `null` immediately after a provider-side compaction. Using `tokens / contextWindow` directly gives a 0–1 fraction that matches the config unit and is independently null-safe — a `null` tokens value makes the trigger a no-op until usage is reported again.
+**Why we compute this ourselves rather than using `ContextUsage.percent`:** the provider's `percent` field is a 0-100 value, and both it and `tokens` are `null` immediately after a provider-side compaction. Comparing `tokens` against a token level we derive ourselves keeps the unit unambiguous and is independently null-safe - a `null` tokens value makes the trigger a no-op until usage is reported again. Note this trigger never divides: the fraction form (`tokens / min(contextWindow, MAX_BUDGET_WINDOW)`) belongs to `usageFraction` and the delta trigger below, and reading the threshold as a share of a capped window would be wrong - on a 1M-window model, `0.4` fires at 300,000 tokens, not at 120,000.
+
+**Why the 300k ceiling (`MAX_BUDGET_WINDOW`, `src/budget.ts`):** the trigger was originally a pure fraction of the advertised window, which made it unreachable as windows grew. On a 1M-window model, `0.9` means 900k tokens - a session ends long before that, so users observed "pruning never happens" (issue #7), while the same setting worked on a 200k model. The ceiling is deliberately chosen so it never binds at or below a 300k advertised window (a 256k model at `0.9` still fires at 230.4k), so it changes behavior only where the fraction was already unusable. Users keep full downward control: `0.1` on a 1M model still means 100k tokens.
 
 Lineage: simplified take on DCP's `maxContextLimit` nudging — a single threshold that forces a flush rather than separate nudge/force thresholds.
 
@@ -830,7 +836,7 @@ Interaction with the outage fallback below: pacing sits *below* it. Only a failu
 
 ### Budget-delta flush
 
-`budgetTurnDelta: number | null` (default `null`) is a per-turn usage-jump trigger ORed with `autoBudgetThreshold`. When set to a fraction in `(0, 1]`, the extension compares the current turn's usage fraction (`tokens / contextWindow`) to the previous turn's and forces a flush if the jump meets or exceeds the delta.
+`budgetTurnDelta: number | null` (default `null`) is a per-turn usage-jump trigger ORed with `autoBudgetThreshold`. When set to a fraction in `(0, 1]`, the extension compares the current turn's usage fraction (`tokens / min(contextWindow, MAX_BUDGET_WINDOW)`) to the previous turn's and forces a flush if the jump meets or exceeds the delta. Because the denominator carries the same 300k ceiling, the required growth is `delta * min(contextWindow, MAX_BUDGET_WINDOW)` tokens: `0.1` = +30k on any model at or above 300k, +20k on a 200k model. The ceiling enters through the denominator here rather than bounding a level, because a 300k ceiling on one turn's growth could never bind. Note the fraction is therefore not bounded by 1 above the ceiling (600k tokens on a 1M window = 2.0) and is deliberately not clamped - clamping would saturate this trigger and stop it re-arming.
 
 Use case: a single enormous tool result can jump context usage by 20–30 percentage points in one turn; `autoBudgetThreshold` misses this until the next turn. `budgetTurnDelta` catches the spike immediately.
 
@@ -881,23 +887,31 @@ raw messages from session
   │
   ├─ [1] tool-result stub-replace   (per-batch; existing)
   ├─ [2] error-purge                (phase 2)
-  └─ [3] chain-range-prune          (runs AFTER stubs)
-           for each compressed chain:
-             drop middle assistants (by toolCallId overlap)
-             drop middle toolResults (by toolCallId)
-             suppress per-batch summaries (by toolCallRefs overlap)
-             inject <compressed-chain> after start user
-             strip thinking from final assistant
+  ├─ [3] chain-range-prune          (runs AFTER stubs)
+  │        resolve each entry to a positional index range
+  │        drop assistant / toolResult / per-batch-summary inside the range
+  │        inject <compressed-chain> after start user
+  │        strip thinking from final assistant
+  └─ [4] orphan sweep               (structural post-condition, see below)
 ```
 
-### Identification model
+### Identification model: positional ranges, not ids
 
-Pi-ai's `Message` union (`UserMessage | AssistantMessage | ToolResultMessage`) has no `.id` field. Chain compression uses:
+Pi-ai's `Message` union (`UserMessage | AssistantMessage | ToolResultMessage`) has no `.id` field, and provider `toolCallId`s are not session-durable (see [Occurrence Identity](#occurrence-identity) below). Chain compression therefore decides **what to drop** by message position, not by id membership.
 
-- `timestamp: number` to identify user / final-assistant boundary messages
-- `toolCallId` sets to identify middle assistant turns and their tool results
+`resolveRange` (`src/chain-range-prune.ts`) maps a persisted `ChainCompressionEntry` to an index range in the current message array:
 
-This is why the persisted `ChainCompressionEntry` stores `startUserTimestamp` + `droppedToolCallIds` rather than message IDs.
+- exactly one `user`-role message at `entry.startUserTimestamp`
+- exactly one `assistant`-role message at `entry.finalAssistantTimestamp`
+- `startIndex < endIndex`
+
+Any other outcome - zero or multiple matches on either boundary, `finalAssistantTimestamp === null`, or a non-ordered pair - resolves to `null` and the entry drops **nothing** and inserts **no synthetic** for that range. This is fail-closed on purpose: an id-set or timestamp-window fallback (accepting a match even when it's ambiguous) risks deleting a live assistant turn that reuses a compressed chain's provider id, orphaning its tool result and producing a rejected request. A resolution failure is invisible in context - it is recorded as an `unresolved-range` diagnostic (see [Diagnostics](#diagnostics) below) and the affected range simply stays raw in context instead of being silently mis-compressed.
+
+**Drops are role-restricted**, not index-membership-restricted: inside an accepted range, only `assistant`, `toolResult`, and per-batch-summary (`custom`, `context-prune-summary`) messages are removed. `user`-role messages inside the range - including the already-inserted `<compressed-chain>` synthetic, which is itself `role: "user"` - and any third-party `custom_message` entries survive untouched. Preserving the synthetic is what makes re-application idempotent: calling `applyChainCompressions` a second time with the same entries sees its own synthetic already present (matched by `blockId`) and skips re-inserting it.
+
+**Per-batch summary suppression is coverage-based, not index-membership-based.** Under `batchingMode: "agent-message"` a per-batch summary is appended *after* `finalAssistantTimestamp`, i.e. outside the resolved range. Suppressing it by index membership would miss it entirely, so suppression instead checks whether the summary's own `toolCallRefs` overlap the set of ids actually dropped in this pass (`perBatchSummaryOverlapsDropped`).
+
+**Diagnostic cross-check.** Each accepted entry also carries `droppedToolCallIds` from detection time. At render time the ids actually inside the resolved range are compared against that recorded set purely as a health check - a mismatch never changes what gets dropped (the range always wins) but emits a `range-id-mismatch` diagnostic, surfacing drift between detection-time and render-time state without ever acting on it.
 
 ### Rolling window
 
@@ -958,10 +972,96 @@ The `context-prune-chain` session entry carries the matching `protectedToolCallI
 
 **Rejected alternative:** skip compression for any chain that contains a protected tool. Rejected because `todowrite`/`todoread` recur in most chains for opted-in users, so this strategy would forfeit most chain compression for the people who most need `protectedTools`.
 
+### Deterministic fallback (uncovered chains)
+
+A chain becomes eligible for compression (closed, older than the rolling window) independently of whether its middle tool calls were ever summarized. Per-batch coverage can be zero - a trivial batch, an oversized-skip, a fully-deduped batch, or a plain capture miss - and historically that meant `compressEligible` skipped the chain forever with `reason: "no-summary"`: the prune frontier had already advanced past the span, so no future flush would recapture it. A 639-call, ~935k-char chain stranded live this way (`doc/specs/2026-08-14-uncovered-chain-deterministic-backfill.md`).
+
+When `hasPerBatchSummaryCoveringAny` is false for a chain's middle ids, `compressEligible` takes a second, zero-LLM branch instead of skipping:
+
+1. **Resolve + extract.** `extractChainRecords` resolves the chain's span with the same `resolveRange` used by the drop path, then walks it positionally. Middles are excluded when protected (relocated verbatim at render, never phase-1 stubbed) or already indexed (occurrence-key membership in the indexer's record map - not `isSummarized`, which also covers dedup aliases and would wrongly re-strand a fully-deduped chain). Each surviving call becomes a `ToolCallRecord` with `turnIndex: -1` (no batch turn; `context_tree_query` renders `Turn: -1`, a pinned cosmetic).
+2. **Backfill, atomically.** `indexer.backfillChainRecords` spills oversized results via the shared spill helpers (`blobPathFor`/`applySpill`), a fail-closed variant of the eager `spillOversizedBatch` path, allocates `t<N>` refs, and appends **one** `context-prune-index` entry carrying the records plus `backfilled: true` and the allocated refs - append-before-commit, so refs are durable the instant the records are. Only after the append succeeds does it commit to the in-memory index and alias maps. Backfilled records never seed `contentHashToOriginal`: a poisoned dedup canonical could point future identical outputs at a record whose durability was never actually verified end-to-end for that purpose, so backfilled entries are excluded from canonical-seeding on both the live path and `reconstructFromSession`.
+3. **Compose a deterministic body.** `buildDeterministicBody` builds a zero-LLM stub - call count, a tool-name histogram, span duration, and a `First:`/`Last:` line with args JSON capped at 200 chars, plus the `t<N>` refs - and stores it as `rangeSummaryText` on the `context-prune-chain` entry with `bodySource: "deterministic"`. The renderer already prefers `entry.rangeSummaryText` (`src/pruner.ts`), so no renderer change was needed; entries without `bodySource` keep today's semantics unchanged.
+4. **Fail closed.** Any throw during backfill (spill I/O, append failure, malformed span) preserves the historical `no-summary` skip - nothing partial is committed. A chain with zero freshly-extracted records is only treated as a genuine span mismatch (fail-closed skip + `backfill-empty` diagnostic) when it ALSO has zero members already present in the index; if a prior attempt's index append succeeded but the chain-entry append then failed, the retry composes and persists straight from the durable index records instead of re-extracting, so recovery never produces a second `context-prune-index` entry for the same span.
+
+**Fully-protected exception.** If every middle id in a zero-extractable, zero-indexed chain is protected (`chain.protectedToolCallIds` covers all of `chain.middleToolCallIds`), the chain stays on the plain `no-summary` skip with no `backfill-empty` diagnostic. Compressing would relocate every output verbatim into the synthetic body anyway (zero tokens saved), and the diagnostic would misreport a healthy span - firing on every restart for protected-heavy configs.
+
+**Known limitation.** `flushPending` returns early when there are no pending batches, before chain detection runs at all. A chain stranded in an otherwise-idle session is not healed by `/pruner now` on an empty queue - it heals on the next flush that has any work, or immediately via `/pruner compact`.
+
+**Cache-prefix impact.** Same as any chain compression: rewriting the span busts the prefix cache from that chain's start-user-message onward, once. The deterministic body has no `now()` or LLM nondeterminism, so it renders byte-identical on every subsequent pass - no repeated invalidation from retries or reloads.
+
 ### Deferred
 
 - **Model-driven trigger.** The compressor is autonomous (rolling window). A model-callable compress tool (DCP-style: the model compresses a sub-task as it closes) is not implemented; the earlier scaffolded `agentic-auto` mode + `context_prune` tool were removed in v1.0.0.
 - **Multi-turn span merging.** Each compressed span maps 1:1 to a closed chain (one user -> text-only-assistant round). Merging several consecutive closed spans into one topic summary is future work.
+
+### Single-chain sessions
+
+Phase 3 (chain compression) only ever acts on **closed** chains - a chain closes when a text-only assistant reply follows the tool-call round (see [What a closed chain is](#what-a-closed-chain-is)). A session that runs one long, uninterrupted tool chain - an autonomous agent loop that never emits a text-only reply - never closes a chain, so the rolling window has nothing to compress. The entire run accumulates as one open segment that Phase 3 cannot touch. This is a known design property, not a bug: closed-chain detection is load-bearing for Phase 3's positional-range resolution (`resolveRange`), and there is no forced-close/reopen valve (see [Deferred](#deferred) above and issue #6 - a corpus replay would be needed before any such valve is considered).
+
+Phase 1 (per-batch summarization) is unaffected by chain closure and remains the only lever for this shape of session. For long autonomous runs where no chain is expected to close:
+
+- Lower `autoBudgetThreshold` (e.g. `0.5`-`0.6` instead of `0.8`) so the budget trigger fires well before the open segment dominates the window. On a window larger than 300k the ceiling already caps the trigger point at 300,000 tokens once `threshold * contextWindow` exceeds it - that is any setting at or above `300k / contextWindow` (`0.3` on a 1M window, `0.75` on a 400k one) - so lowering the setting only matters below that point.
+- Set `budgetTurnDelta` so a single turn's sudden context jump force-flushes even between budget-threshold crossings - this catches spikes a static threshold misses until the next turn.
+
+Neither knob makes a chain close; they just keep Phase 1 flushing on schedule so raw toolResults do not pile up unsummarized for the whole run.
+
+**Observability metrics** (`src/context-metrics.ts`, `computeContextMetrics`) exist precisely to make this shape of session visible instead of silently reporting `calls: 1` the way the triggering incident did. All three are chars/4 token estimates (`Math.round`, same convention as the reclaim footer) and surface on `/pruner status` (a `--- context ---` block), the footer status line (a compact suffix, shown only when the frontier gap is non-zero), and a `context-prune-flush-metrics` session entry written once per flush attempt regardless of outcome:
+
+| Metric | Definition |
+|---|---|
+| Open-cycle thinking tokens | Est. tokens of `thinking` content blocks in assistant messages strictly after the last text-only assistant reply (the open segment). Not windowed by the frontier, so a skip/oversized/trivial outcome (which advances the frontier without removing anything from context) never masks stranded thinking as ~0. |
+| Largest-chain share | `max(largest closed chain, open segment)` chars, as a percentage of total branch chars. Interrupted chains count as closed for this purpose - they are retained context regardless of compressibility. A single-chain session's whole branch is its open segment, so this reads near 100% for the incident shape. |
+| Frontier gap | Est. tokens of `ToolResultMessage`s after the persisted prune frontier that are summarization-eligible: not already summarized, not protected (`protectedTools`/`protectedPaths`). 0 when there is nothing left to capture. |
+
+See `doc/specs/2026-08-12-single-chain-observability-trigger-repair.md` for the incident and full design rationale.
+
+### Reload rearm
+
+A reload (`session_start` or `session_tree`) rescans the branch for completed-but-unflushed tool-call batches past the frontier (the same rescan `flushPending` itself uses, no queue reconstruction). If that rescan finds recoverable work, a transient in-memory flag arms: the next `turn_end` evaluates the budget/delta trigger even on a turn that contributes no new tool results itself, instead of silently requiring a fresh batch to reach the gate. No flush runs at reload time - arming only changes what an *existing* trigger sees on the next turn.
+
+The flag clears the moment any flush attempt runs (any outcome) and is re-evaluated on the next reload. A reload followed by total idleness - no further turns at all - gets visibility only: the footer, `/pruner status`, and the `agent_end` pending notice (`prune: recovered pending (reload)`) all reflect the recoverable work, but nothing flushes automatically. This is by design - no immediate flush at boot (print-mode sessions may die under it; a boot-time compact was not requested by the user).
+
+---
+
+## Occurrence Identity
+
+Every lookup keyed on a tool call - the indexer's record map, dedup aliases, `isSummarized`, batch capture - needs a string that uniquely names one *occurrence* of a tool call for the lifetime of a session.
+
+### Why the provider `toolCallId` cannot be that string
+
+A provider's `toolCallId` (e.g. `bash_23`) is unique only within the single response that produced it. Some providers restart a `${tool}_${n}` counter, so the same bare id recurs across turns and across a session, denoting a different tool call each time. The indexer cannot treat it as session-durable identity by itself - see [Identification model](#identification-model-positional-ranges-not-ids) for how chain compression sidesteps the same problem by keying on position instead of id.
+
+### Why `ToolCallRecord.timestamp` cannot serve as the discriminant either
+
+`ToolCallRecord.timestamp` is the *batch's* timestamp, computed once per captured batch (`src/batch-capture.ts`) and shared by every tool call inside that batch - it cannot discriminate between two calls captured together, let alone across a reused id. It is also not computed the way this discriminant would need: the live `turn_end` path stamps it unconditionally with `Date.now()` (`index.ts`'s `turn_end` handler), not from the assistant message's own timestamp. This is exactly why a separate per-tool-call field was needed - `resultTimestamp`, sourced from the `ToolResultMessage`'s own `timestamp` instead of the batch. On reconstruction, `reconstructFromSession` replays whatever value was persisted on the record verbatim; it does not recompute it.
+
+### The key: `id@resultTimestamp`
+
+The one value read identically at capture time and at every later render or rescan is the `ToolResultMessage`'s own `timestamp` field, stamped once by the message itself. `src/occurrence-key.ts` combines it with the bare id:
+
+```
+occKey(toolCallId, resultTimestamp) = `${toolCallId}@${resultTimestamp}`
+```
+
+A record with no `resultTimestamp` is keyed by its bare id - the shape for any record that predates this field, not a separate code path.
+
+**Where the key lives:** `ToolCallRecord.resultTimestamp` and `SummaryToolCallRef.resultTimestamp` (both optional), the dedup-alias pair `newResultTimestamp` / `originalResultTimestamp`, and `ChainCompressionEntry.droppedOccurrenceKeys`. Bare-id and occurrence keys coexist in the same maps: `getRecord` / `isSummarized` compare keys as opaque strings, with no casting between the two shapes.
+
+**`isSummarized` is strict.** It does an exact lookup on the occurrence key (or dedup-alias map) and never falls back to the bare id on a miss. The sole sanctioned bare-id path is `hasLegacyBareRecord(toolCallId)`, true only when the bare id is indexed **and** has no occurrence-keyed siblings (`bareIdToKeys`). A bare id with mixed legacy and occurrence-keyed entries fails closed on both checks - a permissive fallback would stub or recover the wrong occurrence whenever an id was reused.
+
+**Spill sidecars** are named from the occurrence key, so a reused id spills to distinct files per occurrence. Recovery reads the `spillPath` persisted on the record rather than re-deriving it from the id, so bare-id-named sidecars still resolve.
+
+**Render-time (`src/pruner.ts` stub-replace) gates the bare-id fallback on `hasLegacyBareRecord`, not on "message has no timestamp".** The first lookup key is `occKey(msg.toolCallId, msg.timestamp)` when the message carries a `timestamp` (a live `ToolResultMessage` almost always does) or the bare id otherwise. If that first key misses `isSummarized`, the bare id is tried as a second rung - but **only** when `indexer.hasLegacyBareRecord(msg.toolCallId)` is true (bare id indexed, no occurrence-keyed siblings), regardless of whether the message itself carried a timestamp. Gating that second rung on "the message has no timestamp" instead would mean a pure-legacy session (every record captured before `resultTimestamp` existed, so every occurrence-key lookup misses) never stubs at all, since a timestamped message would never even attempt the bare-id rung. A mixed bare+occurrence id still fails closed on both lookups.
+
+### No migration, and the limitation that leaves
+
+A record persisted before `resultTimestamp` existed is bare-keyed and stays that way - `reconstructFromSession` does not scan the branch to retroactively assign it one. No migration runs on load; `hasLegacyBareRecord` is the only accommodation, and it is a derivation (single-key check on `bareIdToKeys`), not a rewrite.
+
+This leaves one accepted, documented exposure: within a session that spans the upgrade, a live tool result whose provider id collides with a pre-upgrade summarized record can be stub-replaced with that record's stale content - the render-time bare-id fallback in `src/pruner.ts` cannot tell the two apart once both denote the same bare `toolCallId` with no occurrence-keyed siblings. New records (both sides occurrence-keyed) are unaffected; the exposure is confined to the pre-upgrade half of a spanning session and disappears entirely once a session contains no legacy records.
+
+### Multi-occurrence recovery via `context_tree_query`
+
+Short refs (`tN`) always resolve 1:1 - one ref, one record - and are the primary, recommended recovery path. A raw provider `toolCallId` passed to `context_tree_query` is looked up against every record that shares it via `getRecordsForId` (`src/indexer.ts`): if the id was reused, the tool returns **every** matching occurrence instead of silently picking one, one block each, chronologically, each labelled `id@timestamp`. This includes occurrences that were content-deduplicated to an earlier record: `getRecordsForId` also scans the dedup-alias map for aliases sharing the queried bare id and returns each aliased occurrence too, labelled with **its own** occurrence timestamp rather than the original's, so a reader can tell the two apart. A record with no `resultTimestamp` caught up in such a set is labelled with the bare id plus an explicit `Occurrence: legacy (no resultTimestamp)` line.
 
 ---
 
@@ -991,7 +1091,7 @@ Error purge replaces those arg bodies with compact stubs after the error has coo
 **Transform position:** Error purge runs in Phase 2, after stub-replace and before chain range prune.
 
 ```
-[stub-replace] → [error-purge] → [chain-range-prune]
+[stub-replace] → [error-purge] → [chain-range-prune] → [orphan-sweep]
 ```
 
 **Config keys:**
@@ -1001,6 +1101,41 @@ Error purge replaces those arg bodies with compact stubs after the error has coo
 | `purgeErrors.enabled` | `true` | Master toggle |
 | `purgeErrors.cooldownTurns` | `2` | Turns to wait after error before purging |
 | `purgeErrors.minArgChars` | `500` | Minimum argument body size to purge |
+
+---
+
+## Orphan Sweep
+
+`pruneMessages` ends with an unconditional structural pass, `sweepOrphanToolResults` (`src/orphan-sweep.ts`): a `toolResult` message whose id was not opened by the immediately preceding assistant turn is removed. It runs after every other phase, over whatever the previous three produced, as a final post-condition rather than a targeted fix for one code path.
+
+**Why it exists.** pi-ai's auto-repair (`insertSyntheticToolResults`) only fills in a missing `toolResult` for an orphaned `toolCall` - it has no equivalent repair for the opposite shape, an orphaned `toolResult` with no matching `toolCall`. Providers reject that shape outright (Anthropic: `unexpected tool_use_id found in tool_result blocks`; Kimi K3: a tool message needs a resolvable preceding tool_call). An orphaned `toolResult` can appear from any combination of id reuse, an unresolved chain range, or a bug in an upstream phase; the sweep is the last line of defense regardless of cause, and it is intentionally not keyed to any provider's specific error string - the fix is structural ("does this id have an open call"), not reactive to how one provider happens to phrase rejection.
+
+**Per-turn, not cumulative, open-call tracking.** The sweep does one forward pass over the message array. Each `assistant` message **replaces** the current "open" id set with its own `toolCall` ids; each `toolResult` message either consumes (removes) a matching id from that set or, if its id is not open, is swept. A cumulative seen-set across the whole array would be wrong here: it would let an id used validly by an early turn license a *later* genuine orphan under the same reused id - exactly the collision scenario this exists to catch. Per-turn tracking means only the immediately preceding assistant turn can vouch for a `toolResult`'s id.
+
+**Provider-agnostic and reference-preserving.** The sweep has no knowledge of which provider is in play; it operates purely on message shape. When nothing is swept it returns the **same array reference** it was given, so a clean render is a true no-op and the no-op / prompt-cache-prefix invariant of `doc/specs/2026-08-04-pruner-noop-serialization.md` holds - the sweep never forces a cache bust on a session where nothing is actually orphaned.
+
+Every swept id is reported once (hashed batch, not per-id) as an `orphan-sweep` diagnostic.
+
+---
+
+## Diagnostics
+
+Prune-time degradations - an unresolvable chain range, a detection/render id mismatch, a swept orphan, a chain with nothing left to backfill - are recorded on an out-of-band channel instead of surfacing in the model's context. `DiagnosticSink` (`src/diagnostics.ts`) writes a `context-prune-diagnostic` session entry (`{ kind, detail }`) for each of four kinds:
+
+| Kind | Emitted from | Meaning |
+|---|---|---|
+| `unresolved-range` | `applyChainCompressions` | A persisted chain entry's boundaries didn't resolve to a unique range (or the range was rejected as nested/duplicate) - the entry compressed nothing |
+| `range-id-mismatch` | `applyChainCompressions` | The ids actually inside a resolved range don't match the entry's recorded `droppedToolCallIds` - informational only, the range still wins |
+| `orphan-sweep` | `pruneMessages` (Phase 4) | One or more `toolResult` messages were removed for having no open matching `toolCall` |
+| `backfill-empty` | `chain-compressor.compressEligible` | A zero-coverage chain's deterministic-backfill span yielded zero extractable records AND zero members already in the index AND the chain is not fully-protected - a genuine span mismatch, not a partial-failure retry state. Fully-protected zero-coverage chains skip silently instead (see [Deterministic fallback § Fully-protected exception](#deterministic-fallback-uncovered-chains)). Deduped per chain start timestamp (`chain.startUserTimestamp`). Widget letter `b` |
+
+**Never in LLM context.** These are session entries only - zero tokens added, zero cache-prefix change, never read back into the message array the model sees.
+
+**Deduped per `(kind, dedupKey)`**, so a permanently degraded condition (e.g. the same chain entry failing to resolve on every render) writes one entry, not one per render. The dedup key is entry-specific: a chain `blockId` for `range-id-mismatch` and for a genuinely unresolvable `unresolved-range`; `overlap:<blockId>` for the same `unresolved-range` kind when the entry was instead skipped as nested inside or duplicating another range's start (a distinct dedup-key prefix keeps the two cases greppable under one kind); and a short hash of the sorted swept-id list for `orphan-sweep` (hashing rather than joining the raw list avoids `DiagnosticSink`'s dedup set retaining an ever-longer key per additional orphan over a session's lifetime). A write is only marked seen after the `appendEntry` call succeeds, so a failed write is retried on the next render instead of being silently dropped.
+
+**Reset on `session_start` and `session_tree`**, matching every other in-memory, non-persisted piece of prune state.
+
+**Surfaced on the status line.** The footer status widget (`setPruneStatusWidget`, gated by `showPruneStatusLine`) appends a self-hiding ` · diag u<N>/m<N>/o<N>/b<N>` segment (u = `unresolved-range`, m = `range-id-mismatch`, o = `orphan-sweep`, b = `backfill-empty`) built from the sink's live counters via `pruneStatusText`. Each letter is omitted when its counter is zero, and the whole segment is absent when all four are zero. `/pruner status` (the slash command) prints a separate settings/stats block and does not include this segment.
 
 ---
 

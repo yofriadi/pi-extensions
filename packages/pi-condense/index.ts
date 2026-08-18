@@ -5,7 +5,7 @@
  *   config       — load/save <agent-dir>/settings.json `contextPrune` namespace (honors PI_CODING_AGENT_DIR)
  *   batch-capture — serialize turn_end event into CapturedBatch
  *   summarizer   — call LLM to summarize a CapturedBatch
- *   indexer      — maintain Map<toolCallId, ToolCallRecord> + session persistence
+ *   indexer      — maintain Map<occurrenceKey, ToolCallRecord> + session persistence
  *   pruner       — filter context event messages
  *   query-tool   — register context_tree_query tool
  *   commands     — register /pruner command + message renderer
@@ -24,13 +24,23 @@ import { isProtected } from "./src/protected.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs } from "./src/summary-refs.js";
-import type { ContextPruneConfig, CapturedBatch, PruneFrontier, FlushOptions } from "./src/types.js";
+import type {
+  ContextPruneConfig,
+  CapturedBatch,
+  PruneFrontier,
+  FlushOptions,
+  ContextMetricsSnapshot,
+  FlushMetricsEntry,
+  FlushTrigger,
+} from "./src/types.js";
 import {
   DEFAULT_CONFIG,
   CUSTOM_TYPE_SUMMARY,
   CUSTOM_TYPE_STATS,
   CUSTOM_TYPE_FRONTIER,
+  CUSTOM_TYPE_FLUSH_METRICS,
 } from "./src/types.js";
+import { computeContextMetrics } from "./src/context-metrics.js";
 import { StatsAccumulator, emitExternalCost } from "./src/stats.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { BlockRefIssuer } from "./src/block-refs.js";
@@ -39,6 +49,10 @@ import { detectChains, withClosingMessage } from "./src/chain-detector.js";
 import { inGraceRecoveryToolCallIds } from "./src/recovery-grace.js";
 import { shouldBudgetFlush, shouldDeltaFlush, usageFraction } from "./src/budget.js";
 import { spillOversizedBatch } from "./src/spill.js";
+import { occKey } from "./src/occurrence-key.js";
+import { DiagnosticSink } from "./src/diagnostics.js";
+
+const EMPTY_METRICS_SNAPSHOT: ContextMetricsSnapshot = { openCycleThinkingTokens: 0, largestChainSharePct: 0, frontierGapTokens: 0 };
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -64,10 +78,53 @@ export default function (pi: ExtensionAPI) {
   // rebuilt from session on session_start / session_tree
   const blockRefs = new BlockRefIssuer();
 
+  // Session-scoped diagnostic sink — tracks recovery-path anomaly counters
+  // (dedup'd across the session's lifetime, not per-render).
+  const diagnostics = new DiagnosticSink((type, data) => pi.appendEntry(type, data));
+
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
   let isFlushing = false;
   let previousFraction: number | null = null;
+  // Set on session_start/session_tree when the branch rescan finds recoverable
+  // work but pendingBatches was just zeroed (reload/tree-switch). Lets the
+  // turn_end budget gate fire without a freshly pushed batch. Boolean only —
+  // no queue reconstruction; flushPending's own rescan is the data path.
+  // Cleared on every non-concurrent flushPending invocation.
+  let rearmedPending = false;
+
+  // Latest ContextMetricsSnapshot, recomputed at reload probes, batch capture,
+  // and flush entry. Cached (rather than recomputed on every widget refresh)
+  // because computeContextMetrics walks the full branch.
+  let metricsCache: ContextMetricsSnapshot | undefined;
+  const computeMetricsSnapshot = (ctx: any): ContextMetricsSnapshot | undefined => {
+    try {
+      // Includes persisted custom_message entries (e.g. this extension's own
+      // summary messages) alongside plain "message" entries: both are retained
+      // LLM context, so both belong in the largest-chain-share denominator.
+      // Projected inline (rather than importing pi-coding-agent's
+      // createCustomMessage) because that helper isn't re-exported from the
+      // package's "." export map -- shape mirrors createCustomMessage's output
+      // (role "custom"), which never matches the user/assistant/toolResult
+      // roles computeContextMetrics keys off, so it only inflates totalChars.
+      const branch = ctx.sessionManager.getBranch()
+        .filter((e: any) => (e.type === "message" && e.message) || e.type === "custom_message")
+        .map((e: any) =>
+          e.type === "custom_message"
+            ? { role: "custom", customType: e.customType, content: e.content, display: e.display, details: e.details, timestamp: new Date(e.timestamp).getTime() }
+            : e.message,
+        );
+      metricsCache = computeContextMetrics(
+        branch,
+        frontier.get(),
+        (k: string) => indexer.isSummarized(k),
+        protectionPredicate,
+      );
+    } catch (err) {
+      console.error("pi-condense: context metrics computation failed", err);
+    }
+    return metricsCache;
+  };
 
   type FlushResult =
     | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-trivial" | "skipped-deduped"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number; dedupedCount?: number }
@@ -103,7 +160,7 @@ export default function (pi: ExtensionAPI) {
     let toolCalls = batch.toolCalls;
 
     // The indexer tells us what was successfully summarized earlier.
-    toolCalls = toolCalls.filter((tc) => !indexer.isSummarized(tc.toolCallId));
+    toolCalls = toolCalls.filter((tc) => !indexer.isSummarized(occKey(tc.toolCallId, tc.resultTimestamp)));
     if (toolCalls.length === 0) return null;
 
     // The frontier tells us the last attempted boundary even when the attempt did
@@ -129,12 +186,18 @@ export default function (pi: ExtensionAPI) {
   // ── Helper: capture + trim + group pending batches (no LLM work) ──────────
   // Exposed to commands.ts via registerCommands so /pruner now can preview the
   // queue before opening the multi-row progress overlay.
-  const capturePendingBatches = (ctx: any): CapturedBatch[] => {
+  // `rethrow` is for the reload rearm probe only (session_start/session_tree):
+  // it needs to observe a rescan failure so it can console.error and leave
+  // rearmedPending false, per spec. Every other caller (turn_end capture path,
+  // flushPending, /pruner commands) keeps the existing swallow-and-fall-back
+  // behavior so a transient getBranch failure there never blocks the turn.
+  const capturePendingBatches = (ctx: any, opts?: { rethrow?: boolean }): CapturedBatch[] => {
     let batches: CapturedBatch[] = [];
     try {
       const branch = ctx.sessionManager.getBranch();
       batches = captureUnindexedBatchesFromSession(branch, indexer, protectionPredicate);
-    } catch {
+    } catch (err) {
+      if (opts?.rethrow) throw err;
       batches = pendingBatches.slice();
     }
     batches = batches
@@ -169,47 +232,97 @@ export default function (pi: ExtensionAPI) {
   const flushPending = async (ctx: any, options: FlushOptions = {}): Promise<FlushResult> => {
     if (isFlushing) return { ok: false, reason: "already-flushing" };
 
-    // Use pre-captured batches if provided (avoids double-capture when the
-    // caller previewed the queue before opening the progress overlay).
-    const batches: CapturedBatch[] = options.previewedBatches ?? capturePendingBatches(ctx);
+    // Clear on every non-concurrent invocation, regardless of outcome — the
+    // rearm is a one-shot nudge for the very next eligible gate check.
+    rearmedPending = false;
 
-    if (batches.length === 0) return { ok: false, reason: "empty" };
-
-    // Bail out before we drain pendingBatches so they don't need restoring.
-    if (options.signal?.aborted) return { ok: false, reason: "aborted" };
-
-    // Draining the queue since we've captured the state via session or slice.
-    // We drain BEFORE the await so concurrent calls (though guarded by isFlushing)
-    // or rapid turn-ends don't result in double-summarization.
-    pendingBatches.length = 0;
-
-    isFlushing = true;
-
+    // Pre-flush pressure snapshot — recorded once at flush entry so the
+    // observability entry reflects what triggered this attempt, not what's
+    // left after it ran.
+    const entryMetrics: ContextMetricsSnapshot = computeMetricsSnapshot(ctx) ?? EMPTY_METRICS_SNAPSHOT;
+    const trigger: FlushTrigger = options.trigger ?? "manual";
     const delivery = options.delivery ?? "runtime";
-    let sessionManager: SessionAppender | undefined;
-    if (delivery === "session") {
+
+    // One-entry-per-attempt tracking, emitted once from the outer `finally`
+    // below. `appendEntry` is assigned only once `sessionManager` is captured
+    // (session delivery); until then (empty/aborted/pre-capture-failure exits)
+    // the emitter falls back to pi.appendEntry.
+    let capturedBatches = 0;
+    let processedCount = 0;
+    let outcome: FlushMetricsEntry["outcome"] = "empty";
+    let appendEntry: ((customType: string, data?: unknown) => void) | undefined;
+
+    // Non-fatal by construction: observability must never affect the flush outcome.
+    const emitFlushMetricsOnce = () => {
+      const entry: FlushMetricsEntry = {
+        ts: Date.now(),
+        trigger,
+        capturedBatches,
+        processedBatches: processedCount,
+        outcome,
+        metrics: entryMetrics,
+      };
+      const appender: (type: string, data: unknown) => void = appendEntry
+        ? delivery === "runtime" ? (type, data) => pi.appendEntry(type, data) : appendEntry
+        : (type, data) => pi.appendEntry(type, data);
       try {
-        sessionManager = ctx.sessionManager as unknown as SessionAppender;
-      } catch (err) {
-        restoreBatches(batches);
-        isFlushing = false;
-        return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
+        appender(CUSTOM_TYPE_FLUSH_METRICS, entry);
+      } catch {
+        // non-fatal: observability must never fail the flush
       }
-    }
+    };
 
-    const appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
-    const appendSummaryMessage = (content: string, details: unknown) =>
-      sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, false, details);
-
-    // Routes alias persistence through whichever delivery is active so the
-    // dedup pre-flush pass writes CUSTOM_TYPE_DEDUP_ALIAS entries via the
-    // same path the rest of the flush uses.
-    const persistAlias: (customType: string, data?: unknown) => void =
-      delivery === "runtime"
-        ? (type, data) => pi.appendEntry(type, data)
-        : appendEntry;
-
+    let batches: CapturedBatch[] = [];
+    let sessionManager: SessionAppender | undefined;
     try {
+      // Bind the session appender as soon as delivery is known, BEFORE the
+      // empty-capture/aborted exits below — so emitFlushMetricsOnce's finally
+      // emit routes through sessionManager for those exits too, instead of
+      // falling back to the (possibly stale, print-mode) pi.appendEntry.
+      if (delivery === "session") {
+        try {
+          sessionManager = ctx.sessionManager as unknown as SessionAppender;
+          appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
+        } catch (err) {
+          outcome = "error";
+          return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
+        }
+      }
+
+      // Use pre-captured batches if provided (avoids double-capture when the
+      // caller previewed the queue before opening the progress overlay).
+      batches = options.previewedBatches ?? capturePendingBatches(ctx);
+      capturedBatches = batches.length;
+
+      if (batches.length === 0) {
+        outcome = "empty";
+        return { ok: false, reason: "empty" };
+      }
+
+      // Bail out before we drain pendingBatches so they don't need restoring.
+      if (options.signal?.aborted) {
+        outcome = "error";
+        return { ok: false, reason: "aborted" };
+      }
+
+      // Draining the queue since we've captured the state via session or slice.
+      // We drain BEFORE the await so concurrent calls (though guarded by isFlushing)
+      // or rapid turn-ends don't result in double-summarization.
+      pendingBatches.length = 0;
+
+      isFlushing = true;
+
+      const appendSummaryMessage = (content: string, details: unknown) =>
+        sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, false, details);
+
+      // Routes alias persistence through whichever delivery is active so the
+      // dedup pre-flush pass writes CUSTOM_TYPE_DEDUP_ALIAS entries via the
+      // same path the rest of the flush uses.
+      const persistAlias: (customType: string, data?: unknown) => void =
+        delivery === "runtime"
+          ? (type, data) => pi.appendEntry(type, data)
+          : appendEntry!;
+
       // ── Pre-flush content-hash dedup pass ────────────────────────────
       // For each tool call, check the indexer's contentHashToOriginal map.
       // A hit means an identical (toolName, normalized resultText) pair has
@@ -233,8 +346,9 @@ export default function (pi: ExtensionAPI) {
           const remaining: typeof batch.toolCalls = [];
           for (const tc of batch.toolCalls) {
             const originalId = indexer.lookupByContent(tc.toolName, tc.resultText);
-            if (originalId && originalId !== tc.toolCallId) {
-              indexer.registerDuplicate(tc.toolCallId, originalId, persistAlias);
+            const key = occKey(tc.toolCallId, tc.resultTimestamp);
+            if (originalId && originalId !== key) {
+              indexer.registerDuplicate(key, originalId, persistAlias);
               dedupedPerBatch[i].toolCalls.push(tc);
               dedupedPerBatch[i].rawChars += tc.resultText.length;
             } else {
@@ -413,7 +527,7 @@ export default function (pi: ExtensionAPI) {
             // `display: false` keeps the summary in future LLM context (convertToLlm
             // ignores `display`) while suppressing the full markdown block from Pi's
             // main window; rebuild keys on customType, not display.
-            const batchToolCallIds = batch.toolCalls.map((tc) => tc.toolCallId);
+            const batchOccurrenceKeys = batch.toolCalls.map((tc) => occKey(tc.toolCallId, tc.resultTimestamp));
             if (delivery === "runtime") {
               pi.sendMessage(
                 { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: false, details: batchDetails },
@@ -424,11 +538,11 @@ export default function (pi: ExtensionAPI) {
             } else {
               appendSummaryMessage(summaryText, batchDetails);
               indexer.registerSummaryRefs(summaryRefs);
-              indexer.addBatch(batch, appendEntry);
+              indexer.addBatch(batch, appendEntry!);
             }
             // Keep the in-memory summary-body registry current so chain compression
             // can build synthetic chain messages without rescanning session entries.
-            indexer.registerSummaryBody(batchToolCallIds, summaryText);
+            indexer.registerSummaryBody(batchOccurrenceKeys, summaryText);
           } else {
             oversizedBatches.push(batch);
           }
@@ -452,7 +566,8 @@ export default function (pi: ExtensionAPI) {
 
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed or first call failed)
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim());
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+        outcome = "error";
         return { ok: false, reason: "summarizer-failed" };
       }
 
@@ -514,18 +629,22 @@ export default function (pi: ExtensionAPI) {
           statsAccum.persist(pi);
         } else {
           frontier.advance(frontierSnapshot);
-          appendEntry(CUSTOM_TYPE_FRONTIER, frontierSnapshot);
+          appendEntry!(CUSTOM_TYPE_FRONTIER, frontierSnapshot);
           try {
-            appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+            appendEntry!(CUSTOM_TYPE_STATS, statsAccum.getStats());
           } catch {
             // Ignore stats persistence failures; the prune result and frontier are the contract.
           }
         }
       } catch (err) {
+        // Batches were summarized/persisted before the frontier/stats write failed;
+        // reflect that in processedBatches rather than reporting 0.
+        processedCount = processedBatches.length;
+        outcome = "error";
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
-      setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim());
+      setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
       emitExternalCost(pi, statsAccum);
 
       // Chain compression — compress closed chains beyond the rolling window.
@@ -536,7 +655,8 @@ export default function (pi: ExtensionAPI) {
           // message_end fires before pi persists the closing assistant, so thread it
           // in here; otherwise the newest chain reads as open and K over-retains by 1.
           // branchMessages was unwrapped once above, gated on chainCompression.enabled.
-          const chains = detectChains(withClosingMessage(branchMessages!, options.closingMessage), protectionPredicate);
+          const detectionMessages = withClosingMessage(branchMessages!, options.closingMessage);
+          const chains = detectChains(detectionMessages, protectionPredicate);
           const inGrace = inGraceRecoveryToolCallIds(branchMessages!, currentConfig.value.recoveryGraceTurns);
           const { compressedEntries } = await compressEligible(
             chains,
@@ -547,6 +667,14 @@ export default function (pi: ExtensionAPI) {
               appendEntry: persistAlias,
               now: () => Date.now(),
               fuseRange: makeFuseRange(ctx),
+              messages: detectionMessages,
+              diagnostics,
+              backfill: {
+                spillThreshold: currentConfig.value.spillThreshold,
+                spillPreviewBytes: currentConfig.value.spillPreviewBytes,
+                sessionDir: ctx.sessionManager.getSessionDir(),
+                sessionId: ctx.sessionManager.getSessionId(),
+              },
             },
             inGrace,
           );
@@ -613,6 +741,12 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Very end of the try block, deliberately after (and outside) the
+      // chain-compression block's own try/catch above: a compression failure
+      // must not eat this entry — the summarization phase already succeeded.
+      processedCount = processedBatches.length;
+      outcome = flushOutcome;
+
       const returnReason: "flushed" | "skipped-oversized" | "skipped-trivial" | "skipped-deduped" =
         actuallyFlushedCount > 0
           ? "flushed"
@@ -633,10 +767,11 @@ export default function (pi: ExtensionAPI) {
       };
     } catch (err) {
       restoreBatches(batches);
+      outcome = "error";
       // When the abort signal fired, summarizeBatch rethrows rather than
       // swallowing the error.  Don't show a UI error — the user intended this.
       if (options.signal?.aborted) {
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim());
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
         return { ok: false, reason: "aborted" };
       }
       if (isStaleContextError(err)) {
@@ -646,6 +781,7 @@ export default function (pi: ExtensionAPI) {
       return { ok: false, reason: "failed", error: errorMessage(err) };
     } finally {
       isFlushing = false;
+      emitFlushMetricsOnce();
     }
   };
 
@@ -663,6 +799,7 @@ export default function (pi: ExtensionAPI) {
     // Rebuild stats accumulator from persisted session entries
     statsAccum.reconstructFromSession(ctx);
     fallbackController.reset();
+    diagnostics.reset();
 
     // Rebuild prune frontier from persisted session entries
     frontier.reconstructFromSession(ctx);
@@ -670,9 +807,19 @@ export default function (pi: ExtensionAPI) {
     // Clear any batches queued before the session reload
     pendingBatches.length = 0;
     previousFraction = null;
+    rearmedPending = false;
+    if (currentConfig.value.enabled) {
+      try {
+        rearmedPending = capturePendingBatches(ctx, { rethrow: true }).length > 0;
+      } catch (err) {
+        console.error("pi-condense: reload rearm probe failed", err);
+      }
+    }
+
+    computeMetricsSnapshot(ctx);
 
     // Update footer status
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim());
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
 
     ctx.ui.setWidget(
       "pruner-boot",
@@ -695,10 +842,22 @@ export default function (pi: ExtensionAPI) {
     indexer.reconstructFromSession(ctx);
     blockRefs.rebuildFrom(indexer.getChainEntries().map((e) => e.blockId));
     statsAccum.reconstructFromSession(ctx);
+    diagnostics.reset();
     frontier.reconstructFromSession(ctx);
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
     previousFraction = null;
+    rearmedPending = false;
+    if (currentConfig.value.enabled) {
+      try {
+        rearmedPending = capturePendingBatches(ctx, { rethrow: true }).length > 0;
+      } catch (err) {
+        console.error("pi-condense: reload rearm probe failed", err);
+      }
+    }
+
+    computeMetricsSnapshot(ctx);
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
   });
 
   // ── turn_end: capture batch, flush immediately or queue ──────────────────
@@ -707,73 +866,91 @@ export default function (pi: ExtensionAPI) {
 
     const hasToolResults = event.toolResults && event.toolResults.length > 0;
 
-    if (!hasToolResults) {
-      // Text-only final turns are handled by message_end in agent-message mode.
-      // In print mode, turn_end can fire after session shutdown, so do not start
-      // deferred LLM work from this late lifecycle event.
-      return;
-    }
+    // Text-only final turns are handled by message_end in agent-message mode.
+    // In print mode, turn_end can fire after session shutdown, so do not start
+    // deferred LLM work from this late lifecycle event — UNLESS a reload probe
+    // (session_start/session_tree) found recoverable pending work: that flag
+    // must still reach the budget/delta gate below without a freshly captured
+    // batch on this turn.
+    if (!hasToolResults && !rearmedPending) return;
 
-    const capturedBatch = captureBatch(
-      event.message,
-      event.toolResults,
-      event.turnIndex,
-      Date.now()
-    );
-    // Drop user-protected tool/path results so they stay verbatim in context.
-    // Filtering at capture time keeps the
-    // underlying assistant `toolCall` block AND its `ToolResultMessage`
-    // untouched in Pi's session/event stream — only the in-memory
-    // CapturedBatch is pruned, which is exactly what we want.
-    const filtered = {
-      ...capturedBatch,
-      toolCalls: capturedBatch.toolCalls.filter((tc) => !isProtected(tc.toolName, tc.args, currentConfig.value)),
-    };
-
-    // Eager spill: offload oversized single results to sidecar files before they
-    // ever reach a request. addBatch inside marks them isSummarized, so
-    // trimBatchToPendingRange drops them from the pending set below. Best-effort:
-    // a spill failure leaves the result inline for the normal flush pipeline.
-    try {
-      await spillOversizedBatch({
-        batch: filtered,
-        indexer,
-        config: {
-          spillThreshold: currentConfig.value.spillThreshold,
-          spillPreviewBytes: currentConfig.value.spillPreviewBytes,
-          dedupByContentHash: currentConfig.value.dedupByContentHash,
-        },
-        sessionDir: ctx.sessionManager.getSessionDir(),
-        sessionId: ctx.sessionManager.getSessionId(),
-        appendEntry: (type, data) => (ctx.sessionManager as unknown as SessionAppender).appendCustomEntry(type, data),
-      });
-    } catch {
-      // best-effort; never block the turn
-    }
-
-    const batch = trimBatchToPendingRange(filtered);
-    if (!batch) return;
-
-    pendingBatches.push(batch);
-
-    // Let the user know a batch is queued
-    const n = pendingBatches.length;
-    const trigger = currentConfig.value.pruneOn === "agent-message"
-      ? "agent's next text response"
-      : "/pruner now";
-    if (currentConfig.value.showPruneStatusLine) {
-      setPruneStatusWidget(ctx, currentConfig.value, `prune: ${n} pending`);
-      safeNotify(
-        ctx,
-        `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
-        "info"
+    let pushedBatch = false;
+    if (hasToolResults) {
+      const capturedBatch = captureBatch(
+        event.message,
+        event.toolResults,
+        event.turnIndex,
+        Date.now()
       );
+      // Drop user-protected tool/path results so they stay verbatim in context.
+      // Filtering at capture time keeps the
+      // underlying assistant `toolCall` block AND its `ToolResultMessage`
+      // untouched in Pi's session/event stream — only the in-memory
+      // CapturedBatch is pruned, which is exactly what we want.
+      const filtered = {
+        ...capturedBatch,
+        toolCalls: capturedBatch.toolCalls.filter((tc) => !isProtected(tc.toolName, tc.args, currentConfig.value)),
+      };
+
+      // Eager spill: offload oversized single results to sidecar files before they
+      // ever reach a request. addBatch inside marks them isSummarized, so
+      // trimBatchToPendingRange drops them from the pending set below. Best-effort:
+      // a spill failure leaves the result inline for the normal flush pipeline.
+      try {
+        await spillOversizedBatch({
+          batch: filtered,
+          indexer,
+          config: {
+            spillThreshold: currentConfig.value.spillThreshold,
+            spillPreviewBytes: currentConfig.value.spillPreviewBytes,
+            dedupByContentHash: currentConfig.value.dedupByContentHash,
+          },
+          sessionDir: ctx.sessionManager.getSessionDir(),
+          sessionId: ctx.sessionManager.getSessionId(),
+          appendEntry: (type, data) => (ctx.sessionManager as unknown as SessionAppender).appendCustomEntry(type, data),
+        });
+      } catch {
+        // best-effort; never block the turn
+      }
+
+      const batch = trimBatchToPendingRange(filtered);
+      if (batch) {
+        pushedBatch = true;
+        pendingBatches.push(batch);
+
+        // Let the user know a batch is queued
+        const n = pendingBatches.length;
+        const trigger = currentConfig.value.pruneOn === "agent-message"
+          ? "agent's next text response"
+          : "/pruner now";
+        if (currentConfig.value.showPruneStatusLine) {
+          setPruneStatusWidget(ctx, currentConfig.value, `prune: ${n} pending`);
+          safeNotify(
+            ctx,
+            `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
+            "info"
+          );
+        }
+      }
     }
+
+    // Recompute regardless of whether trim produced a batch: a turn whose
+    // toolResults are all protected/spilled/summarized/trimmed-empty still
+    // changes the branch (thinking, open-segment size), so the cache must not
+    // go stale on it. Placed before the pushedBatch/rearmedPending early
+    // return below — a cache write is not gate evaluation.
+    if (hasToolResults) computeMetricsSnapshot(ctx);
+
+    // Mirrors main's `if (!batch) return;`: no freshly pushed batch this turn
+    // means no gate evaluation, regardless of leftover pendingBatches from an
+    // earlier turn — UNLESS a reload probe armed rearmedPending, in which case
+    // the gate below must still run.
+    if (!pushedBatch && !rearmedPending) return;
 
     // Token-budget auto-flush: an additional, mode-independent trigger. When context
     // usage crosses autoBudgetThreshold, compact the queued batches now instead of
-    // waiting for this mode's flush boundary. The pendingBatches.length guard makes
-    // an already-drained queue a no-op.
+    // waiting for this mode's flush boundary. The pendingBatches.length-or-rearmed
+    // guard makes an already-drained, non-rearmed queue a no-op.
     const usage = ctx.getContextUsage?.();
     const budgetHit = shouldBudgetFlush(usage, currentConfig.value.autoBudgetThreshold);
     const deltaHit = shouldDeltaFlush(usage, previousFraction, currentConfig.value.budgetTurnDelta);
@@ -782,16 +959,19 @@ export default function (pi: ExtensionAPI) {
     const f = usageFraction(usage);
     if (f != null) previousFraction = f;
 
-    if (pendingBatches.length > 0 && !isFlushing && (budgetHit || deltaHit)) {
+    const n = pendingBatches.length;
+    if ((n > 0 || rearmedPending) && !isFlushing && (budgetHit || deltaHit)) {
       // Always surface this flush (even when the routine status line is off): it's a
       // significant, infrequent event — context crossed a threshold or jumped sharply
       // this turn — and it self-throttles because pendingBatches is drained right after.
       safeNotify(
         ctx,
-        `pruner: ${budgetHit ? "context budget reached" : "context jumped this turn"} — compacting ${n} pending turn${n === 1 ? "" : "s"}`,
+        n > 0
+          ? `pruner: ${budgetHit ? "context budget reached" : "context jumped this turn"} — compacting ${n} pending turn${n === 1 ? "" : "s"}`
+          : `pruner: ${budgetHit ? "context budget reached" : "context jumped this turn"} — compacting work recovered after reload`,
         "info",
       );
-      await flushPending(ctx, { delivery: "session" });
+      await flushPending(ctx, { delivery: "session", trigger: n === 0 ? "rearmed" : budgetHit ? "budget" : "delta" });
     }
   });
 
@@ -804,7 +984,7 @@ export default function (pi: ExtensionAPI) {
     if (!currentConfig.value.enabled) return;
     if (currentConfig.value.pruneOn !== "agent-message") return;
     if (!isFinalAssistantMessage(event.message)) return;
-    await flushPending(ctx, { delivery: "session", closingMessage: event.message });
+    await flushPending(ctx, { delivery: "session", closingMessage: event.message, trigger: "message-end" });
   });
 
   // ── agent_end: last-chance cleanup only ─────────────────────────────────────
@@ -812,8 +992,12 @@ export default function (pi: ExtensionAPI) {
   // already be disposing the session, so avoid starting a best-effort LLM call here.
   pi.on("agent_end", async (_event, ctx) => {
     if (!currentConfig.value.enabled) return;
-    if (pendingBatches.length === 0) return;
-    setPruneStatusWidget(ctx, currentConfig.value, `prune: ${pendingBatches.length} pending`);
+    if (pendingBatches.length === 0 && !rearmedPending) return;
+    setPruneStatusWidget(
+      ctx,
+      currentConfig.value,
+      pendingBatches.length > 0 ? `prune: ${pendingBatches.length} pending` : "prune: recovered pending (reload)",
+    );
   });
 
   // ── context: prune summarized tool results from next LLM call ─────────────
@@ -825,7 +1009,7 @@ export default function (pi: ExtensionAPI) {
 
     // pruneMessages is the single source of truth for "is there work to do".
     // It returns the original array reference (pruned: false) only when none of
-    // the three phases changed anything; index/registry emptiness alone does not
+    // the four phases changed anything; index/registry emptiness alone does not
     // imply a no-op, since error-purge (phase 2) prunes independently of them.
     // Calling it unconditionally is safe and avoids a split gate here.
     const result = pruneMessages(
@@ -835,13 +1019,14 @@ export default function (pi: ExtensionAPI) {
       currentConfig.value.purgeErrors,
       currentConfig.value,
       currentConfig.value.recoveryGraceTurns,
+      diagnostics,
     );
     if (result.pruned) {
       messages = result.messages;
       changed = true;
       statsAccum.setLiveReclaim(result.beforeChars, result.afterChars);
     }
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim());
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
 
     if (!changed) return undefined;
     return { messages };
@@ -867,6 +1052,14 @@ export default function (pi: ExtensionAPI) {
         appendEntry: (type: string, data: unknown) => pi.appendEntry(type, data),
         now: () => Date.now(),
         fuseRange: makeFuseRange(ctx),
+        messages: branchMessages,
+        diagnostics,
+        backfill: {
+          spillThreshold: currentConfig.value.spillThreshold,
+          spillPreviewBytes: currentConfig.value.spillPreviewBytes,
+          sessionDir: ctx.sessionManager.getSessionDir(),
+          sessionId: ctx.sessionManager.getSessionId(),
+        },
       },
       inGrace,
     );
@@ -878,5 +1071,18 @@ export default function (pi: ExtensionAPI) {
     return { compressedEntries: result.compressedEntries, skipped: result.skipped.filter((s) => s.reason === "no-summary").length };
   };
 
-  registerCommands(pi, currentConfig, flushPending, capturePendingBatches, () => statsAccum.getStats(), () => statsAccum.getLiveReclaim(), indexer, compactChains);
+  registerCommands(
+    pi,
+    currentConfig,
+    flushPending,
+    capturePendingBatches,
+    () => statsAccum.getStats(),
+    () => statsAccum.getLiveReclaim(),
+    indexer,
+    compactChains,
+    () => diagnostics.counts(),
+    (ctx: any) => computeMetricsSnapshot(ctx) ?? EMPTY_METRICS_SNAPSHOT,
+    () => metricsCache,
+    () => rearmedPending,
+  );
 }

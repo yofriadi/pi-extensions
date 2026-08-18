@@ -10,7 +10,7 @@
  *   event.toolResults = ToolResultMessage[] (one per tool call in this turn)
  *
  * STATE MODEL (Ph1 step 3):
- *   - Runtime state: Map<toolCallId, ToolCallRecord> rebuilt on session_start
+ *   - Runtime state: Map<occurrenceKey, ToolCallRecord> rebuilt on session_start
  *   - Session metadata: pi.appendEntry("context-prune-index", IndexEntryData)
  *     stored once per summarized batch; NOT in LLM context
  *   - User config: .pi/settings.json → "contextPrune" key (JSON merge safe,
@@ -78,6 +78,29 @@ export const CUSTOM_TYPE_DEDUP_ALIAS = "context-prune-dedup-alias";
  * Written by `chain-compressor.compressEligible` at the tail of `flushPending` and via `/pruner compact`.
  */
 export const CUSTOM_TYPE_CHAIN = "context-prune-chain";
+
+/**
+ * Written via pi.appendEntry(CUSTOM_TYPE_DIAGNOSTIC, data) when a prune-time
+ * invariant degrades. NOT in LLM context: zero tokens, zero cache-prefix
+ * change. Deduplication is a runtime concern of the diagnostic sink
+ * (src/diagnostics.ts), which takes a caller-supplied dedup key and never
+ * persists it - the persisted entry carries only `kind` plus a freeform `detail`.
+ */
+export const CUSTOM_TYPE_DIAGNOSTIC = "context-prune-diagnostic";
+
+/**
+ * Per-flush-attempt observability record. Written once per non-concurrent
+ * flushPending invocation, regardless of outcome (including "empty" and
+ * "error"). Append-only log: never in LLM context, never reconstructed.
+ */
+export const CUSTOM_TYPE_FLUSH_METRICS = "context-prune-flush-metrics";
+
+export type DiagnosticKind = "unresolved-range" | "range-id-mismatch" | "orphan-sweep" | "backfill-empty";
+
+export interface DiagnosticEntryData {
+  kind: DiagnosticKind;
+  detail: string;
+}
 
 /** The registered name of the recovery tool (src/query-tool.ts). Shared so the
  * grace checks in pruner.ts / chain-compressor.ts cannot drift from registration. */
@@ -229,7 +252,8 @@ export const SUMMARIZER_CONCURRENCY_PRESETS: { value: string; label: string }[] 
 /**
  * Cycling presets for the `autoBudgetThreshold` setting (stored as strings;
  * the settings UI cycles string values). "0" is the disabled sentinel → null.
- * Other values are 0–1 fractions of the context window (e.g. "0.8" = flush at 80%).
+ * Other values are 0–1 fractions of the context window (e.g. "0.8" = flush at
+ * 80% of the window, or at MAX_BUDGET_WINDOW tokens, whichever comes first).
  */
 export const AUTO_BUDGET_PRESETS: { value: string; label: string }[] = [
   { value: "0", label: "Off (default)" },
@@ -384,10 +408,14 @@ export interface ContextPruneConfig {
   /**
    * Token-budget auto-flush trigger. A fraction in (0, 1] (a 0–1 share of the
    * context window, NOT a 0–100 percentage; e.g. 0.8 = flush at 80% of the
-   * window). When set, a flush of all pending batches is forced at the end of
-   * any tool-using turn once context usage (tokens / contextWindow) reaches the
-   * threshold — regardless of `pruneOn`. An ADDITIONAL trigger on top of
-   * `pruneOn`, not a replacement.
+   * window, capped at 300k tokens - see below). When set, a flush of all
+   * pending batches is forced at the end of
+   * any tool-using turn once context usage reaches `threshold * contextWindow`
+   * tokens OR 300,000 tokens (MAX_BUDGET_WINDOW in src/budget.ts), whichever
+   * comes first — regardless of `pruneOn`. The ceiling keeps the setting
+   * reachable on huge-window models, where 0.9 of 1M would mean 900k tokens; it
+   * never binds on a model advertising 300k or less. An ADDITIONAL trigger on
+   * top of `pruneOn`, not a replacement.
    *
    * null (default) = disabled, preserving pre-feature behavior. Out-of-range
    * values (<= 0 or > 1) normalize to null.
@@ -399,7 +427,11 @@ export interface ContextPruneConfig {
   spillPreviewBytes: number;
   /**
    * Per-turn usage-fraction increase (0–1) that forces a flush, independent of
-   * autoBudgetThreshold. null (default) = disabled. Out-of-range (<= 0 or > 1) normalizes to null.
+   * autoBudgetThreshold. The fraction is measured against the effective window
+   * `min(contextWindow, MAX_BUDGET_WINDOW)` (300_000), so the required growth is
+   * `delta * min(contextWindow, MAX_BUDGET_WINDOW)` tokens - e.g. 0.1 means +30k
+   * tokens in one turn on any model at or above 300k, and +20k on a 200k model.
+   * null (default) = disabled. Out-of-range (<= 0 or > 1) normalizes to null.
    */
   budgetTurnDelta: number | null;
 }
@@ -417,13 +449,22 @@ export interface ChainRange {
   /** Timestamp of the user message that opens the chain. */
   startUserTimestamp: number;
   /**
-   * All toolCallIds in the chain's middle (deduplicated).
-   * Collected from both AssistantMessage ToolCall blocks AND matching
-   * ToolResultMessages. Used to: (1) drop ToolResultMessages, (2) identify
-   * and drop middle AssistantMessages, (3) suppress per-batch summary
-   * CustomMessages whose toolCallRefs overlap.
+   * All toolCallIds in the chain's middle (deduplicated). Collected from both
+   * AssistantMessage ToolCall blocks AND matching ToolResultMessages.
+   * Identifies the chain's middle tool calls for detection, recovery-grace
+   * filtering and diagnostics. NOT used for the load-bearing indexer lookups
+   * (summary bodies, tool refs) - those maps are occurrence-keyed, so use
+   * the sibling `middleOccurrenceKeys` instead. Drops themselves are decided
+   * positionally by `resolveRange` in chain-range-prune.ts, not by these ids.
    */
   middleToolCallIds: string[];
+  /**
+   * Occurrence keys (`id@resultTimestamp`) for the chain's middle tool
+   * results, collected from the ToolResultMessages themselves. Used for
+   * indexer summary-body / toolRef lookups, which are occurrence-keyed.
+   * Optional so hand-built ChainRange fixtures need not set it.
+   */
+  middleOccurrenceKeys?: string[];
   /**
    * Subset of middleToolCallIds whose tool name ∈ protectedTools (detection-time
    * fact). The detector always emits it ([] when no protected tool ran); optional
@@ -445,12 +486,19 @@ export interface ChainCompressionEntry {
   /** Timestamp of the user message that opens the chain. Keep raw; synthetic inserted after. */
   startUserTimestamp: number;
   /**
-   * ToolCallIds of all dropped middle messages.
-   * Used at context-transform time to: drop matching ToolResultMessages,
-   * drop AssistantMessages that contain any of these as ToolCall blocks,
-   * and suppress per-batch summary messages whose toolCallRefs overlap.
+   * All toolCallIds in the chain's middle. **Diagnostic only** since the
+   * positional-range change: drops are decided by index range (see
+   * resolveRange in chain-range-prune.ts). Retained as a cross-check - a
+   * mismatch against the ids actually dropped emits `range-id-mismatch`.
    */
   droppedToolCallIds: string[];
+  /**
+   * Occurrence keys for the same calls as droppedToolCallIds. Load-bearing at
+   * render time: summaryBodies are occurrence-keyed, so the synthetic chain
+   * body is looked up by these. Absent on pre-upgrade entries, which fall back
+   * to droppedToolCallIds against their own bare-keyed summaryBodies.
+   */
+  droppedOccurrenceKeys?: string[];
   /**
    * Subset of droppedToolCallIds whose tool was user-protected. Membership is decided
    * per call by tool name (every call whose name ∈ protectedTools), not a per-id allowlist.
@@ -477,6 +525,12 @@ export interface ChainCompressionEntry {
    * Absent on fusion failure / single-batch spans → renderer falls back to concat.
    */
   rangeSummaryText?: string;
+  /**
+   * "deterministic" = zero-LLM synthetic body built by the uncovered-chain
+   * backfill path (rangeSummaryText holds the stub). Absent = LLM-fused or
+   * per-batch semantics, unchanged.
+   */
+  bodySource?: "deterministic";
 }
 
 export interface ChainCompressionConfig {
@@ -544,6 +598,13 @@ export interface CapturedToolCall {
   args: Record<string, unknown>;
   resultText: string;
   isError: boolean;
+  /**
+   * Timestamp of the ToolResultMessage this call was paired with. The
+   * occurrence discriminant (see src/occurrence-key.ts): provider ids repeat
+   * within a session, this does not. Optional so pre-upgrade persisted
+   * entries stay readable; absent => the record is legacy bare-id keyed.
+   */
+  resultTimestamp?: number;
   spillPath?: string;
   spillBytes?: number;
   resultPreview?: string;
@@ -586,6 +647,8 @@ export interface ToolCallRecord {
   isError: boolean;
   turnIndex: number;
   timestamp: number;
+  /** See CapturedToolCall.resultTimestamp. */
+  resultTimestamp?: number;
   /** Absolute path to the sidecar blob holding the full body (set only when the result was spilled). */
   spillPath?: string;
   /** Full byte length of the spilled body. */
@@ -604,6 +667,10 @@ export interface ToolCallRecord {
  */
 export interface IndexEntryData {
   toolCalls: ToolCallRecord[];
+  /** Entry written by backfillChainRecords: records must NOT seed contentHashToOriginal. */
+  backfilled?: true;
+  /** Refs allocated at backfill time; durable carrier for alias reconstruction. */
+  refs?: SummaryToolCallRef[];
 }
 
 /**
@@ -624,6 +691,9 @@ export interface IndexEntryData {
 export interface DedupAliasEntryData {
   newToolCallId: string;
   originalToolCallId: string;
+  /** Occurrence timestamps for each side; absent on pre-upgrade entries. */
+  newResultTimestamp?: number;
+  originalResultTimestamp?: number;
   hash?: string;
 }
 
@@ -634,6 +704,8 @@ export interface DedupAliasEntryData {
 export interface SummaryToolCallRef {
   shortId: string;
   toolCallId: string;
+  /** ToolResultMessage timestamp; with toolCallId this forms the occurrence key. */
+  resultTimestamp?: number;
 }
 
 /**
@@ -645,6 +717,30 @@ export interface SummaryMessageDetails {
   toolNames: string[];
   turnIndex: number;
   timestamp: number;
+}
+
+/** Snapshot of what the pruner cannot (yet) reclaim. All token values are Math.round(JSON-chars / 4). */
+export interface ContextMetricsSnapshot {
+  /** Est. tokens of thinking blocks retained in the trailing open segment. */
+  openCycleThinkingTokens: number;
+  /** max(largest closed chain, open segment) chars / total branch chars, 0-100. */
+  largestChainSharePct: number;
+  /** Est. tokens of summarization-eligible unsummarized toolResults after the frontier. */
+  frontierGapTokens: number;
+}
+
+export type FlushTrigger = "budget" | "delta" | "message-end" | "manual" | "rearmed";
+
+/** Payload of CUSTOM_TYPE_FLUSH_METRICS. */
+export interface FlushMetricsEntry {
+  ts: number;
+  trigger: FlushTrigger;
+  /** Batches after rescan+trim, before processing. */
+  capturedBatches: number;
+  processedBatches: number;
+  outcome: "summarized" | "skipped-oversized" | "skipped-deduped" | "skipped-trivial" | "empty" | "error";
+  /** Computed at flush ENTRY (pre-flush pressure). */
+  metrics: ContextMetricsSnapshot;
 }
 
 // ── Summarizer stats ────────────────────────────────────────────────────────
@@ -769,6 +865,8 @@ export interface FlushOptions {
    * the frontier. All pending batches are restored so the next flush can retry.
    */
   signal?: AbortSignal;
+  /** Which trigger initiated this flush. Defaults to "manual" when absent. */
+  trigger?: FlushTrigger;
   /**
    * The final text-only assistant message that triggered an agent-message flush.
    * pi emits `message_end` to extensions before persisting it to the session, so it

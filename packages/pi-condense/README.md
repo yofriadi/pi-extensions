@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/jjuraszek/pi-condense/main/pi-condense.png" alt="pi-condense" width="180">
+  <img src="https://raw.githubusercontent.com/yofriadi/pi-condense/local/main/pi-condense.png" alt="pi-condense" width="180">
 </p>
 
 # pi-condense
@@ -53,7 +53,7 @@ flowchart LR
 ## Quick example
 
 ```bash
-pi install npm:pi-condense
+pi install npm:@yofriadi/pi-condense
 ```
 
 ```bash
@@ -80,11 +80,33 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 | Term | Meaning |
 |---|---|
 | Stub | The short breadcrumb (`[Summarized in pruner summary, ref \`t1\`...]`) that replaces a pruned tool result in context |
-| `context_tree_query` | The tool the model calls to recover a stubbed original by ref |
+| `context_tree_query` | The tool the model calls to recover a stubbed original by ref (`tN`) or `toolCallId`. A reused id returns every matching occurrence, not just one, including any that were content-deduplicated to an earlier record - see [PRUNING.md § Occurrence Identity](PRUNING.md#occurrence-identity) |
 | Batch vs chain | A batch is one flush's worth of tool calls; a chain is a longer closed sequence eligible for range compression |
 | Prune frontier | The last attempted prune boundary - advances even on a skip, so nothing is reconsidered twice |
+| Diagnostics (`diag u/m/o/b`) | A self-hiding status-line segment surfacing prune-time degradations: `u` = unresolved chain range, `m` = detection/render id mismatch (informational, does not change what's dropped), `o` = orphan tool-result sweep, `b` = a zero-coverage chain with nothing left to backfill (genuine span mismatch, see below). Each letter's count is omitted when zero; the whole segment disappears when all four are zero. Backing session entries are `context-prune-diagnostic` - see below |
+| Context metrics (`think`/`gap`/`chain`) | Open-cycle thinking tokens, largest-chain share, frontier gap - what the pruner cannot (yet) reclaim, notably in single-chain sessions. See below and [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) |
 | Prompt-cache interaction | Why batching (not per-turn pruning) is the default - see [PRUNING.md](PRUNING.md#how-prefix-caching-works) |
 | `cost:external` | The shared cost-reporting channel pi-condense emits on (see above) |
+
+### Diagnostic entries (`context-prune-diagnostic`)
+
+The status-line `diag u<N>/m<N>/o<N>/b<N>` segment above is backed by `context-prune-diagnostic` session entries - session-log-only, never added to what the model sees. Full mechanics: [PRUNING.md § Diagnostics](PRUNING.md#diagnostics).
+
+### Uncovered chains compress too
+
+`/pruner compact` and the automatic flush both compress eligible chains **even when no per-batch summary ever covered them** - a trivial batch, an oversized-skip, a fully-deduped batch, or a plain capture miss all used to strand the chain permanently with a `no-summary` skip. These chains now get a deterministic, zero-LLM-cost stub body (call count, tool histogram, span duration, working `t<N>` refs) instead; the raw tool outputs are archived exactly like the covered path and stay recoverable via `context_tree_query`. **Exception:** a zero-coverage chain whose middle calls are *all* protected stays uncompressed (plain `no-summary` skip, no diagnostic) - every output would relocate verbatim into the synthetic body anyway, so compressing saves nothing. Full mechanics: [PRUNING.md § Deterministic fallback (uncovered chains)](PRUNING.md#deterministic-fallback-uncovered-chains).
+
+**Limitation:** a chain stranded in an otherwise-idle session is not healed by `/pruner now` on an empty queue (the flush returns early before chain detection runs at all) - it heals on the next flush that has any work, or immediately via `/pruner compact`.
+
+### Context metrics (`context-prune-flush-metrics`)
+
+Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in three places, all backed by `computeContextMetrics` (`src/context-metrics.ts`):
+
+- `/pruner status` prints a `--- context ---` block: `thinking:`, `chain share:`, `frontier gap:`, plus a `rearmed: yes` line while a reload-rearm probe (below) has recoverable work armed.
+- The footer status line appends `· think Nk · gap Nk · chain P%` - only when the frontier gap is non-zero, so an idle session's footer is unchanged.
+- Each flush attempt (every outcome, including empty/error) writes one `context-prune-flush-metrics` session entry with the pre-flush snapshot - session-log-only, never added to what the model sees, and not reconstructed on reload.
+
+These are most informative for long single-chain sessions where Phase 3 (chain compression) never gets a closed chain to act on - see [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) for the limitation and config guidance, and [PRUNING.md § Reload rearm](PRUNING.md#reload-rearm) for how a reload with recoverable pending work re-arms the automatic flush trigger.
 
 ## When to use / when NOT to use
 
@@ -101,37 +123,37 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 
 ## Install
 
-Published to npm as [`pi-condense`](https://www.npmjs.com/package/pi-condense).
+Published to npm as [`@yofriadi/pi-condense`](https://www.npmjs.com/package/@yofriadi/pi-condense).
 
 **User scope** (all repos under your pi profile):
 
 ```bash
-pi install npm:pi-condense
+pi install npm:@yofriadi/pi-condense
 ```
 
 **Project scope** (current repo only, committable via `.pi/settings.json`):
 
 ```bash
-pi install -l npm:pi-condense
+pi install -l npm:@yofriadi/pi-condense
 ```
 
 **Try without installing**:
 
 ```bash
-pi -e npm:pi-condense
+pi -e npm:@yofriadi/pi-condense
 ```
 
 **From a local checkout** (for hacking on the extension itself):
 
 ```bash
-git clone git@github.com:jjuraszek/pi-condense.git ~/repos/pi-condense
+git clone git@github.com:yofriadi/pi-condense.git ~/repos/pi-condense
 cd ~/path/to/your/repo
 pi install -l ~/repos/pi-condense
 # or one-shot, no install:
 pi -e ~/repos/pi-condense/index.ts
 ```
 
-Pin a specific version with `npm:pi-condense@X.Y.Z`. Upgrade by re-running `pi install`. Remove with `pi remove pi-condense`. Once installed, the extension auto-loads on every `pi` invocation; no flags needed. See [CHANGELOG.md](CHANGELOG.md) for release history.
+Pin a specific version with `npm:@yofriadi/pi-condense@X.Y.Z`. Upgrade by re-running `pi install`. Remove with `pi remove @yofriadi/pi-condense`. Once installed, the extension auto-loads on every `pi` invocation; no flags needed. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 By default the extension is **off**. `/pruner on` enables it and it stays enabled across sessions in the same pi agent directory.
 
@@ -144,7 +166,7 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 | `enabled` | `false` | Master switch (or just use `/pruner on`) |
 | `summarizerModel` | `"default"` | Pin a cheap model instead of reusing your active one - see the plan-by-plan table in [doc/configuration.md](doc/configuration.md#choosing-a-summarizer-model) |
 | `pruneOn` | `agent-message` | Trigger mode - see Architecture above |
-| `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn` |
+| `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn`; the trigger point is capped at 300k tokens |
 | `summarizerConcurrency` | `4` | Max simultaneous summarizer calls during a flush fan-out. `0` = unbounded (previous behavior) |
 | `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md"]` | Tool names / path globs that are never pruned |
 | `spillThreshold` | `65536` | Chars above which a single oversized result spills straight to a sidecar file |
