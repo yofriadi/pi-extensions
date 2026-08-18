@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -39,8 +41,19 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME ($tag) does not match package.json version $pkg"
             exit 1
           fi
+      - name: Verify tag is reachable from local/main
+        run: |
+          git fetch origin local/main:refs/remotes/origin/local/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/local/main; then
+            echo "::error::release tag $GITHUB_REF_NAME is not reachable from local/main"
+            exit 1
+          fi
+      - name: Typecheck
+        run: bun run typecheck
       - name: Run tests
         run: bun test src/
+      - name: Verify release helper
+        run: bash scripts/test-release-helper.sh
       - name: Publish to npm
         run: npm publish --provenance --access public
 

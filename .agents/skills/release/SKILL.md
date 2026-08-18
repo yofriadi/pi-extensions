@@ -14,10 +14,10 @@ lists it on `https://pi.dev/packages/@yofriadi/pi-condense`. Users install with
 `pi install npm:@yofriadi/pi-condense`.
 
 The release is **tag-driven and CI-executed**: pushing a `vX.Y.Z` tag triggers
-`.github/workflows/release.yml`, which gates on `tag == package.json`, runs
-`bun test src/`, and runs `npm publish --provenance --access public` via
-**OIDC trusted publishing**. The local flow only assigns the version and pushes
-the tag; **never run `npm publish` by hand.**
+`.github/workflows/release.yml`, which gates on `tag == package.json`, verifies the
+tag commit is reachable from `local/main`, runs `bun run typecheck` and `bun test src/`,
+and runs `npm publish --provenance --access public` via **OIDC trusted publishing**. The
+local flow only assigns the version and pushes the tag; **never run `npm publish` by hand.**
 
 Releases are cut only from `local/main`, the fork's default branch; never release the upstream-tracking `main` branch.
 
@@ -57,9 +57,9 @@ leading `v`.
 bash .agents/skills/release/scripts/release.sh propose
 ```
 
-Present the commits, the heuristic level, and the resulting `X.Y.Z` with a
-one-line rationale tied to specific commits. **Stop and wait** for the user to
-accept or override. Never pick the level and proceed in one step.
+Present commits since the nearest reachable SemVer release tag (`vX.Y.Z`), the
+heuristic level, and the resulting `X.Y.Z` with a one-line rationale tied to those commits.
+Baseline tags such as `subtree-v2.9.0+local` are intentionally ignored. Stop and wait for the user to accept or override.
 
 ### 2. Move the CHANGELOG entry
 
@@ -75,8 +75,8 @@ bash .agents/skills/release/scripts/release.sh --dry-run minor   # preview, no c
 ```
 
 The script verifies `local/main` + a clean tree, bumps `package.json`, commits
-`Release <version>`, runs `bun test src/` as a pre-flight, creates the
-annotated tag, pushes `local/main` + the tag, then chains straight into verification.
+`Release <version>`, runs `bun run typecheck && bun test src/` as a pre-flight, creates
+the annotated tag, pushes `local/main` + the tag, then chains straight into verification.
 `current` tags the version already in `package.json` (commit your work first).
 
 ### 4. Verification (the script runs this automatically after a push)
@@ -114,7 +114,7 @@ Refuse to proceed unless ALL hold; report which failed, do not silently fix:
 - working tree clean (for `current`, commit feature work first)
 - releasing from `local/main`
 - the target `vX.Y.Z` tag does not already exist (the script enforces this)
-- `bun test src/` passes (the script's pre-flight; also the CI gate)
+- `bun run typecheck && bun test src/` passes (the script's pre-flight; also the CI gate)
 
 ## Red Flags - STOP
 
