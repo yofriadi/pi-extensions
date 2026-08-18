@@ -8,7 +8,7 @@
 		"update:pi-accounts": "bash scripts/update-pi-accounts-subtree.sh",
 		"update:pi-condense": "bash scripts/update-pi-condense-subtree.sh",
 		"update:session-recap": "bash scripts/update-session-recap-subtree.sh",
-		"check": "biome check . && tsc --noEmit -p packages/pi-accounts/tsconfig.json && tsc --noEmit -p packages/pi-provider-antigravity/tsconfig.json && tsc --noEmit -p packages/pi-session-recap/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
+		"check": "biome check . && pnpm --filter @yofriadi/pi-condense run typecheck && tsc --noEmit -p packages/pi-accounts/tsconfig.json && tsc --noEmit -p packages/pi-provider-antigravity/tsconfig.json && tsc --noEmit -p packages/pi-session-recap/tsconfig.json && tsc --noEmit -p packages/pi-toon/tsconfig.json",
 		"check:fix": "biome check --write .",
 		"prepare": "prek install",
 		"fallow": "fallow",
