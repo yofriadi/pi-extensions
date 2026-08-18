@@ -152,18 +152,23 @@ describe("direct subagent launch path", () => {
 			assert.equal(running.agent, "reviewer");
 			assert.equal(running.parentSessionId, sessionId);
 			assert.equal(running.surface, "pane-direct-launch");
-			assert.equal(running.entryCountBefore, 1);
+			assert.equal(running.entryCountBefore, 2);
 			assert.equal(running.sessionLease?.state, "running");
 			assert.equal(runningSubagents.get(runId), running);
 			assert.equal(existsSync(running.sessionFile), true);
 			assert.equal(existsSync(`${running.sessionFile}.owner.json`), true);
 
-			const sessionHeader = JSON.parse(readFileSync(running.sessionFile, "utf8").trim());
+			const lines = readFileSync(running.sessionFile, "utf8").trim().split("\n");
+			const sessionHeader = JSON.parse(lines[0]);
 			assert.equal(sessionHeader.type, "session");
 			assert.equal(sessionHeader.cwd, context.cwd);
 			assert.equal(sessionHeader.parentSession, context.sessionFile);
 			assert.equal(sessionHeader.subagentOwner.agentId, "reviewer");
 			assert.equal(sessionHeader.subagentOwner.parentSessionId, sessionId);
+
+			const sessionInfo = JSON.parse(lines[1]);
+			assert.equal(sessionInfo.type, "session_info");
+			assert.equal(sessionInfo.name, "Launch label");
 
 			assert.equal(handoffs.length, 1);
 			const handoff = handoffs[0];

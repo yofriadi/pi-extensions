@@ -6,11 +6,21 @@
 # root's `packages/*` globs.
 extends = ["../../.fallow.toml"]
 entry = ["src/index.ts", "test/integration/reload-trigger.ts"]
+# `test/alias.js` is the Vitest node:test shim wired via vitest.config.ts
+# resolve.alias; it is only imported through that alias, not from any entry.
+ignorePatterns = [
+	"packages/pi-accounts/**",
+	"packages/pi-condense/**",
+	"**/node_modules/**",
+	"test/alias.js",
+]
 
 [health]
-# `c8` reports generated-source-map branch columns as -1. Normalize those
-# sentinel columns after each coverage run; statement, branch, and function counts
-# remain untouched in the Istanbul map used for CRAP scoring.
+# Coverage artifact: `c8` wraps `vitest run` (which loads src via native Node
+# type stripping) and writes Istanbul JSON here. `c8` reports generated-
+# source-map branch columns as -1; normalize those sentinel columns after
+# each coverage run; statement, branch, and function counts remain untouched
+# in the Istanbul map used for CRAP scoring.
 coverage = "coverage/coverage-final.json"
 
 # Arrays replace the inherited value, so this restates the sole root test entry

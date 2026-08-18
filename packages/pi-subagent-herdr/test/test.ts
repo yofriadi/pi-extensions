@@ -511,6 +511,27 @@ describe("session.ts", () => {
 				false,
 			);
 		});
+
+		it("writes session_info entry when sessionName is supplied", () => {
+			const parentFile = createSessionFile(dir, [SESSION_HEADER, USER_MSG]);
+			const childFile = join(dir, "named-child.jsonl");
+
+			seedSubagentSessionFile({
+				mode: "fresh",
+				parentSessionFile: parentFile,
+				childSessionFile: childFile,
+				childCwd: "/tmp/named-child-cwd",
+				sessionName: "[plan-reviewer] add-photo-backup-portal",
+			});
+
+			const lines = readFileSync(childFile, "utf8").trim().split("\n");
+			assert.equal(lines.length, 2);
+			const header = JSON.parse(lines[0]);
+			assert.equal(header.type, "session");
+			const info = JSON.parse(lines[1]);
+			assert.equal(info.type, "session_info");
+			assert.equal(info.name, "[plan-reviewer] add-photo-backup-portal");
+		});
 	});
 
 	describe("mergeNewEntries", () => {

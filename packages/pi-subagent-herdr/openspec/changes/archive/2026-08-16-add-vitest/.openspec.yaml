@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-08-13
+goal: Run the unit suite under Vitest via a node:test shim while keeping integration on serial node --test and coverage on c8.

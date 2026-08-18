@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
+## [0.5.0] - 2026-08-16
+
+### Fixed
+
+- Emit `session_info` entry with display name (`label` or canonical agent ID) when seeding child subagent session files, and strip inherited parent session info on fork. Resolves unnamed and unreadable subagent session entries in the Pi session picker (`pi --resume` / tree view) which previously fell back to the first user message preamble wrapper.
+
+### Changed
+
+- Migrate unit test runner to Vitest via a package-local `node:test` shim (`test/alias.js`), preserving `c8` Istanbul coverage reporting for Fallow health gates and keeping serial Herdr integration tests on `node --test`.
+
+## [0.4.0] - 2026-08-11
 ### Breaking
 
 - Require explicit canonical `agent` and `task` for every spawn; remove bare/default agents and `subagents_list`.

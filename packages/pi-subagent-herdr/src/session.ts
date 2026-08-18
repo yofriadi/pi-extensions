@@ -88,6 +88,7 @@ export function seedSubagentSessionFile(params: {
 	agentId?: string;
 	childSessionFile: string;
 	childCwd: string;
+	sessionName?: string;
 }): void {
 	const ownerToken = params.agentId && params.parentSessionId ? randomBytes(32).toString("hex") : undefined;
 	const header = {
@@ -108,9 +109,29 @@ export function seedSubagentSessionFile(params: {
 				}
 			: {}),
 	};
-	const contentLines = params.mode === "fork" ? getForkContentLines(params.parentSessionFile) : [];
-	const lines = [JSON.stringify(header), ...contentLines];
-
+	const sessionInfoLines = params.sessionName
+		? [
+				JSON.stringify({
+					type: "session_info",
+					id: randomBytes(4).toString("hex"),
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					name: params.sessionName,
+				}),
+			]
+		: [];
+	const contentLines =
+		params.mode === "fork"
+			? getForkContentLines(params.parentSessionFile).filter((line) => {
+					if (!params.sessionName) return true;
+					try {
+						return JSON.parse(line).type !== "session_info";
+					} catch {
+						return true;
+					}
+				})
+			: [];
+	const lines = [JSON.stringify(header), ...sessionInfoLines, ...contentLines];
 	mkdirSync(dirname(params.childSessionFile), { recursive: true });
 	writeFileSync(params.childSessionFile, `${lines.join("\n")}\n`, "utf8");
 	chmodSync(params.childSessionFile, 0o600);

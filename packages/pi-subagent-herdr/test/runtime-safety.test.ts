@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { vi } from "vitest";
 import subagentsExtension, * as subagentsModule from "../src/index.ts";
 import { resolveSelectedSkills } from "../src/skills.ts";
 import { createPlainWidgetTheme } from "./widget-theme.ts";
@@ -164,7 +165,8 @@ describe("discovery-only factory isolation", () => {
 			assert.ok(before.deliveryRetry, "live delivery-retry timer started");
 			const rendersBeforeDiscovery = widgetRenders;
 
-			const discoveryModule = await import(`../src/index.ts?discovery-timer=${Date.now()}`);
+			await vi.resetModules();
+			const discoveryModule = await import("../src/index.ts");
 			const after = discoveryModule.__test__.timerSnapshot();
 			assert.strictEqual(after.widget, before.widget, "discovery did not clear the widget timer");
 			assert.strictEqual(after.status, before.status, "discovery did not clear the status timer");
@@ -308,7 +310,8 @@ describe("process-global delivery retry scheduling", () => {
 		try {
 			// A fresh module claims presentation/runtime ownership before the old
 			// watcher's completion callback reaches its delivery catch path.
-			const replacementModule = await import(`../src/index.ts?replacement-retry=${Date.now()}`);
+			await vi.resetModules();
+			const replacementModule = await import("../src/index.ts");
 			const newPi = fakeExtensionPi();
 			newPi.sendMessage = (message: any) => {
 				newPi.sends.push(message);

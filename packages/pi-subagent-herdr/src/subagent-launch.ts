@@ -487,6 +487,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 	function prepareLaunchSession(state: LaunchState): PreparedLaunch {
 		const behavior = deps.resolveLaunchBehavior(state.options.agentDefinition);
 		registerSessionRollbacks(state);
+		const sessionName = displayLaunchName(state.params);
 		seedSubagentSessionFile({
 			mode: behavior.seed,
 			parentSessionFile: state.sessionFile,
@@ -494,6 +495,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			agentId: state.options.agentDefinition.id,
 			childSessionFile: state.subagentSessionFile,
 			childCwd: state.effectiveCwd,
+			sessionName,
 		});
 		state.sessionLease = getSessionLeaseRegistry(state.sessionId).acquire(
 			state.subagentSessionFile,

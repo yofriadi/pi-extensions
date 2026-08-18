@@ -1,6 +1,6 @@
 {
 	"name": "@yofriadi/pi-subagent-herdr",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Pi subagents in Herdr panes — async steer or blocking tool result, attached stack layout",
 	"keywords": [
 		"pi-package"
@@ -23,8 +23,8 @@
 	"scripts": {
 		"check": "biome check .",
 		"check:fix": "biome check --write .",
-		"test": "node --test test/test.ts test/runtime-routing.test.ts test/layout.test.ts test/herdr-retry.test.ts test/permission-contracts.test.ts test/permission-integration.test.ts test/skills.test.ts test/system-prompt-mode.test.ts test/symbol-keys.test.ts test/layout-warning.test.ts test/coordinator.test.ts test/session-leases.test.ts test/delivery-barrier.test.ts test/settlement.test.ts test/launch-transaction.test.ts test/subagent-launch.test.ts test/tool-execute.test.ts test/widget-result-message.test.ts test/preamble-sanitization.test.ts test/delivery-verification.test.ts test/completion-timeout.test.ts test/delivery-observability.test.ts test/delivery-wake-ordering.test.ts test/review-fixes.test.ts test/watch-abandoned.test.ts test/abandoned-lease.test.ts test/runtime-safety.test.ts test/agents-widget.test.ts test/activity-telemetry.test.ts",
-		"test:coverage": "c8 --reporter=json --report-dir=coverage node --test test/test.ts test/runtime-routing.test.ts test/layout.test.ts test/herdr-retry.test.ts test/permission-contracts.test.ts test/permission-integration.test.ts test/skills.test.ts test/system-prompt-mode.test.ts test/symbol-keys.test.ts test/layout-warning.test.ts test/coordinator.test.ts test/session-leases.test.ts test/delivery-barrier.test.ts test/settlement.test.ts test/launch-transaction.test.ts test/subagent-launch.test.ts test/tool-execute.test.ts test/widget-result-message.test.ts test/preamble-sanitization.test.ts test/delivery-verification.test.ts test/completion-timeout.test.ts test/delivery-observability.test.ts test/delivery-wake-ordering.test.ts test/review-fixes.test.ts test/watch-abandoned.test.ts test/abandoned-lease.test.ts test/runtime-safety.test.ts test/agents-widget.test.ts test/activity-telemetry.test.ts && node scripts/normalize-istanbul-coverage.mjs",
+		"test": "vitest run",
+		"test:coverage": "c8 --reporter=json --report-dir=coverage vitest run && node scripts/normalize-istanbul-coverage.mjs",
 		"test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts",
 		"typecheck": "tsc --noEmit",
 		"fallow": "fallow",
@@ -39,18 +39,19 @@
 		"@earendil-works/pi-tui": ">=0.81.0",
 		"@sinclair/typebox": "*"
 	},
-	"pi": {
-		"extensions": [
-			"./src/index.ts"
-		]
-	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "^0.84.1",
 		"@earendil-works/pi-coding-agent": "^0.84.1",
 		"@earendil-works/pi-tui": "^0.84.1",
 		"@sinclair/typebox": "^0.34.52",
 		"c8": "10.1.3",
-		"fallow": "3.14.0"
+		"fallow": "3.14.0",
+		"vitest": "4.1.9"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
 	},
 	"publishConfig": {
 		"access": "public"
