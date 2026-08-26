@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import {
-	AuthStorage,
 	DefaultPackageManager,
 	discoverAndLoadExtensions,
 	ModelRegistry,
+	ModelRuntime,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -64,10 +64,14 @@ describe("pi-provider-antigravity extension", () => {
 		const resolvedPaths = resolved.extensions.filter((r) => r.enabled).map((r) => r.path);
 		expect(resolvedPaths.length).toBeGreaterThan(0);
 
-		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelsJsonPath = join(tempDir, "models.json");
 		writeFileSync(modelsJsonPath, JSON.stringify({ providers: {} }));
-		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(tempDir, "auth.json"),
+			modelsPath: modelsJsonPath,
+			refreshOnCreate: false,
+		});
+		const registry = new ModelRegistry(modelRuntime);
 
 		const result = await discoverAndLoadExtensions(resolvedPaths, tempDir, agentDir);
 		expect(result.errors).toEqual([]);
@@ -158,7 +162,9 @@ describe("pi-provider-antigravity extension", () => {
 
 		// We don't exercise the real Google refresh here (would need a mocked
 		// fetch and a fake access token), but the guard fires before the fetch:
-		expect(() => antigravityRefresh({ refresh: "r", access: "a", expires: 0 })).toThrow(/projectId/);
+		expect(() =>
+			antigravityRefresh({ refresh: "r", access: "a", expires: 0 }, new AbortController().signal),
+		).toThrow(/projectId/);
 	});
 });
 describe("google-antigravity stream fallback", () => {

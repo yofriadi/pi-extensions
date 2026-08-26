@@ -1,4 +1,4 @@
-import type { Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import type { Model, ResolvedGoogleThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
 
 const GOOGLE_GEMINI_CLI_API = "google-gemini-cli";
 const ANTIGRAVITY_MODEL_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
@@ -133,7 +133,7 @@ const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Resolve the Cloud Code Assist request model ID for an Antigravity model.
  * Returns `modelId` unchanged if no routing entry exists.
  */
-export function getAntigravityRequestModelId(modelId: string, effort: ThinkingLevel | "off" | undefined): string {
+export function getAntigravityRequestModelId(modelId: string, effort: ResolvedGoogleThinkingLevel | "off"): string {
 	const r = ANTIGRAVITY_ROUTING[modelId];
 	if (!r) return modelId;
 	if (effort === undefined || effort === "off") {
@@ -252,7 +252,7 @@ export const ANTIGRAVITY_MODELS: AntigravityModel[] = [
 export interface AntigravityCliSelection {
 	label: string;
 	logicalModelId: string;
-	reasoning: ThinkingLevel;
+	reasoning: ResolvedGoogleThinkingLevel;
 	wireModelId: string;
 }
 

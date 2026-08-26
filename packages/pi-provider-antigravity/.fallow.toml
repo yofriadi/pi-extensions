@@ -5,4 +5,4 @@
 # here analyzes only pi-provider-antigravity. Arrays replace the parent's, so
 # entry overrides the root's `packages/*` globs. `**/vendor/**` stays ignored.
 extends = ["../../.fallow.toml"]
-entry = ["src/index.ts"]
+entry = ["src/index.ts", "src/accounts-with-antigravity.ts"]

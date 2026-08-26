@@ -54,6 +54,87 @@ describe("Gemini Flash stream routing", () => {
 	);
 
 	it.each([
+		["xhigh", "HIGH"],
+		["max", "HIGH"],
+	] satisfies [ThinkingLevel, string][])(
+		"clamps 3.7 %s to the tiered wire ID with thinkingLevel %s",
+		async (reasoning, expectedThinkingLevel) => {
+			let capturedPayload: Record<string, unknown> | undefined;
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+			);
+			const model = ANTIGRAVITY_MODELS.find(
+				(candidate) => candidate.id === "gemini-3.7-flash",
+			) as Model<"google-gemini-cli">;
+
+			const response = await streamSimpleGoogleGeminiCli(
+				model,
+				{ messages: [{ role: "user", content: "Reply with OK", timestamp: Date.now() }] },
+				{
+					apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+					reasoning,
+					onPayload: (payload) => {
+						if (payload && typeof payload === "object") {
+							capturedPayload = payload as Record<string, unknown>;
+						}
+					},
+				},
+			).result();
+
+			expect(capturedPayload?.model).toBe("gemini-3.7-flash-tiered");
+			const request = capturedPayload?.request as
+				| { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }
+				| undefined;
+			expect(request?.generationConfig?.thinkingConfig?.thinkingLevel).toBe(expectedThinkingLevel);
+			expect(response.stopReason).toBe("stop");
+		},
+	);
+
+	// xhigh/max clamping is only observable on models whose routing map
+	// distinguishes efforts — 3.7-flash sends every effort to the same -tiered
+	// ID, so without these the fallback chain (routing[effort] ?? low ?? ...)
+	// could silently regress xhigh/max onto the low wire model.
+	it.each([
+		["gemini-3.6-flash", "xhigh", "gemini-3.6-flash-high"],
+		["gemini-3.6-flash", "max", "gemini-3.6-flash-high"],
+		["gemini-3.1-pro", "xhigh", "gemini-pro-agent"],
+		["gemini-3.1-pro", "max", "gemini-pro-agent"],
+	] satisfies [string, ThinkingLevel, string][])(
+		"clamps %s effort %s to the high wire model %s",
+		async (modelId, reasoning, expectedWireModel) => {
+			let payloadModel: string | undefined;
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+			);
+			const model = ANTIGRAVITY_MODELS.find(
+				(candidate) => candidate.id === modelId,
+			) as Model<"google-gemini-cli">;
+
+			const response = await streamSimpleGoogleGeminiCli(
+				model,
+				{ messages: [{ role: "user", content: "Reply with OK", timestamp: Date.now() }] },
+				{
+					apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+					reasoning,
+					onPayload: (payload) => {
+						if (
+							payload &&
+							typeof payload === "object" &&
+							"model" in payload &&
+							typeof payload.model === "string"
+						) {
+							payloadModel = payload.model;
+						}
+					},
+				},
+			).result();
+
+			expect(payloadModel).toBe(expectedWireModel);
+			expect(response.stopReason).toBe("stop");
+		},
+	);
+
+	it.each([
 		["low", "gemini-3.5-flash-extra-low"],
 		["medium", "gemini-3.5-flash-low"],
 		["high", "gemini-3-flash-agent"],

@@ -11,14 +11,15 @@ import {
 	type Context,
 	calculateCost,
 	createAssistantMessageEventStream,
+	type GoogleApiThinkingLevel,
 	type Model,
+	type ResolvedGoogleThinkingLevel,
 	type SimpleStreamOptions,
 	type StreamFunction,
 	type StreamOptions,
 	type TextContent,
 	type ThinkingBudgets,
 	type ThinkingContent,
-	type ThinkingLevel,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "@google/genai";
@@ -43,12 +44,6 @@ import { headersToRecord } from "./vendor/headers.ts";
 import { sanitizeSurrogates } from "./vendor/sanitize-unicode.ts";
 import { buildBaseOptions, clampReasoning } from "./vendor/simple-options.ts";
 
-/**
- * Thinking level for Gemini 3 models.
- * Mirrors Google's ThinkingLevel enum values.
- */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-
 export interface GoogleGeminiCliOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
 	/**
@@ -63,7 +58,7 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 		/** Thinking budget in tokens. Use for Gemini 2.x models. */
 		budgetTokens?: number;
 		/** Thinking level. Use for Gemini 3 models (LOW/HIGH for Pro, MINIMAL/LOW/MEDIUM/HIGH for Flash). */
-		level?: GoogleThinkingLevel;
+		level?: GoogleApiThinkingLevel;
 	};
 	projectId?: string;
 	/**
@@ -72,7 +67,7 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	 * so the build step can pick the correct request-time model id for
 	 * Antigravity variants.
 	 */
-	antigravityEffort?: ThinkingLevel | "off";
+	antigravityEffort?: ResolvedGoogleThinkingLevel | "off";
 	antigravityValidation?: {
 		primaryEndpointOnly?: boolean;
 		maxAttempts?: number;
@@ -852,6 +847,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Cloud Code Assist stream ended without a finish reason");
+			}
+
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -885,7 +884,7 @@ export const streamSimpleGoogleGeminiCli: StreamFunction<"google-gemini-cli", An
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const antigravityEffort: GoogleGeminiCliOptions["antigravityEffort"] = options?.reasoning ?? "off";
+	const antigravityEffort: GoogleGeminiCliOptions["antigravityEffort"] = clampReasoning(options?.reasoning) ?? "off";
 	const antigravityAwareBase = { ...base, antigravityEffort, antigravityValidation: options?.antigravityValidation };
 	if (!options?.reasoning) {
 		// Only auto-disable thinking for non-reasoning models. Reasoning
@@ -977,7 +976,9 @@ export function buildRequest(
 
 	// Antigravity: the public model ID and the server-side request ID
 	// differ. Resolve to the upstream ID using the user's chosen effort.
-	const bodyModel = isAntigravity ? getAntigravityRequestModelId(model.id, options.antigravityEffort) : model.id;
+	const bodyModel = isAntigravity
+		? getAntigravityRequestModelId(model.id, options.antigravityEffort ?? "off")
+		: model.id;
 	const isTieredAntigravityModel = isAntigravity && bodyModel.endsWith("-tiered");
 
 	// Thinking config. Most Antigravity model IDs already encode their thinking
@@ -989,7 +990,7 @@ export function buildRequest(
 	if (isTieredAntigravityModel) {
 		if (options.thinking?.enabled && model.reasoning && options.thinking.level !== undefined) {
 			generationConfig.thinkingConfig = {
-				// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
+				// Cast to any since GoogleApiThinkingLevel mirrors Google's ThinkingLevel enum values
 				thinkingLevel: options.thinking.level as any,
 			};
 		} else if (model.reasoning) {
@@ -1002,7 +1003,7 @@ export function buildRequest(
 			};
 			// Gemini 3 models use thinkingLevel, older models use thinkingBudget
 			if (options.thinking.level !== undefined) {
-				// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
+				// Cast to any since GoogleApiThinkingLevel mirrors Google's ThinkingLevel enum values
 				generationConfig.thinkingConfig.thinkingLevel = options.thinking.level as any;
 			} else if (options.thinking.budgetTokens !== undefined) {
 				generationConfig.thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
@@ -1092,16 +1093,16 @@ export function buildRequest(
 	};
 }
 
-type ClampedThinkingLevel = Exclude<ThinkingLevel, "xhigh">;
-
 function getDisabledThinkingConfig(modelId: string): ThinkingConfig {
 	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
 	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
 	// thinkingLevel without includeThoughts so hidden thinking remains invisible to pi.
 	if (isGemini3ProModel(modelId)) {
+		// Cast to any since GoogleApiThinkingLevel mirrors Google's ThinkingLevel enum values
 		return { thinkingLevel: "LOW" as any };
 	}
 	if (isGemini3FlashModel(modelId)) {
+		// Cast to any since GoogleApiThinkingLevel mirrors Google's ThinkingLevel enum values
 		return { thinkingLevel: "MINIMAL" as any };
 	}
 
@@ -1109,7 +1110,7 @@ function getDisabledThinkingConfig(modelId: string): ThinkingConfig {
 	return { thinkingBudget: 0 };
 }
 
-function getGeminiCliThinkingLevel(effort: ClampedThinkingLevel, modelId: string): GoogleThinkingLevel {
+function getGeminiCliThinkingLevel(effort: ResolvedGoogleThinkingLevel, modelId: string): GoogleApiThinkingLevel {
 	if (isGemini3ProModel(modelId)) {
 		switch (effort) {
 			case "minimal":

@@ -1,5 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import accountsExtension, { createBuiltinProviderAdapters } from "@narumitw/pi-accounts";
+import accountsExtension, { createBuiltinProviderAdapters, type ExtensionAPI } from "@narumitw/pi-accounts";
 import { ANTIGRAVITY_ACCOUNT_ADAPTER } from "./account-adapter.ts";
 
 /**
