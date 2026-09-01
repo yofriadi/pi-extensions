@@ -2,8 +2,14 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentDefinition } from "./agent-definition.ts";
-import type { CompletionResult } from "./completion.ts";
-import { waitForCompletion } from "./completion.ts";
+import { getAgentConfigDir } from "./agent-definition.ts";
+import {
+	ABORT_MESSAGE,
+	abortableDelay,
+	type CompletionResult,
+	isRetryableCompletion,
+	waitForCompletion,
+} from "./completion.ts";
 import type { AdmissionLease } from "./coordinator.ts";
 import { getAdmissionCoordinator } from "./coordinator.ts";
 import {
@@ -14,13 +20,21 @@ import {
 } from "./delivery.ts";
 import { getForegroundDeliveryBarrier } from "./delivery-barrier.ts";
 import { inspectHerdrPane } from "./herdr.ts";
-import { beginLaunchTransaction, finishLaunchTransaction } from "./launch-transaction.ts";
-import { attachPaneSerialized, removePaneFromRegion, tryRederiveRegionFromLayout } from "./layout.ts";
 import {
+	beginLaunchTransaction,
+	finishLaunchTransaction,
+	type LaunchStep,
+	type LaunchTransaction,
+} from "./launch-transaction.ts";
+import { attachPaneSerialized, removePaneFromRegion, tryRederiveRegionFromLayout } from "./layout.ts";
+import type { PaneInspection } from "./lifecycle.ts";
+import {
+	clearRetry,
 	markCompleted,
 	markCompletionDetected,
 	markDelivery,
 	markFailed,
+	markRetrying,
 	observePaneInspection,
 	projectLifecycle,
 } from "./lifecycle.ts";
@@ -47,25 +61,34 @@ import type {
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ERROR_PANE_MONITOR_INTERVAL_MS = 2000;
 
+/** Total attempts per run: initial + 2 automatic retries. */
+export const MAX_RUN_ATTEMPTS = 3;
+/** Stepped backoff before attempts 2 and 3. */
+export const RETRY_BACKOFF_MS = [5_000, 15_000] as const;
+/** Bound on waiting for the failed attempt's pane to be confirmed gone. */
+export const PANE_ABSENCE_TIMEOUT_MS = 30_000;
+/** Poll interval inside the pane-absence wait and relaunch wait. */
+const RELAUNCH_POLL_MS = 250;
+
+/** A never-aborted signal for local cleanup scopes. */
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
+
 type LaunchDeps = {
 	resolveBlocking: (params: any) => boolean;
 	resolveLayout: (params: any) => any;
 	resolveSurface: (params: any) => any;
 	resolveDirection: (params: any) => any;
 	resolveLaunchBehavior: (definition: AgentDefinition) => {
-		seed: "fresh" | "fork";
 		inheritsConversationContext: boolean;
 		taskDelivery: "direct" | "artifact";
 	};
 	lifecycleDenySet: () => Set<string>;
 	buildSystemPromptFileContent: (input: any) => { content: string; flag: string } | undefined;
 	buildSubagentToolAllowlist: (tools?: string) => string;
-	buildLaunchArtifactName: (name: string, timestamp: string, id: string) => string;
 	safeCommentValue: (value: string) => string;
 	createRunId: () => string;
-	getArtifactDir: (sessionDir: string, sessionId: string) => string;
 	getShellReadyDelayMs: () => number;
-	getSubagentActivityFile: (artifactDir: string, runId: string) => string;
+	getSubagentArtifactDir: (sessionFile: string) => string;
 	runScriptInPane: (
 		paneId: string,
 		command: string,
@@ -90,6 +113,8 @@ type LaunchOptions = {
 	admissionLease?: AdmissionLease;
 	projectTrusted?: boolean;
 	surface?: string;
+	/** Caller-supplied resume target; skips session seeding and rollbacks. */
+	resumeSessionFile?: string;
 };
 
 type LaunchState = {
@@ -100,15 +125,15 @@ type LaunchState = {
 	startTime: number;
 	sessionFile: string;
 	sessionId: string;
-	artifactDir: string;
 	effectiveCwd: string;
 	subagentSessionFile: string;
 	surfacePreCreated: boolean;
 	launchTransaction: ReturnType<typeof beginLaunchTransaction>;
-	rollbackPaths: string[];
 	surface?: string;
 	layoutWarning?: string;
 	sessionLease?: any;
+	/** Per-attempt id; regenerated on every retry relaunch. */
+	attemptId: string;
 };
 
 type PreparedLaunch = {
@@ -187,19 +212,44 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		return "Sub-agent exited without output";
 	}
 
-	function resolveSettlementDisposition(reason: CompletionResult["reason"]): {
+	function resolveSettlementDisposition(
+		result: CompletionResult,
+		runningId?: string,
+	): {
 		watchAbandoned: boolean;
 		preservePane: boolean;
+		preserveArtifacts: boolean;
 		releaseAdmissionNow: boolean;
 	} {
-		if (reason === "timeout") return { watchAbandoned: true, preservePane: true, releaseAdmissionNow: true };
-		if (reason === "error") return { watchAbandoned: false, preservePane: true, releaseAdmissionNow: true };
-		return { watchAbandoned: false, preservePane: false, releaseAdmissionNow: false };
+		const preserveArtifacts = !completionDeletesArtifacts(result, runningId);
+		if (result.reason === "timeout") {
+			return { watchAbandoned: true, preservePane: true, preserveArtifacts, releaseAdmissionNow: true };
+		}
+		if (result.reason === "error") {
+			return { watchAbandoned: false, preservePane: true, preserveArtifacts, releaseAdmissionNow: true };
+		}
+		return { watchAbandoned: false, preservePane: false, preserveArtifacts, releaseAdmissionNow: false };
 	}
 
-	function applySettlementDisposition(running: RunningSubagent, reason: CompletionResult["reason"]) {
-		const disposition = resolveSettlementDisposition(reason);
+	function completionDeletesArtifacts(result: CompletionResult, attemptId: string | undefined): boolean {
+		if (result.exitCode !== 0) return false;
+		if (result.reason === "sentinel") return true;
+		return (
+			result.reason === "done" &&
+			typeof attemptId === "string" &&
+			typeof result.runId === "string" &&
+			result.runId === attemptId
+		);
+	}
+
+	function applySettlementDisposition(running: RunningSubagent, result: CompletionResult) {
+		// The ownership comparand is the run's CURRENT attempt id — a stale
+		// comparand would fail-closed deletion on every retried run.
+		const disposition = resolveSettlementDisposition(result, running.attemptId ?? running.id);
 		running.watchAbandoned = disposition.watchAbandoned;
+		if (!disposition.preserveArtifacts) {
+			rmSync(deps.getSubagentArtifactDir(running.sessionFile), { recursive: true, force: true });
+		}
 		running.errorPanePreserved = disposition.preservePane && preserveErrorPane(running);
 		if (!running.errorPanePreserved) safeCloseAndReap(running);
 		if (disposition.releaseAdmissionNow) releaseAdmissionOnly(running);
@@ -373,12 +423,11 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			startTime: Date.now(),
 			sessionFile,
 			sessionId,
-			artifactDir: deps.getArtifactDir(ctx.sessionDir, sessionId),
 			effectiveCwd,
-			subagentSessionFile: buildChildSessionFile(sessionDir, id),
+			subagentSessionFile: options.resumeSessionFile ?? buildChildSessionFile(sessionDir, id),
 			surfacePreCreated: Boolean(options.surface),
 			launchTransaction: createLaunchTransaction(id, options.admissionLease),
-			rollbackPaths: [],
+			attemptId: id,
 		};
 	}
 
@@ -486,10 +535,25 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 
 	function prepareLaunchSession(state: LaunchState): PreparedLaunch {
 		const behavior = deps.resolveLaunchBehavior(state.options.agentDefinition);
+		if (state.options.resumeSessionFile) {
+			// Explicit resume: adopt the caller-supplied session file. The launch
+			// transaction never owns pre-existing state — no seeding (seeding
+			// truncates and rewrites the transcript), no rollbacks, and the lease is
+			// acquired directly against the resumed path.
+			const registry = getSessionLeaseRegistry(state.sessionId);
+			state.sessionLease = registry.acquire(state.subagentSessionFile, state.id, "starting");
+			state.launchTransaction.own(() => state.sessionLease?.release());
+			const artifactDir = deps.getSubagentArtifactDir(state.subagentSessionFile);
+			mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+			return {
+				activityFile: join(artifactDir, "activity.json"),
+				entryCountBefore: getNewEntries(state.subagentSessionFile, 0).length,
+				fullTask: buildLaunchTask(state.params.task, behavior.inheritsConversationContext),
+			};
+		}
 		registerSessionRollbacks(state);
 		const sessionName = displayLaunchName(state.params);
 		seedSubagentSessionFile({
-			mode: behavior.seed,
 			parentSessionFile: state.sessionFile,
 			parentSessionId: state.sessionId,
 			agentId: state.options.agentDefinition.id,
@@ -503,8 +567,9 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			"starting",
 		);
 		state.launchTransaction.own(() => state.sessionLease?.release());
-		const activityFile = deps.getSubagentActivityFile(state.artifactDir, state.id);
-		mkdirSync(dirname(activityFile), { recursive: true });
+		const artifactDir = deps.getSubagentArtifactDir(state.subagentSessionFile);
+		mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+		const activityFile = join(artifactDir, "activity.json");
 		return {
 			activityFile,
 			entryCountBefore: getNewEntries(state.subagentSessionFile, 0).length,
@@ -512,9 +577,33 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		};
 	}
 
+	/** Prepare the session for an internal retry relaunch: reuse the run's
+	 * existing lease, skip acquire/transition/rollbacks/seeding entirely. */
+	function prepareRelaunchSession(running: RunningSubagent): PreparedLaunch {
+		const behavior = deps.resolveLaunchBehavior(
+			running.agentDefinition ?? {
+				id: running.agent ?? "",
+				sourcePath: "",
+				source: "global",
+				tools: "",
+				body: "",
+				frontmatter: "",
+			},
+		);
+		const artifactDir = deps.getSubagentArtifactDir(running.sessionFile);
+		mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+		return {
+			activityFile: join(artifactDir, "activity.json"),
+			entryCountBefore: getNewEntries(running.sessionFile, 0).length,
+			fullTask: buildLaunchTask(running.task, behavior.inheritsConversationContext),
+		};
+	}
+
 	function registerSessionRollbacks(state: LaunchState): void {
-		state.launchTransaction.own(() => rmSync(`${state.subagentSessionFile}.owner.json`, { force: true }));
 		state.launchTransaction.own(() => rmSync(state.subagentSessionFile, { force: true }));
+		state.launchTransaction.own(() =>
+			rmSync(deps.getSubagentArtifactDir(state.subagentSessionFile), { recursive: true, force: true }),
+		);
 	}
 
 	function buildLaunchTask(task: string, inheritsConversationContext: boolean): string {
@@ -533,7 +622,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		parts.push(shellQuote(taskArgument));
 		return {
 			command: `cd ${shellQuote(state.effectiveCwd)} && ${environment.join(" ")} ${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`,
-			launchScriptFile: join(state.artifactDir, "subagent-scripts", `${state.params.agent}-${state.id}.sh`),
+			launchScriptFile: join(deps.getSubagentArtifactDir(state.subagentSessionFile), "launch.sh"),
 		};
 	}
 
@@ -571,23 +660,17 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		});
 		if (!prompt) return;
 		const path = systemPromptPath(state);
-		writeLaunchArtifact(state, path, prompt.content);
+		writeLaunchArtifact(path, prompt.content);
 		parts.push(prompt.flag, shellQuote(path));
 	}
 
 	function systemPromptPath(state: LaunchState): string {
-		const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		return join(
-			state.artifactDir,
-			`context/${state.params.agent || "subagent"}-sysprompt-${timestamp}-${state.id}.md`,
-		);
+		return join(deps.getSubagentArtifactDir(state.subagentSessionFile), "sysprompt.md");
 	}
 
-	function writeLaunchArtifact(state: LaunchState, path: string, content: string): void {
-		mkdirSync(dirname(path), { recursive: true });
-		state.launchTransaction.own(() => rmSync(path, { force: true }));
+	function writeLaunchArtifact(path: string, content: string): void {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		writeFileSync(path, content, "utf8");
-		state.rollbackPaths.push(path);
 	}
 
 	function buildLaunchEnvironment(state: LaunchState, activityFile: string): string[] {
@@ -600,7 +683,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			"PI_SUBAGENT_COMPANION_ORDER=explicit-before-discovered",
 			"PI_SUBAGENT_AUTO_EXIT=1",
 			`PI_SUBAGENT_SESSION=${shellQuote(state.subagentSessionFile)}`,
-			`PI_SUBAGENT_ID=${shellQuote(state.id)}`,
+			`PI_SUBAGENT_ID=${shellQuote(state.attemptId)}`,
 			`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
 			`PI_SUBAGENT_SURFACE=${shellQuote(state.surface ?? "")}`,
 			`PI_SUBAGENT_PARENT_SESSION=${shellQuote(state.sessionId)}`,
@@ -623,16 +706,12 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 	function buildTaskArgument(state: LaunchState, fullTask: string): string {
 		if (deps.resolveLaunchBehavior(state.options.agentDefinition).taskDelivery === "direct") return fullTask;
 		const path = taskArtifactPath(state);
-		writeLaunchArtifact(state, path, fullTask);
+		writeLaunchArtifact(path, fullTask);
 		return `@${path}`;
 	}
 
 	function taskArtifactPath(state: LaunchState): string {
-		const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		return join(
-			state.artifactDir,
-			`context/${deps.buildLaunchArtifactName(state.params.agent, timestamp, state.id)}`,
-		);
+		return join(deps.getSubagentArtifactDir(state.subagentSessionFile), "task.md");
 	}
 
 	function appendSelectedSkills(parts: string[], skills: SelectedSkill[]): void {
@@ -654,10 +733,8 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 	}
 
 	function writeLaunchScript(state: LaunchState, launchCommand: LaunchCommand): void {
-		state.launchTransaction.own(() => rmSync(launchCommand.launchScriptFile, { force: true }));
 		state.launchTransaction.throwIfAborted();
 		state.launchTransaction.advance("script");
-		state.rollbackPaths.push(launchCommand.launchScriptFile);
 		deps.runScriptInPane(state.surface ?? "", launchCommand.command, {
 			scriptPath: launchCommand.launchScriptFile,
 			scriptPreamble: launchScriptPreamble(state),
@@ -698,6 +775,16 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			entryCountBefore: prepared.entryCountBefore,
 			lifecycle: deps.createLifecycle(state.startTime),
 			launchTransaction: state.launchTransaction,
+			...(state.options.resumeSessionFile ? { resumed: true } : {}),
+			attempt: 1,
+			maxAttempts: MAX_RUN_ATTEMPTS,
+			attemptId: state.attemptId,
+			launchParams: state.params,
+			agentDefinition: state.options.agentDefinition,
+			selectedSkills: state.options.selectedSkills,
+			effectiveCwd: state.effectiveCwd,
+			agentDir: state.ctx.agentDir,
+			projectTrusted: state.options.projectTrusted,
 		};
 	}
 
@@ -716,21 +803,12 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		state.sessionLease?.release();
 		state.options.admissionLease?.release();
 		cleanupLaunchSurface(state);
-		cleanupRollbackPaths(state.rollbackPaths);
 	}
 
 	function cleanupLaunchSurface(state: LaunchState): void {
 		if (!state.surface || state.surfacePreCreated) return;
 		const parentPaneId = process.env.HERDR_PANE_ID;
 		if (parentPaneId) closeAttachedSurface(parentPaneId, state.surface);
-	}
-
-	function cleanupRollbackPaths(paths: string[]): void {
-		for (const path of paths.reverse()) {
-			try {
-				rmSync(path, { force: true });
-			} catch {}
-		}
 	}
 
 	function displayLaunchName(params: any): string {
@@ -743,13 +821,327 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		options: { releaseOwnership?: boolean; timeoutMs?: number } = { releaseOwnership: true },
 	): Promise<SubagentResult> {
 		try {
-			const result = await waitForRunCompletion(running, signal, options);
-			return settleWatchedCompletion(running, result);
+			for (;;) {
+				const result = await waitForRunCompletion(running, signal, options);
+				if (!shouldRetryCompletion(running, result)) return settleWatchedCompletion(running, result);
+				const retryOutcome = await retryFailedAttempt(running, signal, options);
+				if (!retryOutcome) continue;
+				return retryOutcome;
+			}
 		} catch (error) {
 			return handleWatchFailure(running, signal, error);
 		} finally {
 			finalizeWatchOwnership(running, options);
 		}
+	}
+
+	/** Retry decision: well-formed error sidecar, attempts remaining, not aborted. */
+	function shouldRetryCompletion(running: RunningSubagent, result: CompletionResult): boolean {
+		const maxAttempts = running.maxAttempts ?? MAX_RUN_ATTEMPTS;
+		return (
+			isRetryableCompletion(result) &&
+			(running.attempt ?? 1) < maxAttempts &&
+			!running.abortController?.signal.aborted
+		);
+	}
+
+	/** Reap the failed attempt and relaunch. Returns a settled result only when
+	 * the relaunch mechanics fail (ordinary reported-error path); undefined means
+	 * a new attempt is running and the caller should watch again. */
+	async function retryFailedAttempt(
+		running: RunningSubagent,
+		signal: AbortSignal,
+		_options: { timeoutMs?: number },
+	): Promise<SubagentResult | undefined> {
+		const maxAttempts = running.maxAttempts ?? MAX_RUN_ATTEMPTS;
+		const nextAttempt = (running.attempt ?? 1) + 1;
+		const previousSurface = running.surface;
+		const backoffMs = RETRY_BACKOFF_MS[Math.min(nextAttempt - 2, RETRY_BACKOFF_MS.length - 1)];
+		running.lifecycle = markRetrying(running.lifecycle, nextAttempt, maxAttempts, Date.now());
+		deps.updateWidget();
+		try {
+			// Reap the failed attempt's pane, then wait for CONFIRMED absence —
+			// pane absence implies the terminal host reaped the child process tree,
+			// which is what guarantees single-writer access to the shared .jsonl.
+			safeCloseAndReap(running);
+			// Bounded absence confirmation and the backoff run CONCURRENTLY: the
+			// relaunch waits for both, so the pathological delay is bounded by
+			// max(absence bound, backoff) rather than their sum.
+			await Promise.all([
+				waitForPaneAbsence(previousSurface, signal, running.inspectPaneOverride),
+				abortableDelay(backoffMs, signal),
+			]);
+		} catch (error) {
+			if (isAbortError(error)) throw error;
+			return settleRelaunchFailure(running, previousSurface, error);
+		}
+		try {
+			await relaunchAttempt(running, nextAttempt);
+		} catch (error) {
+			if (isAbortError(error)) throw error;
+			return settleRelaunchFailure(running, previousSurface, error);
+		}
+		return undefined;
+	}
+
+	/** Bounded, abort-aware wait for the failed attempt's pane to be confirmed gone. */
+	async function waitForPaneAbsence(
+		surface: string,
+		signal: AbortSignal,
+		inspectOverride?: () => Promise<PaneInspection>,
+	): Promise<void> {
+		const deadline = Date.now() + PANE_ABSENCE_TIMEOUT_MS;
+		for (;;) {
+			throwIfWatchAborted(signal);
+			const inspection = await probePaneAbsence(surface, inspectOverride);
+			if (inspection.kind === "missing") return;
+			if (Date.now() >= deadline) {
+				throw new Error(
+					`Subagent retry aborted: failed attempt's pane ${surface} still present after ${PANE_ABSENCE_TIMEOUT_MS}ms.`,
+				);
+			}
+			await abortableDelay(RELAUNCH_POLL_MS, signal);
+		}
+	}
+
+	async function probePaneAbsence(
+		surface: string,
+		inspectOverride?: () => Promise<PaneInspection>,
+	): Promise<{ kind: "present" | "missing" | "unavailable" }> {
+		try {
+			return await (inspectOverride ? inspectOverride() : inspectPane(surface));
+		} catch {
+			return { kind: "unavailable" };
+		}
+	}
+
+	function throwIfWatchAborted(signal: AbortSignal): void {
+		if (signal.aborted) throw new Error(ABORT_MESSAGE);
+	}
+
+	function isAbortError(error: unknown): boolean {
+		return error instanceof Error && error.message === ABORT_MESSAGE;
+	}
+
+	/** Settle a relaunch-mechanics failure through the ordinary reported-error path. */
+	function settleRelaunchFailure(running: RunningSubagent, previousSurface: string, error: unknown): SubagentResult {
+		const message = error instanceof Error ? error.message : String(error);
+		running.lifecycle = markFailed(running.lifecycle, `Subagent retry relaunch failed: ${message}`, Date.now(), 1);
+		if (running.surface && running.surface !== previousSurface) {
+			// Inline relaunch cleanup: close only the replacement pane this relaunch created.
+			safeCloseAndReap(running);
+		} else {
+			running.surface = previousSurface;
+		}
+		running.errorPanePreserved = preserveErrorPane(running);
+		releaseAdmissionOnly(running);
+		deps.updateWidget();
+		return {
+			name: running.name,
+			task: running.task,
+			summary: `Subagent retry relaunch failed: ${message}`,
+			sessionFile: running.sessionFile,
+			exitCode: 1,
+			elapsed: elapsedSince(running.startTime),
+			// `error` (not `errorMessage`): this is an extension-side relaunch
+			// mechanics failure, not a provider/agent error — must not render as
+			// `failed (provider/agent error)` nor claim the provider failed.
+			error: `Subagent retry relaunch failed: ${message}`,
+		};
+	}
+
+	/** Re-execute the post-admission launch segment for a retry attempt against
+	 * a LOCAL non-registered cleanup scope (the original transaction committed at
+	 * first launch; own/advance would throw). Inline cleanup on failure. */
+	async function relaunchAttempt(running: RunningSubagent, nextAttempt: number): Promise<void> {
+		const localScope = createLocalCleanupScope();
+		try {
+			const parentPaneId = process.env.HERDR_PANE_ID;
+			if (!parentPaneId) throw new Error("HERDR_PANE_ID not set");
+			// Regenerate the per-attempt id FIRST: the launch command must stamp the
+			// child with the SAME id the watch's sidecar ownership check, the activity
+			// reads, and the disposition comparand will later validate against.
+			running.attemptId = createAttemptId(running.id, nextAttempt);
+			running.attempt = nextAttempt;
+			const direction = deps.resolveDirection(running.launchParams);
+			const attachOptions = {
+				name: running.name,
+				direction,
+				layout: deps.resolveLayout(running.launchParams),
+				surface: deps.resolveSurface(running.launchParams),
+				cwd: running.effectiveCwd ?? process.cwd(),
+			};
+			// The surface override mirrors inspectPaneOverride: a test-only seam so
+			// the relaunch segment is exercisable without a live herdr binary.
+			const attached = running.attachSurfaceOverride
+				? await running.attachSurfaceOverride(attachOptions)
+				: await (() => {
+						tryRederiveRegionFromLayout(
+							parentPaneId,
+							direction,
+							Array.from(runningSubagents.values()).map((entry) => entry.surface),
+						);
+						return attachPaneSerialized(parentPaneId, attachOptions);
+					})();
+			localScope.own(() => {
+				if (!running.attachSurfaceOverride) closeAttachedSurface(parentPaneId, attached.paneId);
+			});
+			localScope.advance("pane");
+			// Recompute layout warnings for the replacement surface (e.g. a
+			// too-small terminal forcing a tab fallback must surface its warning).
+			running.layoutWarning = attached.warning;
+			await new Promise<void>((done) => setTimeout(done, deps.getShellReadyDelayMs()));
+			const prepared = prepareRelaunchSession(running);
+			// Re-point the surface BEFORE building the command so PI_SUBAGENT_SURFACE
+			// stamps the replacement pane, not the dead one. entryCountBefore re-snapshots
+			// only now — after confirmed pane absence — so it cannot capture a count
+			// while the dying child still writes.
+			running.surface = attached.paneId;
+			const launchCommand = buildRelaunchCommand(running, prepared);
+			localScope.own(() => rmSync(launchCommand.launchScriptFile, { force: true }));
+			deps.runScriptInPane(attached.paneId, launchCommand.command, {
+				scriptPath: launchCommand.launchScriptFile,
+				scriptPreamble: relaunchScriptPreamble(running, nextAttempt, attached.paneId),
+			});
+			localScope.advance("script");
+			running.activityFile = prepared.activityFile;
+			running.launchScriptFile = launchCommand.launchScriptFile;
+			running.entryCountBefore = prepared.entryCountBefore;
+			resetLifecycleForAttempt(running);
+			localScope.commit();
+			deps.updateWidget();
+		} catch (error) {
+			localScope.rollback();
+			throw error;
+		}
+	}
+
+	function createAttemptId(runId: string, attempt: number): string {
+		return `${runId}-r${attempt}`;
+	}
+
+	/** Reset per-attempt lifecycle activity state: the new attempt's recorder
+	 * starts at sequence 0 and isStaleActivity compares sequence only, so without
+	 * this reset every attempt-2 write would be discarded as stale. */
+	function resetLifecycleForAttempt(running: RunningSubagent): void {
+		running.lifecycle = clearRetry(deps.ensureLifecycle(running));
+		running.lifecycle = {
+			...running.lifecycle,
+			turn: { kind: "unknown" },
+			activityDetail: null,
+			activityHealth: { kind: "unseen" },
+			lastActivitySequence: null,
+			pane: { kind: "unknown" },
+		};
+		running.activity = undefined;
+		running.activityRead = undefined;
+	}
+
+	function buildRelaunchCommand(running: RunningSubagent, prepared: PreparedLaunch): LaunchCommand {
+		// Same builder as the initial launch; flags/env reconstructed verbatim from
+		// the run's own agent definition and runtime plan. Uses a launch-state shim
+		// so all builder code paths are shared, with attemptId threaded through.
+		return buildLaunchCommand(relaunchStateShim(running), prepared);
+	}
+
+	function relaunchStateShim(running: RunningSubagent): LaunchState {
+		return {
+			params: running.launchParams ?? { agent: running.agent, task: running.task, label: running.name },
+			ctx: {
+				cwd: running.effectiveCwd ?? process.cwd(),
+				// The retained agent dir reproduces PI_CODING_AGENT_DIR verbatim;
+				// re-deriving from the env yields "" when unset, poisoning the child.
+				agentDir: running.agentDir ?? getAgentConfigDir(),
+				projectTrusted: running.projectTrusted ?? true,
+				sessionId: running.parentSessionId ?? "",
+			},
+			options: {
+				// Same fallback as prepareRelaunchSession: an upgraded live run whose
+				// RunningSubagent predates agent-definition retention still relaunches.
+				agentDefinition: running.agentDefinition ?? {
+					id: running.agent ?? "",
+					sourcePath: "",
+					source: "global",
+					tools: "",
+					body: "",
+					frontmatter: "",
+				},
+				selectedSkills: running.selectedSkills ?? [],
+				runtimePlan: running.runtimePlan as ResolvedRuntimePlan,
+				projectTrusted: running.projectTrusted,
+			},
+			id: running.id,
+			startTime: running.startTime,
+			sessionFile: running.parentSessionFile ?? "",
+			sessionId: running.parentSessionId ?? "",
+			effectiveCwd: running.effectiveCwd ?? process.cwd(),
+			subagentSessionFile: running.sessionFile,
+			surfacePreCreated: false,
+			launchTransaction: createLocalCleanupScope(),
+			surface: running.surface,
+			attemptId: running.attemptId ?? running.id,
+		};
+	}
+
+	function relaunchScriptPreamble(running: RunningSubagent, attempt: number, surface: string): string {
+		return [
+			`# Subagent launch script for ${deps.safeCommentValue(running.agent ?? "")}`,
+			`# Run: ${deps.safeCommentValue(running.id)} (retry attempt ${attempt})`,
+			`# Generated: ${deps.safeCommentValue(new Date().toISOString())}`,
+			`# Session: ${deps.safeCommentValue(running.sessionFile)}`,
+			`# Surface: ${deps.safeCommentValue(surface)}`,
+		].join("\n");
+	}
+
+	/** A local, non-registered cleanup scope exposing the LaunchTransaction
+	 * own/advance interface without the registered-transaction invariants. */
+	function createLocalCleanupScope(): LaunchTransaction {
+		const rollbacks: Array<() => void> = [];
+		let settled = false;
+		return {
+			get signal() {
+				return NEVER_ABORTED_SIGNAL;
+			},
+			step: "admitted",
+			advance(_step: LaunchStep) {
+				if (settled) throw new Error("Launch transaction is already settled.");
+			},
+			own(rollback: () => void) {
+				if (settled) {
+					try {
+						rollback();
+					} catch {}
+					return;
+				}
+				rollbacks.push(rollback);
+			},
+			throwIfAborted() {},
+			abort() {
+				if (settled) return;
+				for (const rollback of rollbacks.reverse()) {
+					try {
+						rollback();
+					} catch {}
+				}
+				rollbacks.length = 0;
+				settled = true;
+			},
+			commit() {
+				if (settled) throw new Error("Launch transaction is already settled.");
+				settled = true;
+				rollbacks.length = 0;
+			},
+			rollback() {
+				if (settled) return;
+				settled = true;
+				for (const rollback of rollbacks.reverse()) {
+					try {
+						rollback();
+					} catch {}
+				}
+				rollbacks.length = 0;
+			},
+		} as unknown as LaunchTransaction;
 	}
 
 	function waitForRunCompletion(
@@ -760,7 +1152,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		return waitForCompletion(signal, {
 			intervalMs: 1000,
 			sessionFile: running.sessionFile,
-			expectedRunId: running.id,
+			expectedRunId: running.attemptId ?? running.id,
 			...watchTimeoutOption(running, options),
 			readTerminalTail: () => readPaneAsync(running.surface, 5),
 			inspectPane: async () =>
@@ -791,9 +1183,29 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		running.lifecycle = markCompletionDetected(running.lifecycle, completion, detectedAt);
 		deps.updateWidget();
 		const summary = readCompletionSummary(running, completion);
-		const disposition = applySettlementDisposition(running, completion.reason);
+		const disposition = applySettlementDisposition(running, completion);
 		running.lifecycle = terminalLifecycle(running, completion, summary);
 		return completionResult(running, completion, summary, detectedAt, disposition.watchAbandoned);
+	}
+
+	/** Attempt counts for the exhaustion presentation: only a retryable failure
+	 * that actually exhausted the attempt cap may claim exhaustion. */
+	function exhaustionAttempts(
+		running: RunningSubagent,
+		completion: CompletionResult,
+	):
+		| {
+				attempts: number;
+				maxAttempts: number;
+		  }
+		| undefined {
+		if (!isRetryableCompletion(completion)) return undefined;
+		const attempts = running.attempt ?? 1;
+		const maxAttempts = running.maxAttempts ?? MAX_RUN_ATTEMPTS;
+		// Only a failure that actually exhausted the cap may claim exhaustion —
+		// e.g. an abort racing a retryable sidecar at attempt 1 of 3 must not.
+		if (attempts < maxAttempts) return undefined;
+		return { attempts, maxAttempts };
 	}
 
 	function settlementSourceFor(reason: CompletionResult["reason"]): SettlementSource {
@@ -880,6 +1292,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		detectedAt: number,
 		watchAbandoned: boolean,
 	): SubagentResult {
+		const exhausted = exhaustionAttempts(running, completion);
 		return {
 			name: running.name,
 			task: running.task,
@@ -888,6 +1301,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			exitCode: completion.exitCode,
 			elapsed: Math.floor((detectedAt - running.startTime) / 1000),
 			...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
+			...(exhausted ? { attempts: exhausted.attempts, maxAttempts: exhausted.maxAttempts } : {}),
 			...(watchAbandoned ? { watchAbandoned: true } : {}),
 		};
 	}
@@ -1045,6 +1459,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			elapsed: result.elapsed,
 			sessionFile: result.sessionFile,
 			...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+			...(result.attempts != null ? { attempts: result.attempts, maxAttempts: result.maxAttempts } : {}),
 			...(result.watchAbandoned ? { watchAbandoned: true } : {}),
 			...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
 		};

@@ -20,8 +20,7 @@ const STREAM_ACK_MAX_WAIT_MS = 60 * 60_000;
 export const MAX_PENDING_DELIVERY_ATTEMPTS = 8;
 export const DEFERRED_DELIVERY_MAX_MS = 60 * 60_000;
 export const PRIMARY_DELIVERY_GRACE_MS = 8000;
-export const WAKE_MESSAGE =
-	"[pi-subagent-herdr] Automated notice: one or more background subagent results were delivered to this session. Review the latest subagent_result messages and continue.";
+export const WAKE_MESSAGE = "Subagent result delivered. Continue.";
 
 export interface ActiveCompletionRuntime {
 	api: ExtensionAPI;

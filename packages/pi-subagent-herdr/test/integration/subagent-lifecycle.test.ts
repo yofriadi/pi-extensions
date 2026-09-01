@@ -231,53 +231,6 @@ for (const backend of backends) {
 			assert.ok(contentB.includes(`DONE_B_${id}`), `File B should contain marker`);
 		});
 
-		// ── Fork mode ──
-
-		it("fork mode creates a child session linked to the parent", async () => {
-			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-fork-${id}.txt`;
-			trackTempFile(env, markerFile);
-
-			const surface = createTrackedSurface(env, `fork-${id}`);
-			await sleep(1000);
-
-			const task = [
-				`Call the subagent tool with these EXACT parameters:`,
-				`  label: "Fork-${id}"`,
-				`  agent: "test-fork"`,
-				`  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-				`After you receive the result, say FORK_COMPLETE.`,
-			].join("\n");
-
-			startPi(surface, env.dir, task);
-
-			// Verify: forked subagent created the file
-			const content = await waitForFile(markerFile, PI_TIMEOUT, /FORK_OK/);
-			assert.ok(content.includes(`FORK_OK_${id}`), `Fork marker file should exist with content`);
-
-			// Wait for the outer pi to show the result
-			const screen = await waitForScreen(surface, /FORK_COMPLETE|completed|Sub-agent.*"Fork/i, PI_TIMEOUT);
-
-			// Receiving the result proves the agent-owned fork seed auto-exited and finalized.
-
-			// Verify: the forked session has a parent link
-			const sessionMatch = screen.match(/Session log:\s*(\S+\.jsonl)/);
-			if (sessionMatch) {
-				const sessionFile = sessionMatch[1];
-				assert.ok(existsSync(sessionFile), `Fork session file should exist: ${sessionFile}`);
-
-				const entries = readFileSync(sessionFile, "utf8")
-					.trim()
-					.split("\n")
-					.map((l) => JSON.parse(l));
-				const header = entries[0];
-				assert.equal(header.type, "session", "First entry should be session header");
-				assert.ok(header.parentSession, "Fork session should have parentSession field");
-				// Fork sessions include parent context (model_change entries etc.)
-				assert.ok(entries.length >= 2, "Fork session should have context entries beyond header");
-			}
-		});
-
 		// ── Agent discovery ──
 
 		it("subagent discovers project-local test agents", async () => {
@@ -576,7 +529,6 @@ for (const backend of backends) {
 					"---",
 					`name: ${agentId}`,
 					"tools: bash",
-					"seed: fresh",
 					"permission:",
 					"  bash: allow",
 					"---",

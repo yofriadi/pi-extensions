@@ -12,6 +12,7 @@ import {
 	markDelivery,
 	markFailed,
 	markInterruptRequested,
+	markRetrying,
 	observePaneInspection,
 } from "../src/lifecycle.ts";
 import { createPlainWidgetTheme, createTaggedWidgetTheme } from "./widget-theme.ts";
@@ -168,6 +169,38 @@ describe("agents dashboard rows", () => {
 		assert.match(text, /⚠ Reviewer · \[stalled\]/);
 		assert.match(text, /stalled 1m08s/);
 		assert.doesNotMatch(text, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reviewer · \[(blocked|waiting|interrupted|stalled)\]/);
+	});
+
+	it("renders retrying runs with attempt counts, animated glyphs, and active counting", () => {
+		const attempt2 = markRetrying(workingLifecycle(), 2, 3, 9_000);
+		const attempt3 = markRetrying(workingLifecycle(), 3, 3, 9_500);
+		const lines = withNow(10_000, () =>
+			testApi.renderSubagentWidgetLines(
+				[baseRun({ id: "retry2", lifecycle: attempt2 }), baseRun({ id: "retry3", lifecycle: attempt3 })],
+				160,
+				plainTheme,
+			),
+		);
+		const text = lines.join("\n");
+		// Both attempts render the retry lead with their attempt count.
+		assert.match(text, /retrying \(2\/3\)/);
+		assert.match(text, /retrying \(3\/3\)/);
+		// Distinct from delivery-retry vocabulary.
+		assert.doesNotMatch(text, /delivery retry/);
+		// Retry rows animate (spinner glyph at a 1s clock).
+		assert.match(text, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reviewer · \[retry2\]/);
+		assert.match(text, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reviewer · \[retry3\]/);
+		// Counted as live/active work in the header.
+		assert.match(lines[0], /●.*Subagents.*2 active/);
+	});
+
+	it("renders retrying runs in the two-line family with duration since the retry began", () => {
+		const lifecycle = markRetrying(workingLifecycle(), 2, 3, 8_000);
+		const lines = withNow(10_000, () =>
+			testApi.renderSubagentWidgetLines([baseRun({ id: "r2", lifecycle })], 160, taggedTheme),
+		);
+		assert.match(lines[1], /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reviewer · \[r2\] · background · 9s/);
+		assert.match(lines[2], /⎿ {2}retrying \(2\/3\) 2s/);
 	});
 
 	it("omits a fabricated run label and starts the activity line with telemetry", () => {

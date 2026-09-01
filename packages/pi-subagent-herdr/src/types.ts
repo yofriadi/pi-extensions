@@ -1,10 +1,12 @@
 import type { SubagentActivityState } from "./activity.ts";
+import type { AgentDefinition } from "./agent-definition.ts";
 import type { AdmissionLease } from "./coordinator.ts";
 import type { ForegroundBarrierLease } from "./delivery-barrier.ts";
 import type { LaunchTransaction } from "./launch-transaction.ts";
 import type { LifecycleProjection, PaneInspection, SubagentLifecycle } from "./lifecycle.ts";
 import type { ResolvedRuntimePlan } from "./runtime-routing.ts";
 import type { SessionLease } from "./session-leases.ts";
+import type { SelectedSkill } from "./skills.ts";
 import type { SubagentStatusState } from "./status.ts";
 
 /** Result from running a single subagent. */
@@ -16,8 +18,12 @@ export interface SubagentResult {
 	exitCode: number;
 	elapsed: number;
 	error?: string;
-	/** Provider/agent error message when auto-retry exhausted. */
+	/** Provider/agent error message; only retry-exhausted runs carry the exhaustion statement. */
 	errorMessage?: string;
+	/** Total attempts run when the failure exhausted automatic retries. */
+	attempts?: number;
+	/** Attempt ceiling that was exhausted (3 = initial + 2 retries). */
+	maxAttempts?: number;
 	alreadySettled?: boolean;
 	/** Watching stopped without completion evidence; outcome remains unknown. */
 	watchAbandoned?: boolean;
@@ -57,6 +63,31 @@ export interface RunningSubagent {
 	completionTimeoutMs?: number;
 	watchAbandoned?: boolean;
 	inspectPaneOverride?: () => Promise<PaneInspection>;
+	/** Test-only: replaces replacement-surface creation during a retry relaunch. */
+	attachSurfaceOverride?: (options: {
+		name: string;
+		direction: string;
+		layout: unknown;
+		surface: string;
+		cwd: string;
+	}) => Promise<{ paneId: string; warning?: string }>;
+	/** True when the session file was caller-supplied for explicit resume. */
+	resumed?: boolean;
+	/** Current attempt number (1-based); run identity stays stable across attempts. */
+	attempt?: number;
+	/** Attempt ceiling for automatic retries of well-formed error sidecars. */
+	maxAttempts?: number;
+	/** Per-attempt child-facing id; regenerated on every retry relaunch. */
+	attemptId?: string;
+	/** Retained launch inputs so a retry relaunch can rebuild the command verbatim. */
+	launchParams?: any;
+	agentDefinition?: AgentDefinition;
+	selectedSkills?: SelectedSkill[];
+	effectiveCwd?: string;
+	/** The parent's resolved agent dir, retained so retry relaunches reproduce
+	 * PI_CODING_AGENT_DIR verbatim instead of re-deriving from the env. */
+	agentDir?: string;
+	projectTrusted?: boolean;
 }
 
 export interface QueuedSubagent {
@@ -90,7 +121,6 @@ export interface StableParentContext {
 	projectTrusted: boolean;
 	sessionFile?: string;
 	sessionId: string;
-	sessionDir: string;
 }
 
 export type DeliveryWaitKind = "barrier" | "turn-boundary" | "verifying";

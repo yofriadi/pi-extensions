@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
 import * as completionModule from "../src/completion.ts";
 import { __herdrTest__ } from "../src/herdr.ts";
 import * as subagentsModule from "../src/index.ts";
+import { getSubagentArtifactDir } from "../src/session.ts";
 import * as subagentDoneModule from "../src/subagent-done.ts";
 import { shouldCloseSubagentPane } from "../src/terminal.ts";
 
@@ -85,7 +86,6 @@ describe("agent-definition frontmatter scalar parsing", () => {
 			'thinking: "high"',
 			'tools: "read,grep"   # core tools',
 			'skills: "review, lint"',
-			"seed: fresh  # fork would inherit parent history",
 			"permission:",
 			"  bash: deny",
 			"---",
@@ -96,7 +96,6 @@ describe("agent-definition frontmatter scalar parsing", () => {
 		assert.equal(parsed.thinking, "high");
 		assert.equal(parsed.tools, "read,grep");
 		assert.equal(parsed.skills, "review, lint");
-		assert.equal(parsed.seed, "fresh");
 		assert.equal(parsed.body, "You are the reviewer.");
 		assert.match(parsed.frontmatter, /permission:\n {2}bash: deny/);
 	});
@@ -106,14 +105,12 @@ describe("agent-definition frontmatter scalar parsing", () => {
 			"---",
 			'model: "fake/model#v2"  # trailing comment',
 			"tools: read,grep # no quotes",
-			"seed: fork",
 			"---",
 			"Body.",
 		].join("\n");
 		const parsed = testApi.parseAgentDefinition(content, "reviewer", "/tmp/r.md", "global");
 		assert.equal(parsed.model, "fake/model#v2");
 		assert.equal(parsed.tools, "read,grep");
-		assert.equal(parsed.seed, "fork");
 	});
 
 	it("treats null/empty scalars as omitted for optional fields", () => {
@@ -122,6 +119,21 @@ describe("agent-definition frontmatter scalar parsing", () => {
 		assert.equal(parsed.model, undefined);
 		assert.equal(parsed.thinking, undefined);
 		assert.equal(parsed.skills, undefined);
+	});
+
+	it("loudly rejects obsolete seed frontmatter with a migration-style error", () => {
+		for (const seedLine of ["seed: fresh", "seed: fork", 'seed: "fork"']) {
+			assert.throws(
+				() =>
+					testApi.parseAgentDefinition(
+						`---\nname: reviewer\ntools: read\n${seedLine}\n---\nBody.`,
+						"reviewer",
+						"/tmp/r.md",
+						"global",
+					),
+				/seed is no longer supported; subagents always start fresh/,
+			);
+		}
 	});
 });
 
@@ -593,7 +605,7 @@ describe("subagent-done agent_settled lifecycle", () => {
 	}
 
 	function readSidecar(sessionFile: string): any | null {
-		const p = `${sessionFile}.exit`;
+		const p = join(getSubagentArtifactDir(sessionFile), "exit.json");
 		return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 	}
 
@@ -631,6 +643,7 @@ describe("subagent-done agent_settled lifecycle", () => {
 			assert.equal(sidecar?.type, "error", "terminal error sidecar published at settle");
 			assert.match(String(sidecar?.errorMessage), /quota exhausted/);
 			assert.equal(mock.calls.shutdown, 0, "error no longer auto-exits — pane preserved");
+			assert.equal(existsSync(`${sessionFile}.exit`), false, "no flat legacy sidecar path");
 		} finally {
 			mock.restore();
 			rmSync(dir, { recursive: true, force: true });
@@ -743,7 +756,13 @@ describe("round-4 delivery and pane fixes", () => {
 		const sessionFile = join(dir, "child.jsonl");
 		try {
 			writeFileSync(sessionFile, "");
-			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done", runId: "old-run" }));
+			const artifactDir = getSubagentArtifactDir(sessionFile);
+			mkdirSync(artifactDir, { recursive: true });
+			writeFileSync(join(artifactDir, "launch.sh"), "#!/bin/bash\n");
+			writeFileSync(join(artifactDir, "task.md"), "task");
+			writeFileSync(join(artifactDir, "sysprompt.md"), "prompt");
+			writeFileSync(join(artifactDir, "activity.json"), "{}");
+			writeFileSync(join(artifactDir, "exit.json"), JSON.stringify({ type: "done", runId: "old-run" }));
 			const signal = AbortSignal.timeout(400);
 			// waitForCompletion rejects on abort; the point is the stale sidecar was
 			// consumed (deleted) and did NOT resolve as another run's outcome.
@@ -756,7 +775,11 @@ describe("round-4 delivery and pane fixes", () => {
 				}),
 				/Aborted while waiting/,
 			);
-			assert.ok(!existsSync(`${sessionFile}.exit`), "stale sidecar deleted");
+			assert.ok(!existsSync(join(artifactDir, "exit.json")), "stale sidecar deleted");
+			for (const name of ["launch.sh", "task.md", "sysprompt.md", "activity.json"]) {
+				assert.ok(existsSync(join(artifactDir, name)), `stale sidecar must not delete the live run's ${name}`);
+			}
+			assert.ok(existsSync(artifactDir), "companion directory preserved on rejected sidecar");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

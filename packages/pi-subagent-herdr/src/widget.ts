@@ -187,7 +187,7 @@ function fitActivityContent(
 }
 
 function lifecycleGlyph(kind: LifecycleProjection["kind"], now: number): string {
-	if (kind === "starting" || kind === "running" || kind === "active")
+	if (["starting", "running", "active", "retrying"].includes(kind))
 		return SPINNER_FRAMES[Math.floor(now / 1000) % SPINNER_FRAMES.length];
 	if (kind === "blocked") return "◆";
 	if (kind === "waiting") return "◷";
@@ -205,6 +205,12 @@ function lifecycleActivityLead(
 	const runLabel = agent.agent && agent.name !== agent.agent ? sanitizeWidgetText(agent.name).trim() : undefined;
 	const duration = lifecycleStateDuration(projection, now);
 	if (["starting", "running", "active"].includes(projection.kind)) return runLabel;
+	if (projection.kind === "retrying") {
+		return joinLifecycleLead(
+			`retrying (${projection.attempt ?? "?"}/${projection.maxAttempts ?? "?"})${duration}`,
+			runLabel,
+		);
+	}
 	if (projection.kind === "blocked") return joinLifecycleLead(`blocked${duration}`, runLabel);
 	if (["waiting", "interrupted", "stalled"].includes(projection.kind)) return `${projection.kind}${duration}`;
 	if (["finalizing", "completed", "failed"].includes(projection.kind)) return deliveryLifecycleLead(agent, now);
@@ -273,17 +279,19 @@ function renderWidgetHeader(
 
 function widgetCounts(rendered: RenderedWidgetRun[], queued: QueuedSubagent[], pending: PendingDelivery[]) {
 	const active = rendered.filter(({ projection }) =>
-		["active", "starting", "running", "blocked"].includes(projection.kind),
+		["active", "starting", "running", "blocked", "retrying"].includes(projection.kind),
 	).length;
 	const awaitingRuntime = pending.filter((entry) => !entry.exhausted && entry.deferredSince !== undefined).length;
-	const retrying = pending.filter((entry) => !entry.exhausted && entry.deferredSince === undefined).length;
+	const deliveryRetrying = pending.filter((entry) => !entry.exhausted && entry.deferredSince === undefined).length;
+	const attemptRetrying = rendered.filter(({ projection }) => projection.kind === "retrying").length;
 	return {
 		active,
 		open: rendered.length - active,
 		queued: queued.length,
 		awaitingRuntime,
-		retrying,
-		undeliverable: pending.length - retrying - awaitingRuntime,
+		retrying: deliveryRetrying,
+		attemptRetrying,
+		undeliverable: pending.length - deliveryRetrying - awaitingRuntime,
 	};
 }
 
@@ -293,6 +301,7 @@ function widgetCountChunks(agentCount: number, queuedCount: number, counts: Retu
 		agentCount - counts.active > 0 ? `${counts.open} open` : undefined,
 		queuedCount > 0 ? `${counts.queued} queued` : undefined,
 		counts.retrying > 0 ? `${counts.retrying} delivery retrying` : undefined,
+		counts.attemptRetrying > 0 ? `${counts.attemptRetrying} retrying` : undefined,
 		counts.awaitingRuntime > 0 ? `${counts.awaitingRuntime} awaiting runtime` : undefined,
 		counts.undeliverable > 0 ? `${counts.undeliverable} undeliverable` : undefined,
 	].filter((chunk): chunk is string => chunk != null);
@@ -640,11 +649,14 @@ function resultRunTag(details: ResultMessageDetails): string {
 	return details.id ? ` [${details.id}]` : "";
 }
 
+/** Strip the presentation's provider/agent-error first line so the widget's own
+ * `failed (provider/agent error)` header is not duplicated in the summary. Handles
+ * all wording variants: exhausted (old and new) and non-exhausted. */
 function providerFailurePrefix(presentation: ResultMessagePresentation): RegExp {
 	const name = escapeRegExp(presentation.name);
 	const id = presentation.details.id ? ` \\[${escapeRegExp(String(presentation.details.id))}\\]` : "";
 	return new RegExp(
-		`^Sub-agent "${name}"${id} failed after ${presentation.elapsed} \\(provider/agent error — auto-retry exhausted\\)\\.\\n\\n`,
+		`^Sub-agent "${name}"${id} failed after ${presentation.elapsed} \\(provider/agent error(?: — auto-retry exhausted(?: after \\d+ attempts)?)?\\)\\.\\n\\n`,
 	);
 }
 

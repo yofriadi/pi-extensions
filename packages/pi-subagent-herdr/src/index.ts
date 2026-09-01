@@ -1,14 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import {
-	type ActivityReadResult,
-	getSubagentActivityFile,
-	readSubagentActivityFile,
-	type SubagentActivityState,
-} from "./activity.ts";
+import { type ActivityReadResult, readSubagentActivityFile, type SubagentActivityState } from "./activity.ts";
 import {
 	type AgentDefinition,
 	loadAgentDefinition,
@@ -54,6 +48,7 @@ import {
 	projectLifecycle,
 	type SubagentLifecycle,
 } from "./lifecycle.ts";
+import { getSubagentArtifactDir } from "./session.ts";
 import { parseSelectedSkillNames, resolveSelectedSkills } from "./skills.ts";
 import {
 	DELIVERY_RETRY_INTERVAL_KEY,
@@ -144,6 +139,11 @@ const SubagentParams = Type.Object({
 	}),
 	task: Type.String({ description: "Task/prompt for the sub-agent" }),
 	label: Type.Optional(Type.String({ description: "Presentation-only run label; never changes agent authority" })),
+	session: Type.Optional(
+		Type.String({
+			description: "Path to an owned existing subagent session log to resume instead of starting a new session",
+		}),
+	),
 	blocking: Type.Optional(
 		Type.Boolean({
 			description:
@@ -174,21 +174,13 @@ function lifecycleDenySet(): Set<string> {
 	return new Set<string>(LIFECYCLE_DENY_TOOLS);
 }
 
-function resolveEffectiveSeed(agentDefs: AgentDefinition): "fresh" | "fork" {
-	return agentDefs.seed;
-}
-
-function resolveLaunchBehavior(agentDefs: AgentDefinition): {
-	seed: "fresh" | "fork";
+function resolveLaunchBehavior(_agentDefs: AgentDefinition): {
 	inheritsConversationContext: boolean;
 	taskDelivery: "direct" | "artifact";
 } {
-	const seed = resolveEffectiveSeed(agentDefs);
-	const inheritsConversationContext = seed === "fork";
 	return {
-		seed,
-		inheritsConversationContext,
-		taskDelivery: inheritsConversationContext ? "direct" : "artifact",
+		inheritsConversationContext: false,
+		taskDelivery: "artifact",
 	};
 }
 
@@ -212,16 +204,6 @@ function getShellReadyDelayMs(): number {
 	const raw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
 	const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
 	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
-}
-
-/**
- * Build the internal artifact directory path for the current session.
- * Used by the subagents extension to stash task files, system prompts, and
- * launch scripts for sub-agents. Path convention:
- *   <sessionDir>/artifacts/<session-id>/
- */
-function getArtifactDir(sessionDir: string, sessionId: string): string {
-	return join(sessionDir, "artifacts", sessionId);
 }
 
 const STATUS_LINE_LIMIT = DEFAULT_STATUS_LINE_LIMIT;
@@ -279,7 +261,14 @@ function resolveDirection(
 function resolveResultPresentation(
 	result: Pick<
 		SubagentResult,
-		"exitCode" | "elapsed" | "summary" | "sessionFile" | "errorMessage" | "watchAbandoned"
+		| "exitCode"
+		| "elapsed"
+		| "summary"
+		| "sessionFile"
+		| "errorMessage"
+		| "watchAbandoned"
+		| "attempts"
+		| "maxAttempts"
 	>,
 	name: string,
 	runId?: string,
@@ -303,13 +292,16 @@ function resolveResultPresentation(
 	}
 
 	if (result.errorMessage) {
-		// Auto-retry exhausted or other agent-loop error. The subagent did not
-		// produce a usable result — surface the underlying provider/network
-		// failure so the orchestrator can decide whether to retry or change
-		// approach instead of silently treating the run as completed.
+		// Provider/agent error. The exhaustion statement appears ONLY when the
+		// failure actually exhausted automatic retries — a non-retried failure
+		// (malformed sidecar, pane disappearance, errored watch) must never claim it.
+		const exhausted = result.attempts != null && result.maxAttempts != null;
+		const qualifier = exhausted
+			? `provider/agent error — auto-retry exhausted after ${result.attempts} attempts`
+			: "provider/agent error";
 		return (
 			`Sub-agent ${who} failed after ${formatElapsed(result.elapsed)} ` +
-			`(provider/agent error — auto-retry exhausted).\n\n` +
+			`(${qualifier}).\n\n` +
 			`Error: ${result.errorMessage}\n\n` +
 			`The subagent did not produce a result. You can retry by spawning a new ` +
 			`subagent; the user can inspect or continue it directly from its pane.${sessionRef}`
@@ -335,14 +327,12 @@ function resolveResultPresentation(
 function snapshotParentContext(ctx: ExtensionContext): StableParentContext {
 	const sessionFile = ctx.sessionManager.getSessionFile();
 	const sessionId = ctx.sessionManager.getSessionId();
-	const sessionDir = ctx.sessionManager.getSessionDir();
 	return {
 		cwd: ctx.cwd,
 		agentDir: getAgentDir(),
 		projectTrusted: ctx.isProjectTrusted(),
 		sessionFile,
 		sessionId,
-		sessionDir,
 	};
 }
 
@@ -545,8 +535,11 @@ function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now(
 	ensureLifecycle(running);
 
 	const activityFile = running.activityFile;
+	// Validate against the CURRENT attempt id — a retry attempt's recorder
+	// writes a fresh activity.json stamped with the new attempt id, and a
+	// stale comparand would flip every read to wrong-id.
 	const read: ActivityReadResult = activityFile
-		? readSubagentActivityFile(activityFile, running.id)
+		? readSubagentActivityFile(activityFile, running.attemptId ?? running.id)
 		: { ok: false, reason: "missing" };
 
 	if (read.ok === true) {
@@ -652,12 +645,10 @@ const {
 	lifecycleDenySet,
 	buildSystemPromptFileContent,
 	buildSubagentToolAllowlist,
-	buildLaunchArtifactName,
 	safeCommentValue,
 	createRunId,
-	getArtifactDir,
 	getShellReadyDelayMs,
-	getSubagentActivityFile,
+	getSubagentArtifactDir,
 	runScriptInPane,
 	createLifecycle,
 	ensureLifecycle,
@@ -700,7 +691,6 @@ export const __test__ = {
 	validateCanonicalAgentId,
 	buildActiveAgentTag,
 	buildSystemPromptFileContent,
-	resolveEffectiveSeed,
 	resolveLaunchBehavior,
 	resolveBlocking,
 	resolveLayout,
@@ -709,7 +699,6 @@ export const __test__ = {
 	EXTENSION_DEFAULTS,
 	appendLayoutWarning,
 	buildSubagentToolAllowlist,
-	buildLaunchArtifactName,
 	safeCommentValue,
 	parseSelectedSkillNames,
 	resolveSelectedSkills,
@@ -813,10 +802,6 @@ export function buildSystemPromptFileContent(options: { agentName: string; ident
 		content: options.identity ? `${tag}\n${options.identity}` : tag,
 		flag: "--append-system-prompt",
 	};
-}
-
-export function buildLaunchArtifactName(agentName: string, timestamp: string, runId: string): string {
-	return `${agentName || "subagent"}-${timestamp}-${runId}.md`;
 }
 
 function createRunId(): string {

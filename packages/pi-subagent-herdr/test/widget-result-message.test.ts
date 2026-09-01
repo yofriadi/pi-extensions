@@ -29,7 +29,7 @@ describe("subagent result renderers", () => {
 		const output = renderedResult(
 			{
 				content:
-					'Sub-agent "Reviewer" [run-2] failed after 5s (provider/agent error — auto-retry exhausted).\n\nRate limited.',
+					'Sub-agent "Reviewer" [run-2] failed after 5s (provider/agent error — auto-retry exhausted after 3 attempts).\n\nRate limited.',
 				details: {
 					name: "Reviewer",
 					id: "run-2",
@@ -37,6 +37,8 @@ describe("subagent result renderers", () => {
 					exitCode: 1,
 					errorMessage: "Rate limited",
 					sessionFile: "/tmp/failed-child.jsonl",
+					attempts: 3,
+					maxAttempts: 3,
 				},
 			},
 			true,
@@ -46,6 +48,32 @@ describe("subagent result renderers", () => {
 		assert.match(output, /Rate limited\./);
 		assert.match(output, /Session log: \/tmp\/failed-child.jsonl/);
 		assert.doesNotMatch(output, /auto-retry exhausted/);
+	});
+
+	it("strips the non-exhausted provider-failure first line without an exhaustion claim", () => {
+		// A non-retried failure (malformed sidecar, pane disappearance, errored
+		// watch) prints `(provider/agent error)` — no exhaustion statement — and
+		// the widget must still strip that first line without duplicating it.
+		const output = renderedResult(
+			{
+				content:
+					'Sub-agent "Reviewer" [run-9] failed after 7s (provider/agent error).\n\nSubagent pane disappeared.',
+				details: {
+					name: "Reviewer",
+					id: "run-9",
+					elapsed: 7,
+					exitCode: 1,
+					errorMessage: "Subagent pane disappeared.",
+				},
+			},
+			true,
+		);
+
+		assert.match(output, /failed \(provider\/agent error\)/);
+		assert.match(output, /Subagent pane disappeared\./);
+		assert.doesNotMatch(output, /auto-retry exhausted/);
+		// The duplicated presentation first line is stripped from the summary.
+		assert.doesNotMatch(output, /Sub-agent "Reviewer" \[run-9\] failed after 7s/);
 	});
 
 	it("keeps abandoned outcomes distinct from failures", () => {

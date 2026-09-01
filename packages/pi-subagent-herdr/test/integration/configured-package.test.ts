@@ -213,7 +213,6 @@ describeSpawned("configured-package fixture: async completion delivery (spawned)
 					"name: test-package-skill",
 					"tools: read, bash",
 					`skills: ${skillName}`,
-					"seed: fresh",
 					"---",
 					`You are a package-skill integration agent. Read the explicitly selected ${skillName} SKILL.md, then immediately run the exact bash command in the task. Use no other tools, do not inspect the environment, and never use unselected skills.`,
 					"",

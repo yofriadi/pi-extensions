@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { DEFAULT_COMPLETION_TIMEOUT_MS, formatTimeoutBudget, waitForCompletion } from "../src/completion.ts";
+import { getSubagentArtifactDir } from "../src/session.ts";
 
 const noTail = async () => "";
 
@@ -34,8 +35,10 @@ describe("waitForCompletion — bounded watch deadline", () => {
 		const runId = "race-run-1";
 		// Publish the sidecar after the deadline fires but inside the bounded
 		// artifact grace window, so the raced-evidence path is the one exercised.
+		const exitFile = join(getSubagentArtifactDir(sessionFile), "exit.json");
+		mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 		const timer = setTimeout(() => {
-			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done", runId }));
+			writeFileSync(exitFile, JSON.stringify({ type: "done", runId }));
 		}, 70);
 		try {
 			const controller = new AbortController();
@@ -50,6 +53,7 @@ describe("waitForCompletion — bounded watch deadline", () => {
 			assert.equal(result.reason, "done", "real evidence must win over a synthetic timeout");
 			assert.equal(result.exitCode, 0);
 			assert.equal(result.runId, runId);
+			assert.equal(existsSync(exitFile), false, "the accepted sidecar is consumed");
 		} finally {
 			clearTimeout(timer);
 			rmSync(dir, { recursive: true, force: true });

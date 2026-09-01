@@ -63,6 +63,8 @@ export interface SubagentLifecycle {
 	hasWorked: boolean;
 	lastActivitySequence: number | null;
 	delivery: CompletionDelivery;
+	/** Non-null while the run waits to relaunch an automatic retry attempt. */
+	retry: { attempt: number; maxAttempts: number; since: number } | null;
 }
 
 export interface LifecycleProjection {
@@ -74,12 +76,16 @@ export interface LifecycleProjection {
 		| "waiting"
 		| "interrupted"
 		| "stalled"
+		| "retrying"
 		| "finalizing"
 		| "completed"
 		| "failed";
 	label?: string;
 	runtimeEndedAt?: number;
 	stateDurationSince?: number;
+	/** Present only on the retrying projection. */
+	attempt?: number;
+	maxAttempts?: number;
 }
 
 export function createLifecycle(startedAt: number): SubagentLifecycle {
@@ -92,6 +98,7 @@ export function createLifecycle(startedAt: number): SubagentLifecycle {
 		hasWorked: false,
 		lastActivitySequence: null,
 		delivery: "pending",
+		retry: null,
 	};
 }
 
@@ -505,11 +512,41 @@ export function markDelivery(lifecycle: SubagentLifecycle, delivery: CompletionD
 	return { ...lifecycle, delivery };
 }
 
+/** Enter the retrying state for an automatic retry relaunch (backoff wait). */
+export function markRetrying(
+	lifecycle: SubagentLifecycle,
+	attempt: number,
+	maxAttempts: number,
+	since: number,
+): SubagentLifecycle {
+	if (lifecycle.process.kind === "finalizing" || isTerminal(lifecycle.process)) return lifecycle;
+	return { ...lifecycle, retry: { attempt, maxAttempts, since } };
+}
+
+/** Clear the retrying state once the retry attempt launches. */
+export function clearRetry(lifecycle: SubagentLifecycle): SubagentLifecycle {
+	if (lifecycle.retry === null) return lifecycle;
+	return { ...lifecycle, retry: null };
+}
+
 export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): LifecycleProjection {
 	const process = lifecycle.process;
 	if (process.kind === "finalizing") return { kind: "finalizing", runtimeEndedAt: process.detectedAt };
 	if (process.kind === "completed") return { kind: "completed", runtimeEndedAt: process.completedAt };
 	if (process.kind === "failed") return { kind: "failed", label: process.error, runtimeEndedAt: process.completedAt };
+
+	// Retry backoff takes precedence over any stale per-attempt turn state, so
+	// the widget never reads a frozen "active 3m" while the run waits to relaunch.
+	// `!= null` (not `!== null`): a lifecycle hydrated from a pre-retry module version
+	// has no `retry` field at all (undefined), which must NOT project as retrying.
+	if (lifecycle.retry != null) {
+		return {
+			kind: "retrying",
+			stateDurationSince: lifecycle.retry.since,
+			attempt: lifecycle.retry.attempt,
+			maxAttempts: lifecycle.retry.maxAttempts,
+		};
+	}
 
 	// Pi activity is optional enrichment. Only authoritative Herdr inspection
 	// unavailability may produce a stalled projection.
@@ -556,6 +593,7 @@ export function lifecycleTransition(
 			next === "blocked" ||
 			next === "waiting" ||
 			next === "interrupted" ||
+			next === "retrying" ||
 			next === "running" ||
 			next === "starting")
 	) {
@@ -581,6 +619,7 @@ const recoveredLifecycleLines: Record<LifecycleProjection["kind"], RecoveredLife
 	starting: runningRecoveryLine,
 	running: runningRecoveryLine,
 	stalled: runningRecoveryLine,
+	retrying: runningRecoveryLine,
 	finalizing: runningRecoveryLine,
 	completed: runningRecoveryLine,
 	failed: runningRecoveryLine,

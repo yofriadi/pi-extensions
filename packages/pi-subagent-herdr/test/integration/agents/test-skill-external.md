@@ -2,7 +2,6 @@
 name: test-skill-external
 tools: read, bash
 skills: external-selected
-seed: fresh
 permission:
   "*": allow
   skill:

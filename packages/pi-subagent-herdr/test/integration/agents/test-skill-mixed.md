@@ -2,7 +2,6 @@
 name: test-skill-mixed
 tools: read, bash
 skills: manual-selected, normal-selected
-seed: fresh
 permission:
   "*": allow
 ---

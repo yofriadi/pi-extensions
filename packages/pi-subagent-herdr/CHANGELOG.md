@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Automatic in-extension retries for well-formed child error sidecars (provider rate limits, quota exhaustion, error-terminated child turns): up to 3 total attempts against the same session file, with the failed attempt's pane closed and confirmed gone before a stepped backoff (5s, 15s) relaunches through the same launch pipeline with a fresh per-attempt id. Malformed sidecars, pane disappearance, watch abandonment, and aborts are never retried. The widget presents `retrying (2/3)` during backoff, and exhaustion reports `provider/agent error — auto-retry exhausted after 3 attempts`.
+- Optional `session` parameter on the `subagent` tool for explicit, ownership-gated resumption of an existing subagent session file (must live under the invoking parent's child-sessions directory, carry this parent session and agent in its ownership header, and be lease-free). Validation is side-effect-free and happens before queue admission; a failed launch never deletes the caller-supplied transcript.
+
+### Changed
+
+- Shorten the automated parent wake notice to `"Subagent result delivered. Continue."` — provenance is carried by the delivered result payload.
+- The retry-exhaustion statement now appears only on failures that actually exhausted automatic retries; non-retried provider/agent failures print `(provider/agent error)` without an exhaustion claim.
+
+### Breaking
+
+- Remove the `seed` (`fresh` | `fork`) agent frontmatter option. Subagents always start with fresh conversation context; `seed` presence now fails validation before queueing with a migration-style error.
+
 ## [0.5.0] - 2026-08-16
 
 ### Fixed

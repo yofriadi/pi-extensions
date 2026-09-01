@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createSubagentActivityRecorder, getSubagentActivityFile, readSubagentActivityFile } from "../src/activity.ts";
-import { interpretExitSidecar, waitForCompletion } from "../src/completion.ts";
+import { interpretExitSidecar, isRetryableCompletion, waitForCompletion } from "../src/completion.ts";
 import { __herdrTest__, isHerdrAvailable } from "../src/herdr.ts";
 import * as subagentsModule from "../src/index.ts";
 import {
@@ -32,6 +33,7 @@ import {
 	findObservedSessionRuntime,
 	getLeafId,
 	getNewEntries,
+	getSubagentArtifactDir,
 	mergeNewEntries,
 	seedSubagentSessionFile,
 } from "../src/session.ts";
@@ -261,6 +263,55 @@ describe("session.ts", () => {
 		});
 	});
 
+	describe("getSubagentArtifactDir", () => {
+		it("maps a .jsonl session file to its sibling companion directory", () => {
+			assert.equal(getSubagentArtifactDir(join(dir, "child.jsonl")), join(dir, "child"));
+		});
+
+		it("throws on any input not ending in .jsonl — no silent fallback", () => {
+			// A fallback would alias the artifact dir to the session file itself, and
+			// every deletion site is recursive — this must fail closed.
+			for (const input of ["session.json", "session", "session.jsonl.bak", ""])
+				assert.throws(() => getSubagentArtifactDir(input), /must end in \.jsonl/);
+		});
+	});
+
+	describe("Pi session discovery", () => {
+		it("ignores companion directories beside session files (real SessionManager.list)", async () => {
+			const sessionsDir = mkdtempSync(join(tmpdir(), "pi-sessions-discovery-"));
+			try {
+				const childFile = join(sessionsDir, "child.jsonl");
+				writeFileSync(
+					childFile,
+					`${JSON.stringify({
+						type: "session",
+						version: 3,
+						id: "discovery-child",
+						timestamp: new Date().toISOString(),
+						// list(cwd, sessionDir) only returns sessions whose header cwd
+						// matches the first argument — keep them identical here.
+						cwd: sessionsDir,
+					})}\n`,
+				);
+				const companion = getSubagentArtifactDir(childFile);
+				mkdirSync(companion, { recursive: true });
+				writeFileSync(join(companion, "launch.sh"), "#!/bin/bash\n");
+				writeFileSync(join(companion, "activity.json"), "{}\n");
+
+				const sessions = await SessionManager.list(sessionsDir, sessionsDir);
+				const paths = sessions.map((s) => s.path);
+				assert.ok(paths.includes(childFile), "the session itself must remain discoverable");
+				assert.ok(
+					paths.every((p) => p.endsWith(".jsonl")),
+					"no discovery result may be a companion directory or non-jsonl file",
+				);
+				assert.ok(!paths.some((p) => p === companion), "the companion directory must not appear as a session");
+			} finally {
+				rmSync(sessionsDir, { recursive: true, force: true });
+			}
+		});
+	});
+
 	describe("getNewEntries", () => {
 		it("returns entries after a given line", () => {
 			const file = createSessionFile(dir, [SESSION_HEADER, MODEL_CHANGE, USER_MSG, ASSISTANT_MSG]);
@@ -440,7 +491,6 @@ describe("session.ts", () => {
 			const childFile = join(dir, "lineage-child.jsonl");
 
 			seedSubagentSessionFile({
-				mode: "lineage-only",
 				parentSessionFile: parentFile,
 				childSessionFile: childFile,
 				childCwd: "/tmp/child-cwd",
@@ -460,7 +510,6 @@ describe("session.ts", () => {
 			const childFile = join(dir, "owned-child.jsonl");
 
 			seedSubagentSessionFile({
-				mode: "fresh",
 				parentSessionFile: parentFile,
 				childSessionFile: childFile,
 				childCwd: "/tmp/owned-child-cwd",
@@ -469,55 +518,22 @@ describe("session.ts", () => {
 			});
 
 			const header = JSON.parse(readFileSync(childFile, "utf8").trim());
-			const ownerFile = `${childFile}.owner.json`;
-			const owner = JSON.parse(readFileSync(ownerFile, "utf8"));
+			assert.equal(header.subagentOwner.version, 2);
 			assert.equal(header.subagentOwner.agentId, "reviewer");
 			assert.equal(header.subagentOwner.parentSessionId, "parent-session-1");
 			assert.match(header.subagentOwner.token, /^[a-f0-9]{64}$/);
-			assert.equal(owner.agentId, "reviewer");
-			assert.equal(owner.parentSessionId, "parent-session-1");
-			assert.equal(owner.parentSessionFile, parentFile);
-			assert.equal(owner.token, header.subagentOwner.token);
+			assert.equal(existsSync(`${childFile}.owner.json`), false);
 			assert.equal(statSync(childFile).mode & 0o777, 0o600);
-			assert.equal(statSync(ownerFile).mode & 0o777, 0o600);
 		});
 
-		it("creates a forked child session with copied context before the triggering user turn", () => {
-			const parentFile = createSessionFile(dir, [SESSION_HEADER, MODEL_CHANGE, USER_MSG, ASSISTANT_MSG]);
-			const childFile = join(dir, "fork-child.jsonl");
-
-			seedSubagentSessionFile({
-				mode: "fork",
-				parentSessionFile: parentFile,
-				childSessionFile: childFile,
-				childCwd: "/tmp/fork-child-cwd",
-			});
-
-			const entries = readFileSync(childFile, "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
-			assert.equal(entries.length, 2);
-			assert.equal(entries[0].type, "session");
-			assert.equal(entries[0].parentSession, parentFile);
-			assert.equal(entries[0].cwd, "/tmp/fork-child-cwd");
-			assert.equal(entries[1].type, "model_change");
-			assert.equal(
-				entries.some((entry) => entry.type === "session" && entry.parentSession !== parentFile),
-				false,
-			);
-			assert.equal(
-				entries.some((entry) => entry.type === "message"),
-				false,
-			);
-		});
+		// Forked sessions are gone: `seed` frontmatter is rejected loudly and every
+		// session starts fresh with no copied turns (covered by the first test).
 
 		it("writes session_info entry when sessionName is supplied", () => {
 			const parentFile = createSessionFile(dir, [SESSION_HEADER, USER_MSG]);
 			const childFile = join(dir, "named-child.jsonl");
 
 			seedSubagentSessionFile({
-				mode: "fresh",
 				parentSessionFile: parentFile,
 				childSessionFile: childFile,
 				childCwd: "/tmp/named-child-cwd",
@@ -928,7 +944,6 @@ describe("strict subagent definitions", () => {
 			"thinking: high",
 			"tools: read,grep",
 			"skills: review, lint",
-			"seed: fork",
 			"permission:",
 			"  bash: deny",
 			"---",
@@ -941,7 +956,6 @@ describe("strict subagent definitions", () => {
 		assert.equal(parsed.thinking, "high");
 		assert.equal(parsed.tools, "read,grep");
 		assert.equal(parsed.skills, "review, lint");
-		assert.equal(parsed.seed, "fork");
 		assert.equal(parsed.body, "You are the reviewer.");
 		assert.match(parsed.frontmatter, /permission:\n {2}bash: deny/);
 	});
@@ -981,8 +995,12 @@ describe("strict subagent definitions", () => {
 			/obsolete system-prompt/,
 		);
 		assert.throws(
-			() => testApi.parseAgentDefinition("---\nseed: sideways\n---\nbody\n", "reviewer", "/tmp/reviewer.md"),
-			/seed must be fresh or fork/,
+			() => testApi.parseAgentDefinition("---\nseed: fresh\n---\nbody\n", "reviewer", "/tmp/reviewer.md"),
+			/seed is no longer supported/,
+		);
+		assert.throws(
+			() => testApi.parseAgentDefinition("---\nseed: fork\n---\nbody\n", "reviewer", "/tmp/reviewer.md"),
+			/seed is no longer supported/,
 		);
 	});
 
@@ -1021,31 +1039,16 @@ describe("strict subagent definitions", () => {
 		});
 	});
 
-	it("uses agent seed only and builds fresh/fork launch behavior", () => {
-		assert.deepEqual(testApi.resolveLaunchBehavior({ seed: "fresh" }), {
-			seed: "fresh",
+	it("always launches fresh with artifact task delivery", () => {
+		assert.deepEqual(testApi.resolveLaunchBehavior({}), {
 			inheritsConversationContext: false,
 			taskDelivery: "artifact",
-		});
-		assert.deepEqual(testApi.resolveLaunchBehavior({ seed: "fork" }), {
-			seed: "fork",
-			inheritsConversationContext: true,
-			taskDelivery: "direct",
 		});
 	});
 
 	it("keeps agent tools authoritative and adds protocol controls", () => {
 		assert.equal(testApi.buildSubagentToolAllowlist("read,bash"), "read,bash,subagent_done");
 		assert.throws(() => testApi.buildSubagentToolAllowlist(undefined), /explicit non-empty allowlist/);
-	});
-
-	it("includes stable run IDs in same-second launch artifact names", () => {
-		const timestamp = "2026-08-05T13-31-28";
-		const first = testApi.buildLaunchArtifactName("reviewer", timestamp, "a".repeat(32));
-		const second = testApi.buildLaunchArtifactName("reviewer", timestamp, "b".repeat(32));
-		assert.notEqual(first, second);
-		assert.match(first, /reviewer-2026-08-05T13-31-28-a{32}\.md$/);
-		assert.match(second, /reviewer-2026-08-05T13-31-28-b{32}\.md$/);
 	});
 
 	it("normalizes ordered selected skills and rejects empty/duplicate names", () => {
@@ -1067,6 +1070,7 @@ describe("strict subagent definitions", () => {
 			"direction",
 			"label",
 			"layout",
+			"session",
 			"surface",
 			"task",
 		]);
@@ -1605,7 +1609,6 @@ describe("completion.ts", () => {
 			exitCode: 0,
 		});
 	});
-
 	it("decodes error payloads and propagates the message with a non-zero exit code", () => {
 		assert.deepEqual(
 			interpretExitSidecar({
@@ -1617,8 +1620,19 @@ describe("completion.ts", () => {
 				reason: "error",
 				exitCode: 1,
 				errorMessage: "Anthropic 529 Overloaded after 3 retries",
+				fromErrorSidecar: true,
 			},
 		);
+	});
+
+	it("marks only well-formed error sidecars as retryable", () => {
+		assert.equal(
+			isRetryableCompletion({ reason: "error", exitCode: 1, errorMessage: "boom", fromErrorSidecar: true }),
+			true,
+		);
+		assert.equal(isRetryableCompletion({ reason: "error", exitCode: 1, errorMessage: "boom" }), false);
+		assert.equal(isRetryableCompletion({ reason: "timeout", exitCode: 1 }), false);
+		assert.equal(isRetryableCompletion({ reason: "done", exitCode: 0 }), false);
 	});
 
 	it("falls back to a placeholder when error payload has no errorMessage", () => {
@@ -1652,7 +1666,9 @@ describe("completion.ts", () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-sidecar-own-"));
 		const sessionFile = join(dir, "session.jsonl");
 		writeFileSync(sessionFile, "");
-		writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "mystery", runId: "run-current" }));
+		const artifactDir = getSubagentArtifactDir(sessionFile);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "exit.json"), JSON.stringify({ type: "mystery", runId: "run-current" }));
 		try {
 			const result = await waitForCompletion(new AbortController().signal, {
 				intervalMs: 1,
@@ -1673,7 +1689,11 @@ describe("completion.ts", () => {
 		const sessionFile = join(dir, "session.jsonl");
 		writeFileSync(sessionFile, "");
 		// Owned by an older run: must be ignored for THIS run, not surface its error.
-		writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done", runId: "run-old" }));
+		mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
+		writeFileSync(
+			join(getSubagentArtifactDir(sessionFile), "exit.json"),
+			JSON.stringify({ type: "done", runId: "run-old" }),
+		);
 		try {
 			const controller = new AbortController();
 			const result = await waitForCompletion(controller.signal, {
@@ -1692,7 +1712,8 @@ describe("completion.ts", () => {
 	it("consumes a sidecar and removes it", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-sidecar-"));
 		const sessionFile = join(dir, "session.jsonl");
-		const exitFile = `${sessionFile}.exit`;
+		const exitFile = join(getSubagentArtifactDir(sessionFile), "exit.json");
+		mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 		writeFileSync(exitFile, JSON.stringify({ type: "done" }));
 		try {
 			const result = await waitForCompletion(new AbortController().signal, {
@@ -1712,9 +1733,10 @@ describe("completion.ts", () => {
 
 	it("discards stale sidecars without treating them as the current run's failure", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-owned-sidecar-"));
-		const sessionFile = join(dir, "session.json");
-		const exitFile = `${sessionFile}.exit`;
+		const sessionFile = join(dir, "session.jsonl");
+		const exitFile = join(getSubagentArtifactDir(sessionFile), "exit.json");
 		try {
+			mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 			writeFileSync(exitFile, JSON.stringify({ type: "done", runId: "old-run" }));
 			await assert.rejects(
 				waitForCompletion(AbortSignal.timeout(30), {
@@ -1803,12 +1825,17 @@ describe("completion.ts", () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-race-"));
 		const sessionFile = join(dir, "child.jsonl");
 		try {
+			// Create the companion directory before the race: the sidecar write
+			// happens inside the pane probe, after which only the grace-period
+			// sidecar sweep runs — no fresh mkdir between probe and sweep.
+			const exitFile = join(getSubagentArtifactDir(sessionFile), "exit.json");
+			mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 			const result = await waitForCompletion(new AbortController().signal, {
 				intervalMs: 1,
 				sessionFile,
 				readTerminalTail: async () => "",
 				inspectPane: async () => {
-					writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+					writeFileSync(exitFile, JSON.stringify({ type: "done" }));
 					return { kind: "missing", error: "pane_not_found" };
 				},
 			});
@@ -1821,8 +1848,9 @@ describe("completion.ts", () => {
 	it("waits briefly for delayed sidecar publication after pane disappearance", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-delayed-race-"));
 		const sessionFile = join(dir, "child.jsonl");
+		mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 		const timer = setTimeout(() => {
-			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+			writeFileSync(join(getSubagentArtifactDir(sessionFile), "exit.json"), JSON.stringify({ type: "done" }));
 		}, 30);
 		try {
 			const result = await waitForCompletion(new AbortController().signal, {
@@ -2266,7 +2294,7 @@ describe("subagent activity snapshots", () => {
 
 	it("writes and validates activity files by running child id", () => {
 		withTempDir((dir) => {
-			const activityFile = getSubagentActivityFile(dir, "child-1");
+			const activityFile = getSubagentActivityFile(join(dir, "child-1.jsonl"));
 			const recorder = createSubagentActivityRecorder({
 				runningChildId: "child-1",
 				activityFile,
@@ -2292,7 +2320,7 @@ describe("subagent activity snapshots", () => {
 	it("records waiting and final done states", () => {
 		withTempDir((dir) => {
 			let currentNow = 2_000;
-			const activityFile = getSubagentActivityFile(dir, "child-2");
+			const activityFile = getSubagentActivityFile(join(dir, "child-2.jsonl"));
 			const recorder = createSubagentActivityRecorder({
 				runningChildId: "child-2",
 				activityFile,
@@ -2318,7 +2346,6 @@ describe("subagent activity snapshots", () => {
 
 	it("rejects malformed activity fields used by classification and rendering", () => {
 		withTempDir((dir) => {
-			mkdirSync(join(dir, "subagent-activity"), { recursive: true });
 			const cases = [
 				{ activeSince: "bad" },
 				{ waitingSince: "bad" },
@@ -2330,7 +2357,9 @@ describe("subagent activity snapshots", () => {
 			];
 
 			for (const [index, overrides] of cases.entries()) {
-				const activityFile = getSubagentActivityFile(dir, `child-${index}`);
+				const sessionFile = join(dir, `child-${index}.jsonl`);
+				const activityFile = getSubagentActivityFile(sessionFile);
+				mkdirSync(getSubagentArtifactDir(sessionFile), { recursive: true });
 				const activity = validActivity({ runningChildId: `child-${index}`, ...overrides });
 				writeFileSync(activityFile, `${JSON.stringify(activity)}\n`);
 
@@ -2344,7 +2373,7 @@ describe("subagent activity snapshots", () => {
 	it("does not let tool_result resurrect finished tool activity", () => {
 		withTempDir((dir) => {
 			let currentNow = 1_000;
-			const activityFile = getSubagentActivityFile(dir, "child-3");
+			const activityFile = getSubagentActivityFile(join(dir, "child-3.jsonl"));
 			const recorder = createSubagentActivityRecorder({
 				runningChildId: "child-3",
 				activityFile,
@@ -2370,7 +2399,7 @@ describe("subagent activity snapshots", () => {
 
 	it("does not mark reload shutdown as the final done snapshot", () => {
 		withTempDir((dir) => {
-			const activityFile = getSubagentActivityFile(dir, "child-4");
+			const activityFile = getSubagentActivityFile(join(dir, "child-4.jsonl"));
 			const recorder = createSubagentActivityRecorder({
 				runningChildId: "child-4",
 				activityFile,
@@ -2392,7 +2421,7 @@ describe("subagent activity snapshots", () => {
 		try {
 			await new Promise<void>((resolve) => {
 				let currentNow = 1_000;
-				const activityFile = getSubagentActivityFile(dir, "child-5");
+				const activityFile = getSubagentActivityFile(join(dir, "child-5.jsonl"));
 				const recorder = createSubagentActivityRecorder({
 					runningChildId: "child-5",
 					activityFile,
@@ -2420,7 +2449,7 @@ describe("subagent activity snapshots", () => {
 	it("preserves activity sequence across reload so post-reload interruption and direct continuation stay fresh", () => {
 		withTempDir((dir) => {
 			let currentNow = 1_000;
-			const activityFile = getSubagentActivityFile(dir, "child-reload");
+			const activityFile = getSubagentActivityFile(join(dir, "child-reload.jsonl"));
 			const first = createSubagentActivityRecorder({
 				runningChildId: "child-reload",
 				activityFile,
@@ -2468,7 +2497,7 @@ describe("subagent activity snapshots", () => {
 	it("preserves an interruption marker through reload until newer child activity begins", () => {
 		withTempDir((dir) => {
 			let currentNow = 1_000;
-			const activityFile = getSubagentActivityFile(dir, "child-interrupted-reload");
+			const activityFile = getSubagentActivityFile(join(dir, "child-interrupted-reload.jsonl"));
 			const first = createSubagentActivityRecorder({
 				runningChildId: "child-interrupted-reload",
 				activityFile,
@@ -2537,10 +2566,31 @@ describe("subagent result presentation", () => {
 		);
 
 		assert.match(presentation, /Sub-agent "Worker" failed/);
-		assert.match(presentation, /provider\/agent error — auto-retry exhausted/);
+		// Without attempt counts the failure is NOT claimed as retry-exhausted.
+		assert.match(presentation, /provider\/agent error\)\./);
+		assert.doesNotMatch(presentation, /auto-retry exhausted/);
 		assert.match(presentation, /Error: Anthropic 529 Overloaded after 3 retries/);
 		assert.match(presentation, /Session log: \/tmp\/subagent\.jsonl/);
 		assert.doesNotMatch(presentation, /ignored when errorMessage is present/);
+	});
+
+	it("states auto-retry exhaustion only when attempts were actually exhausted", () => {
+		const testApi = (subagentsModule as any).__test__;
+		const exhausted = testApi.resolveResultPresentation(
+			{
+				exitCode: 1,
+				elapsed: 94,
+				summary: "ignored",
+				sessionFile: "/tmp/subagent.jsonl",
+				errorMessage: "Anthropic 529 Overloaded after 3 retries",
+				attempts: 3,
+				maxAttempts: 3,
+			},
+			"Worker",
+			"run-1",
+		);
+		assert.match(exhausted, /provider\/agent error — auto-retry exhausted after 3 attempts\)\./);
+		assert.match(exhausted, /Session log: \/tmp\/subagent\.jsonl/);
 	});
 });
 

@@ -27,7 +27,6 @@ function stableContext(cwd: string, sessionId: string) {
 		projectTrusted: true,
 		sessionFile: join(cwd, "parent.jsonl"),
 		sessionId,
-		sessionDir: join(cwd, "session-data"),
 	};
 }
 

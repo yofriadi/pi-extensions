@@ -37,16 +37,15 @@ model: provider/model       # optional; omitted means inherit parent
 thinking: high              # optional; omitted means inherit parent
 tools: read,grep
 skills: code-review, colgrep
-seed: fresh                 # fresh (default) or fork
 permission:                 # preserved for pi-permission-system
   bash: deny
 ---
 You are a focused reviewer. Report correctness and security issues.
 ```
 
-Owned keys are `name?`, `model?`, `thinking?`, `tools`, `skills`, and `seed`.
+Owned keys are `name?`, `model?`, `thinking?`, `tools`, and `skills`.
 The Markdown body is the sole agent-authored identity prompt.
-Obsolete `system-prompt` is rejected.
+Obsolete `system-prompt` and `seed` frontmatter are rejected loudly — subagents always start fresh.
 Legacy `enabled`, `interactive`, `auto-exit`, `cwd`, spawning/deny fields, and per-call profile overrides are not part of this API.
 
 ## Use
@@ -55,15 +54,28 @@ Legacy `enabled`, `interactive`, `auto-exit`, `cwd`, spawning/deny fields, and p
 subagent({ agent: "reviewer", task: "Review the authentication changes" })
 subagent({ agent: "reviewer", task: "Review before I continue", blocking: true })
 subagent({ agent: "reviewer", label: "auth-review", task: "Review auth" })
+subagent({ agent: "reviewer", task: "Continue where you left off", session: "/path/to/child-session.jsonl" })
 ```
 
 `agent` and `task` are required. `label` is presentation-only; permissions, tools, skills, model routing, session lineage, and the stable run ID remain bound to the canonical agent ID.
 
+### Automatic retries
+
+When a child attempt ends with a well-formed provider/agent error sidecar (for example a 429 rate limit or quota exhaustion), the extension automatically retries the run up to 3 total attempts: the failed attempt's pane is closed and confirmed gone, and after a stepped backoff (5s, then 15s) the same session file is relaunched through the same launch pipeline with a fresh per-attempt id — the transcript, agent configuration, flags, and environment are preserved verbatim.
+Malformed sidecars, pane disappearance, watch abandonment, and user aborts are never retried.
+The widget shows `retrying (2/3)` during backoff, and a failure that exhausts all attempts reports `provider/agent error — auto-retry exhausted after 3 attempts`.
+
+### Explicit session resume
+
+The optional `session` parameter resumes an existing subagent session file instead of starting a new one.
+The target must be an existing file under this parent's child-sessions directory whose header records this parent session and this exact agent, and it must not be held by a live run.
+Validation happens before queue admission — a rejected resume creates no pane, session, lease, or admission state, and a later launch failure never deletes the pre-existing transcript.
+
 ### Parent tool
 
-| Tool       | Parameters                                                                               |
-| ---------- | ---------------------------------------------------------------------------------------- |
-| `subagent` | required `agent`, `task`; optional `label`, `blocking`, `layout`, `surface`, `direction` |
+| Tool       | Parameters                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------------------- |
+| `subagent` | required `agent`, `task`; optional `label`, `blocking`, `layout`, `surface`, `direction`, `session` |
 
 Interrupt and resume are done by the user directly in the subagent's herdr pane (Escape to interrupt, type to resume) — there are no agent-facing lifecycle tools beyond `subagent`.
 Children never receive the parent lifecycle tool.

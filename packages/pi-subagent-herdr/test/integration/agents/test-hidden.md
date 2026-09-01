@@ -1,7 +1,6 @@
 ---
 name: test-hidden
 tools: bash, subagent
-seed: fresh
 permission:
   "*": allow
 ---

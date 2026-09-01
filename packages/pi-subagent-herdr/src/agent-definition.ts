@@ -2,8 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type SeedMode = "fresh" | "fork";
-
 export interface AgentDefinition {
 	id: string;
 	sourcePath: string;
@@ -12,7 +10,6 @@ export interface AgentDefinition {
 	thinking?: string;
 	tools: string;
 	skills?: string;
-	seed: SeedMode;
 	body: string;
 	/** Original frontmatter is retained so other extensions remain its consumers. */
 	frontmatter: string;
@@ -45,9 +42,9 @@ export function validateCanonicalAgentId(value: unknown): string {
  * Focused frontmatter scalar parser for the owned agent-definition subset.
  *
  * Pi agent definitions use flat `key: value` scalars for the fields this
- * extension owns (name, model, thinking, tools, skills, seed). Values may be
+ * extension owns (name, model, thinking, tools, skills). Values may be
  * quoted and carry trailing inline comments — both of which a naive line regex
- * gets wrong (e.g. `seed: fresh # fork from parent` yields `fresh # ...`, and
+ * gets wrong (e.g. `tools: read # only reading` yields `read # ...`, and
  * `name: "reviewer"` keeps the quotes). This parser strips comments outside
  * quotes, unquotes scalars, and ignores indented nested blocks (such as
  * `permission:`) which are retained verbatim via the raw `frontmatter` string.
@@ -220,9 +217,10 @@ export function parseAgentDefinition(
 		throw new AgentDefinitionError(`Invalid subagent ${JSON.stringify(id)}: frontmatter name must match filename.`);
 	}
 
-	const seedValue = scalarString(scalars.seed);
-	if (seedValue !== undefined && seedValue !== "fresh" && seedValue !== "fork") {
-		throw new AgentDefinitionError(`Invalid subagent ${JSON.stringify(id)}: seed must be fresh or fork.`);
+	if (scalars.seed !== undefined) {
+		throw new AgentDefinitionError(
+			`Invalid subagent ${JSON.stringify(id)}: seed is no longer supported; subagents always start fresh — remove it from the agent definition.`,
+		);
 	}
 
 	const tools = validateToolsProfile(scalars.tools, id);
@@ -238,7 +236,6 @@ export function parseAgentDefinition(
 		thinking: scalarString(scalars.thinking),
 		tools,
 		skills: scalarString(scalars.skills),
-		seed: (seedValue as SeedMode | undefined) ?? "fresh",
 		body,
 		frontmatter,
 	};

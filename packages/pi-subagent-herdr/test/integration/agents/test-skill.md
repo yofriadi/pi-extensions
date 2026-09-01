@@ -2,7 +2,6 @@
 name: test-skill
 tools: read, bash
 skills: manual-selected
-seed: fresh
 ---
 
 You are a selected-skill integration agent.

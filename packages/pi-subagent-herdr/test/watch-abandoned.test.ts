@@ -69,45 +69,69 @@ describe("resolveResultPresentation — abandoned watch is not a reported failur
 	});
 });
 
-const resolveSettlementDisposition: (reason: string) => {
+type DispositionResult = {
 	watchAbandoned: boolean;
 	preservePane: boolean;
+	preserveArtifacts: boolean;
 	releaseAdmissionNow: boolean;
-} = testApi.resolveSettlementDisposition;
+};
+const resolveSettlementDisposition: (
+	result: { reason: string; exitCode?: number; runId?: string },
+	runningId?: string,
+) => DispositionResult = testApi.resolveSettlementDisposition;
 
 describe("resolveSettlementDisposition — pane and capacity policy", () => {
 	it("releases capacity immediately for an abandoned watch", () => {
 		// The leak this prevents: a timed-out child is the one most likely never to
 		// exit, so tying its slot to pane closure holds a background slot forever.
 		// Four of them would block all later background work permanently.
-		const d = resolveSettlementDisposition("timeout");
+		const d = resolveSettlementDisposition({ reason: "timeout", exitCode: 1 });
 		assert.equal(d.releaseAdmissionNow, true, "admission must not wait for pane closure");
 		assert.equal(d.watchAbandoned, true);
+		assert.equal(d.preserveArtifacts, true, "an abandoned watch must keep <stem>/ for inspection");
 	});
 
 	it("keeps the abandoned run's pane instead of reaping it", () => {
 		// We do not know the run failed — only that we stopped watching. The child
 		// may hold live work, and killing it is unrecoverable while leaving a pane
 		// costs only a pane.
-		assert.equal(resolveSettlementDisposition("timeout").preservePane, true);
+		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).preservePane, true);
 	});
 
 	it("keeps a reported error's pane but frees its admission slot", () => {
 		// The child has exited, so the pane is inspectable but dead — yet leaving the
 		// admission slot held until the user closes that pane lets a handful of error
 		// panes block all later work. Only the session lease follows pane closure.
-		const d = resolveSettlementDisposition("error");
+		const d = resolveSettlementDisposition({ reason: "error", exitCode: 1 });
 		assert.equal(d.preservePane, true);
 		assert.equal(d.releaseAdmissionNow, true);
 		assert.equal(d.watchAbandoned, false);
+		assert.equal(d.preserveArtifacts, true, "an error preserves <stem>/ for diagnosis");
 	});
 
-	for (const reason of ["done", "sentinel"]) {
-		it(`closes the pane normally for a ${reason} completion`, () => {
-			const d = resolveSettlementDisposition(reason);
+	const success: Array<[string, { reason: string; exitCode: number; runId?: string }]> = [
+		["owned sidecar", { reason: "done", exitCode: 0, runId: "run-1" }],
+		["sentinel", { reason: "sentinel", exitCode: 0 }],
+	];
+	for (const [label, result] of success) {
+		it(`closes the pane and deletes artifacts normally for a ${label} success`, () => {
+			const d = resolveSettlementDisposition(result, "run-1");
 			assert.equal(d.preservePane, false, "a normal completion must still be reaped");
 			assert.equal(d.watchAbandoned, false);
 			assert.equal(d.releaseAdmissionNow, false, "normal close/reap frees capacity via the usual path");
+			assert.equal(d.preserveArtifacts, false, "a success deletes <stem>/");
 		});
 	}
+
+	it("preserves artifacts for a nonzero sentinel exit", () => {
+		const d = resolveSettlementDisposition({ reason: "sentinel", exitCode: 7 });
+		assert.equal(d.preserveArtifacts, true, "a reason-keyed rule would delete a failed run's artifacts");
+	});
+
+	it("preserves artifacts for a sidecar success lacking the run's id (fail-closed)", () => {
+		const missing = resolveSettlementDisposition({ reason: "done", exitCode: 0 }, "run-1");
+		assert.equal(missing.preserveArtifacts, true, "absent runId must preserve");
+		const foreign = resolveSettlementDisposition({ reason: "done", exitCode: 0, runId: "other" }, "run-1");
+		assert.equal(foreign.preserveArtifacts, true, "mismatched runId must preserve");
+	});
 });

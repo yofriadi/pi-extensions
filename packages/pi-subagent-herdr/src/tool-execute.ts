@@ -1,3 +1,5 @@
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentDefinition, loadAgentDefinition } from "./agent-definition.ts";
 import { getAdmissionCoordinator } from "./coordinator.ts";
@@ -11,6 +13,7 @@ import { getForegroundDeliveryBarrier } from "./delivery-barrier.ts";
 import { finishLaunchTransaction } from "./launch-transaction.ts";
 import { markDelivery } from "./lifecycle.ts";
 import { resolveRuntimePlan, type ThinkingLevel, wrapPiModelRegistry } from "./runtime-routing.ts";
+import { canonicalSessionPath, getSessionLeaseRegistry } from "./session-leases.ts";
 import { resolveSelectedSkills, type SelectedSkill } from "./skills.ts";
 import { queuedSubagents, runningSubagents } from "./state.ts";
 import { isTerminalAvailable, terminalSetupHint } from "./terminal.ts";
@@ -40,6 +43,7 @@ type ToolExecuteDeps = {
 		runId: string;
 		admissionLease: AdmissionTicket["lease"];
 		projectTrusted: boolean;
+		resumeSessionFile?: string;
 	}) => Promise<RunningSubagent>;
 	captureStickyLaunchFailure: (params: {
 		id: string;
@@ -60,6 +64,7 @@ type ToolExecuteDeps = {
 			admissionClass?: "foreground" | "background";
 			admissionLease?: AdmissionTicket["lease"];
 			projectTrusted?: boolean;
+			resumeSessionFile?: string;
 		},
 	) => Promise<RunningSubagent>;
 	watchSubagent: (
@@ -94,6 +99,8 @@ type ResolvedLaunchContext = {
 	agentDefinition: AgentDefinition;
 	selectedSkills: SelectedSkill[];
 	runtimePlan: RuntimePlan;
+	/** Canonicalized caller-supplied resume target, when valid. */
+	resumeSessionFile?: string;
 };
 
 type Admission = {
@@ -143,9 +150,105 @@ async function resolveLaunchContext(
 			agentDir: stableCtx.agentDir,
 			projectTrusted: stableCtx.projectTrusted,
 		});
-		return { stableCtx, agentDefinition, selectedSkills, runtimePlan };
+		// Ownership-gated resume validation BEFORE admission: side-effect-free on
+		// failure (no pane, session, lease, or admission state is created).
+		const resumeSessionFile = validateResumeSession({
+			params: call.params,
+			stableCtx,
+			agentDefinition,
+		});
+		return { stableCtx, agentDefinition, selectedSkills, runtimePlan, resumeSessionFile };
 	} catch (error) {
 		return { result: failureResult(error) };
+	}
+
+	/** Pre-admission, side-effect-free validation of a caller-supplied `session`
+	 * resume target. Returns the canonical path, or undefined when no session was
+	 * supplied. Throws a concise error on any gate failure. */
+	function validateResumeSession(params: {
+		params: any;
+		stableCtx: StableParentContext;
+		agentDefinition: AgentDefinition;
+	}): string | undefined {
+		if (params.params.session == null) return undefined;
+		if (typeof params.params.session !== "string" || !params.params.session.trim()) {
+			throw new Error("Invalid session: a non-empty path is required.");
+		}
+		const supplied = params.params.session.trim();
+		// The suffix is what makes every companion-directory operation safe —
+		// reject it up front rather than letting getSubagentArtifactDir throw
+		// mid-launch after a pane has already been created.
+		if (!supplied.endsWith(".jsonl")) {
+			throw new Error(`Invalid session: ${supplied} is not a subagent session file (.jsonl).`);
+		}
+		const stat = statSync(supplied, { throwIfNoEntry: false });
+		if (!stat?.isFile()) {
+			throw new Error(`Invalid session: no existing subagent session file at ${supplied}.`);
+		}
+		const canonical = canonicalSessionPath(supplied);
+		const sessionsRoot = buildChildSessionsRoot(params.stableCtx.agentDir, params.stableCtx.cwd);
+		if (!isInsideDirectory(canonical, sessionsRoot)) {
+			throw new Error(`Invalid session: ${canonical} is outside this parent's child-sessions directory.`);
+		}
+		const owner = readSessionOwner(canonical);
+		if (!owner) {
+			throw new Error(`Invalid session: ${canonical} has no subagent ownership header.`);
+		}
+		if (owner.parentSessionId !== params.stableCtx.sessionId) {
+			throw new Error(`Invalid session: ${canonical} belongs to a different parent session.`);
+		}
+		if (owner.agentId !== params.agentDefinition.id) {
+			throw new Error(
+				`Invalid session: ${canonical} belongs to agent ${JSON.stringify(owner.agentId)}, not ${JSON.stringify(params.agentDefinition.id)}.`,
+			);
+		}
+		const lease = getSessionLeaseRegistry(params.stableCtx.sessionId).get(canonical);
+		if (lease) {
+			throw new Error(`Invalid session: ${canonical} is held by a live run (${lease.state}).`);
+		}
+		return canonical;
+	}
+
+	/** The child-sessions directory root this extension writes for the given cwd.
+	 * Canonicalized so the containment check agrees with the target's realpath. */
+	function buildChildSessionsRoot(agentDir: string, cwd: string): string {
+		const safeCwd = `--${resolve(cwd)
+			.replace(/^[/\\]/, "")
+			.replace(/[/\\:]/g, "-")}--`;
+		return canonicalSessionPath(join(resolve(agentDir), "sessions", safeCwd));
+	}
+
+	/** Symlink-safe containment: both sides canonicalized where possible. */
+	function isInsideDirectory(path: string, directory: string): boolean {
+		const relative = relativePath(directory, path);
+		return relative !== "" && !relative.startsWith("..") && !isAbsolute(relative);
+	}
+
+	function relativePath(from: string, to: string): string {
+		return relative(resolve(from), resolve(to));
+	}
+
+	type SessionOwnerHeader = { agentId: string; parentSessionId: string } | undefined;
+
+	function readSessionOwner(sessionFile: string): SessionOwnerHeader {
+		try {
+			const firstLine = readFileSync(sessionFile, "utf8").split("\n", 1)[0];
+			const header = JSON.parse(firstLine) as {
+				subagentOwner?: { agentId?: unknown; parentSessionId?: unknown };
+			};
+			const owner = header.subagentOwner;
+			if (
+				typeof owner?.agentId === "string" &&
+				typeof owner.parentSessionId === "string" &&
+				owner.agentId &&
+				owner.parentSessionId
+			) {
+				return { agentId: owner.agentId, parentSessionId: owner.parentSessionId };
+			}
+			return undefined;
+		} catch {
+			return undefined;
+		}
 	}
 }
 
@@ -330,6 +433,7 @@ function startQueuedBackgroundLaunch(
 		runId: admission.runId,
 		admissionLease: admission.ticket.lease,
 		projectTrusted: context.stableCtx.projectTrusted,
+		...(context.resumeSessionFile ? { resumeSessionFile: context.resumeSessionFile } : {}),
 	});
 }
 
@@ -437,6 +541,7 @@ function startBackgroundLaunch(
 		runId: admission.runId,
 		admissionLease: admission.ticket.lease,
 		projectTrusted: context.stableCtx.projectTrusted,
+		...(context.resumeSessionFile ? { resumeSessionFile: context.resumeSessionFile } : {}),
 	});
 }
 
@@ -495,6 +600,7 @@ async function launchBlockingRun(
 			admissionClass: admission.admissionClass,
 			admissionLease: admission.ticket.lease,
 			projectTrusted: context.stableCtx.projectTrusted,
+			...(context.resumeSessionFile ? { resumeSessionFile: context.resumeSessionFile } : {}),
 		});
 		running.foregroundBarrierLease = admission.foregroundBarrierLease;
 		running.suppressStatusSteer = true;

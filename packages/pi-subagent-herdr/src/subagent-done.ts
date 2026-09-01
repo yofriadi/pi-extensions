@@ -5,10 +5,12 @@
  */
 
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { getSubagentArtifactDir } from "./session.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
 	return agentStarted;
@@ -85,8 +87,10 @@ export function buildCompletionSidecar(
 }
 
 function writeCompletionSidecar(sessionFile: string, payload: object): void {
-	const exitFile = `${sessionFile}.exit`;
-	const temporary = `${exitFile}.${process.pid}.tmp`;
+	const artifactDir = getSubagentArtifactDir(sessionFile);
+	mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+	const exitFile = join(artifactDir, "exit.json");
+	const temporary = join(artifactDir, `exit.${process.pid}.tmp`);
 	writeFileSync(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
 	renameSync(temporary, exitFile);
 }
@@ -316,14 +320,15 @@ export default function (pi: ExtensionAPI) {
 		pendingAgentEndMessages = undefined;
 		const shouldExit = autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
 		const interrupted = didLatestAssistantAbort(messages);
-		publishSettledSidecar(messages, shouldExit, interrupted);
 		if (shouldExit) {
 			recorder.agentEndDone();
+			publishSettledSidecar(messages, shouldExit, interrupted);
 			ctx.shutdown();
 			return;
 		}
 		if (interrupted) recorder.agentEndInterrupted();
 		else recorder.agentEndWaiting();
+		publishSettledSidecar(messages, shouldExit, interrupted);
 		if (autoExit) userTookOver = false;
 	}
 

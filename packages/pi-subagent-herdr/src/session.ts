@@ -17,72 +17,20 @@ export interface MessageEntry extends SessionEntry {
 	};
 }
 
-export type SeededSubagentSessionMode = "fresh" | "fork" | "lineage-only"; // lineage-only = legacy alias of fresh
-
 /**
  * Schema for write-only session provenance. It records initial-dispatch lineage
  * for diagnostics and must not be read to authorize lifecycle operations.
  */
 export const SUBAGENT_OWNER_VERSION = 2;
 
-export interface SubagentSessionOwner {
-	version: typeof SUBAGENT_OWNER_VERSION;
-	token: string;
-	agentId: string;
-	parentSessionId: string;
-	parentSessionFile: string;
-	createdAt: string;
-}
-
-export function getSessionOwnerPath(sessionFile: string): string {
-	return `${sessionFile}.owner.json`;
-}
-
-export function writeSessionOwner(
-	sessionFile: string,
-	owner: Omit<SubagentSessionOwner, "version" | "createdAt">,
-): void {
-	const path = getSessionOwnerPath(sessionFile);
-	writeFileSync(
-		path,
-		`${JSON.stringify({
-			version: SUBAGENT_OWNER_VERSION,
-			...owner,
-			createdAt: new Date().toISOString(),
-		})}\n`,
-		{ encoding: "utf8", mode: 0o600 },
-	);
-	chmodSync(path, 0o600);
-}
-
-function getForkContentLines(parentSessionFile: string): string[] {
-	const raw = readFileSync(parentSessionFile, "utf8");
-	const lines = raw.split("\n").filter((line) => line.trim());
-
-	let truncateAt = lines.length;
-	for (let i = lines.length - 1; i >= 0; i--) {
-		try {
-			const entry = JSON.parse(lines[i]);
-			if (entry.type === "message" && entry.message?.role === "user") {
-				truncateAt = i;
-				break;
-			}
-		} catch {
-			// ignore malformed lines
-		}
+export function getSubagentArtifactDir(sessionFile: string): string {
+	if (!sessionFile.endsWith(".jsonl")) {
+		throw new Error(`Session file must end in .jsonl: ${sessionFile}`);
 	}
-
-	return lines.slice(0, truncateAt).filter((line) => {
-		try {
-			return JSON.parse(line).type !== "session";
-		} catch {
-			return true;
-		}
-	});
+	return sessionFile.slice(0, -".jsonl".length);
 }
 
 export function seedSubagentSessionFile(params: {
-	mode: SeededSubagentSessionMode;
 	parentSessionFile: string;
 	parentSessionId?: string;
 	agentId?: string;
@@ -120,29 +68,10 @@ export function seedSubagentSessionFile(params: {
 				}),
 			]
 		: [];
-	const contentLines =
-		params.mode === "fork"
-			? getForkContentLines(params.parentSessionFile).filter((line) => {
-					if (!params.sessionName) return true;
-					try {
-						return JSON.parse(line).type !== "session_info";
-					} catch {
-						return true;
-					}
-				})
-			: [];
-	const lines = [JSON.stringify(header), ...sessionInfoLines, ...contentLines];
+	const lines = [JSON.stringify(header), ...sessionInfoLines];
 	mkdirSync(dirname(params.childSessionFile), { recursive: true });
 	writeFileSync(params.childSessionFile, `${lines.join("\n")}\n`, "utf8");
 	chmodSync(params.childSessionFile, 0o600);
-	if (ownerToken && params.agentId && params.parentSessionId) {
-		writeSessionOwner(params.childSessionFile, {
-			token: ownerToken,
-			agentId: params.agentId,
-			parentSessionId: params.parentSessionId,
-			parentSessionFile: params.parentSessionFile,
-		});
-	}
 }
 
 function readEntries(sessionFile: string): SessionEntry[] {
@@ -217,7 +146,7 @@ export function findLastAssistantMessage(entries: SessionEntry[]): string | null
 			return `Subagent error: ${errorMessage.trim()}`;
 		}
 		// This is the newest assistant entry. Empty current output must not fall
-		// through to older text from the same seeded/forked session.
+		// through to older text from the same session.
 		return null;
 	}
 	return null;

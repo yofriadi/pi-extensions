@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -13,9 +13,13 @@ const watchSubagent: (
 	signal: AbortSignal,
 	options?: { releaseOwnership?: boolean; timeoutMs?: number },
 ) => Promise<any> = testApi.watchSubagent;
-const resolveSettlementDisposition: (reason: string) => {
+const resolveSettlementDisposition: (
+	result: { reason: string; exitCode?: number; runId?: string },
+	runningId?: string,
+) => {
 	watchAbandoned: boolean;
 	preservePane: boolean;
+	preserveArtifacts: boolean;
 	releaseAdmissionNow: boolean;
 } = testApi.resolveSettlementDisposition;
 const runningSubagents: Map<string, any> = testApi.runningSubagents;
@@ -41,6 +45,9 @@ function fakeAdmissionLease() {
 function makeRun(dir: string, id: string, timeoutMs: number) {
 	const sessionFile = join(dir, `${id}.jsonl`);
 	writeFileSync(sessionFile, "");
+	const artifactDir = join(dir, id);
+	mkdirSync(artifactDir, { recursive: true });
+	writeFileSync(join(artifactDir, "launch.sh"), "#!/bin/bash\n");
 	const sessionLease = getSessionLeaseRegistry().acquire(sessionFile, id, "running");
 	const admissionLease = fakeAdmissionLease();
 	const running: any = {
@@ -92,6 +99,12 @@ describe("abandoned watch — lease disposition", () => {
 				() => sessionLease.transition("finalizing"),
 				"the session lease must still be usable — delivery transitions it next",
 			);
+			assert.equal(
+				existsSync(join(dir, "abandon-1")),
+				true,
+				"an abandoned watch must preserve the companion directory for inspection",
+			);
+			assert.equal(existsSync(join(dir, "abandon-1", "launch.sh")), true);
 		} finally {
 			cleanup(running, sessionFile);
 			rmSync(dir, { recursive: true, force: true });
@@ -128,10 +141,11 @@ describe("preserve-then-release-admission policy is applied", () => {
 		// Structured error and abandoned watch both preserve the pane; both must free
 		// admission. The session lease is released only by the pane monitor at
 		// explicit disappearance (releaseRunOwnership), never here.
-		for (const reason of ["timeout", "error"]) {
-			const d = resolveSettlementDisposition(reason);
+		for (const reason of ["timeout", "error"] as const) {
+			const d = resolveSettlementDisposition({ reason, exitCode: 1 });
 			assert.equal(d.preservePane, true, `${reason} preserves the pane`);
 			assert.equal(d.releaseAdmissionNow, true, `${reason} frees admission at once`);
+			assert.equal(d.preserveArtifacts, true, `${reason} preserves <stem>/ for inspection`);
 		}
 		// The session lease is deliberately not part of either: releasing it inline
 		// is what made the subsequent transition throw (the Critical bug), so the
@@ -144,26 +158,41 @@ describe("resolveSettlementDisposition — admission vs session", () => {
 	it("frees admission for both abandoned watches and reported errors", () => {
 		// Both keep a pane for inspection, so neither may hold a slot until the user
 		// happens to close that pane: four such runs would block all later work.
-		assert.equal(resolveSettlementDisposition("timeout").releaseAdmissionNow, true);
-		assert.equal(resolveSettlementDisposition("error").releaseAdmissionNow, true);
+		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).releaseAdmissionNow, true);
+		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).releaseAdmissionNow, true);
 	});
 
 	it("still preserves the pane for both", () => {
-		assert.equal(resolveSettlementDisposition("timeout").preservePane, true);
-		assert.equal(resolveSettlementDisposition("error").preservePane, true);
+		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).preservePane, true);
+		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).preservePane, true);
 	});
 
 	it("marks only the timeout as an abandoned watch", () => {
-		assert.equal(resolveSettlementDisposition("timeout").watchAbandoned, true);
-		assert.equal(resolveSettlementDisposition("error").watchAbandoned, false);
+		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).watchAbandoned, true);
+		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).watchAbandoned, false);
 	});
 
-	for (const reason of ["done", "sentinel"]) {
-		it(`leaves a ${reason} completion on the normal close/reap path`, () => {
-			const d = resolveSettlementDisposition(reason);
+	const success: Array<[string, { reason: string; exitCode: number; runId?: string }]> = [
+		["owned sidecar", { reason: "done", exitCode: 0, runId: "run-1" }],
+		["sentinel", { reason: "sentinel", exitCode: 0 }],
+	];
+	for (const [label, result] of success) {
+		it(`leaves a ${label} success on the normal close/reap path and deletes artifacts`, () => {
+			const d = resolveSettlementDisposition(result, "run-1");
 			assert.equal(d.preservePane, false);
 			assert.equal(d.releaseAdmissionNow, false);
 			assert.equal(d.watchAbandoned, false);
+			assert.equal(d.preserveArtifacts, false, "a success deletes <stem>/");
 		});
 	}
+
+	it("preserves artifacts for a nonzero sentinel exit", () => {
+		const d = resolveSettlementDisposition({ reason: "sentinel", exitCode: 9 });
+		assert.equal(d.preserveArtifacts, true, "a reason-keyed rule would delete a failed run's artifacts");
+	});
+
+	it("preserves artifacts for a sidecar success lacking the run's id (fail-closed)", () => {
+		const d = resolveSettlementDisposition({ reason: "done", exitCode: 0 }, "run-1");
+		assert.equal(d.preserveArtifacts, true, "absent runId must preserve");
+	});
 });

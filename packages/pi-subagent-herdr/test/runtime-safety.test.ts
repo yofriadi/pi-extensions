@@ -93,7 +93,6 @@ it("snapshots queued launch inputs before the parent context can be invalidated"
 	assert.equal(stable.cwd, "/project-before-reload");
 	assert.equal(stable.sessionFile, "/tmp/parent-before.jsonl");
 	assert.equal(stable.sessionId, "parent-before");
-	assert.equal(stable.sessionDir, "/tmp/parent-before");
 	assert.equal(stable.projectTrusted, true);
 });
 

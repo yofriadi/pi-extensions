@@ -2,7 +2,6 @@
 name: test-skill-path
 tools: read, bash
 skills: manual-selected
-seed: fresh
 permission:
   "*": allow
   skill:

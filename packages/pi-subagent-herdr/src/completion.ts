@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { getSubagentArtifactDir } from "./session.ts";
 
-const ABORT_MESSAGE = "Aborted while waiting for subagent to finish";
+export const ABORT_MESSAGE = "Aborted while waiting for subagent to finish";
 const TERMINAL_SENTINEL = /__SUBAGENT_DONE_(\d+)__/;
 
 /** Default hard cap on watching a single subagent run. A watcher that never
@@ -20,6 +22,10 @@ export interface CompletionResult {
 	exitCode: number;
 	errorMessage?: string;
 	runId?: string;
+	/** True only for a well-formed child error sidecar (`type: "error"`) — the
+	 * sole retryable failure kind. Malformed sidecars, unsupported payloads,
+	 * and pane disappearance are shape-identical otherwise and are never retried. */
+	fromErrorSidecar?: boolean;
 }
 
 export interface CompletionOptions {
@@ -59,7 +65,13 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
 			typeof payload.errorMessage === "string" && payload.errorMessage.trim()
 				? payload.errorMessage
 				: "Subagent exited with stopReason=error (no errorMessage in sidecar).";
-		return { reason: "error", exitCode: 1, errorMessage, ...(runId ? { runId } : {}) };
+		return {
+			reason: "error",
+			exitCode: 1,
+			errorMessage,
+			fromErrorSidecar: true,
+			...(runId ? { runId } : {}),
+		};
 	}
 
 	if (payload?.type === "done") {
@@ -78,9 +90,17 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
 	};
 }
 
+/** A retryable attempt outcome: a well-formed child error sidecar (provider
+ * rate limit, quota exhaustion, or an error-terminated child turn). Every
+ * other error-shaped outcome — malformed sidecar, unsupported payload, pane
+ * disappearance — plus timeout and abort settles immediately. */
+export function isRetryableCompletion(result: CompletionResult): boolean {
+	return result.reason === "error" && result.fromErrorSidecar === true;
+}
+
 function consumeExitSidecar(sessionFile: string | undefined, expectedRunId?: string): CompletionResult | null {
 	if (!sessionFile) return null;
-	const exitFile = `${sessionFile}.exit`;
+	const exitFile = join(getSubagentArtifactDir(sessionFile), "exit.json");
 	if (!existsSync(exitFile)) return null;
 	try {
 		const result = interpretExitSidecar(JSON.parse(readFileSync(exitFile, "utf8")));
@@ -187,7 +207,7 @@ async function waitForPreferredSidecar(
 	return fallback;
 }
 
-function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+export function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
 	if (signal.aborted) return Promise.reject(new Error(ABORT_MESSAGE));
 
 	return new Promise<void>((resolve, reject) => {
