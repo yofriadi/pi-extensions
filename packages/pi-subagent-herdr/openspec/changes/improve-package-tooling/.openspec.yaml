@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-18
+goal: Make the published pi-subagent-herdr package self-validating without
+  changing runtime behavior

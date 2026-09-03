@@ -155,20 +155,21 @@ The explicit companion SHALL assemble selected skill metadata in one standard `<
 
 Every initial launch SHALL create deterministic JSONL recording owner-only versioned provenance metadata in the session header binding the canonical agent, without creating external ownership sidecar files.
 Launch execution artifacts including startup scripts (`launch.sh`), prompt files (`task.md`, `sysprompt.md`), and telemetry (`activity.json`) SHALL be created inside the session companion directory `<session_dir>/<stem>/`.
-Agent frontmatter `seed` SHALL be `fresh` or `fork`, defaulting to fresh.
+All initial subagent sessions SHALL launch with fresh conversation context without copying parent conversation turns.
+Agent frontmatter `seed` SHALL NOT be supported; its presence SHALL fail validation before queueing rather than being silently ignored.
 Agent `model` and `thinking` SHALL use declared values or inherit omitted values from the invoking parent runtime.
 No per-call seed, model, or thinking override SHALL exist.
-The extension SHALL NOT expose an agent-facing API that reads the metadata to resume a session.
+The extension SHALL NOT expose an agent-facing API that reads the metadata to resume a session implicitly; resumption SHALL occur only through the explicit ownership-gated `session` tool parameter.
 
-#### Scenario: fresh seed
+#### Scenario: always fresh context
 
-- **WHEN** `seed` is omitted or `fresh`
-- **THEN** the child JSONL records parent lineage without copied conversation turns
+- **WHEN** an initial subagent session is created
+- **THEN** the child JSONL records parent lineage without copied conversation turns, always starting with a clean conversation transcript
 
-#### Scenario: fork seed
+#### Scenario: obsolete seed frontmatter fails
 
-- **WHEN** the resolved agent declares `seed: fork`
-- **THEN** parent turns through the last user message are copied before launch and lineage is recorded
+- **WHEN** a resolved agent definition declares `seed: fresh` or `seed: fork`
+- **THEN** validation fails before queueing with a migration-style error instead of silently starting fresh
 
 #### Scenario: ownership metadata
 
@@ -185,11 +186,18 @@ The extension SHALL NOT expose an agent-facing API that reads the metadata to re
 The extension SHALL close or recognize absence of the child surface when a dispatched run completes, fails, aborts, or shuts down.
 It SHALL remove region membership and preserve the child session file for diagnostics.
 Direct user interaction with an open child pane SHALL NOT require an extension lifecycle tool.
+The extension SHALL NOT expose an agent-facing API that reads the metadata to resume a session implicitly; resumption SHALL occur only through the explicit ownership-gated `session` tool parameter.
+Automatic retry is the single exception to settlement-bound closure: a retried run SHALL close the failed attempt's surface and proceed with the replacement only once the failed attempt's child process is confirmed gone (a bounded pane-absence wait), SHALL preserve the run's region membership — removing the dead pane from the region — and row continuity, including start time, across the replacement surface, and SHALL recompute layout warnings for the replacement; settlement still closes the current surface.
 
 #### Scenario: normal settlement
 
 - **WHEN** a child completes or calls `subagent_done`
 - **THEN** the process auto-exits, the pane closes idempotently, and the child session file remains available
+
+#### Scenario: retry replaces the surface mid-run
+
+- **WHEN** a run's failed attempt is automatically retried
+- **THEN** the failed attempt's pane is closed, its child process is confirmed gone within a bounded wait, the replacement surface joins the run's existing region with the dead pane removed and layout warnings recomputed, the widget row keeps its identity and start time, and the run is not settled
 
 #### Scenario: user interrupts directly
 

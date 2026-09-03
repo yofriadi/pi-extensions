@@ -12,13 +12,16 @@ The extension SHALL poll the child exit sidecar (`exit.json` inside the session 
 Settlement SHALL be atomically claimed once.
 A valid sidecar observed in the same poll SHALL take precedence; sentinel and pane disappearance SHALL receive a bounded sidecar grace.
 Nonzero exits, malformed sidecars, stale assistant text, and empty successful output SHALL produce explicit deterministic outcomes.
-Watching SHALL be bounded by a per-run configurable deadline whose default is generous enough not to curtail legitimate long-running work.
+Watching SHALL be bounded by a per-attempt configurable deadline whose default is generous enough not to curtail legitimate long-running work; each attempt of an automatically retried run SHALL begin a fresh watch with the same configured deadline, and backoff delays SHALL NOT count toward any watch budget.
 Every evidence probe SHALL itself be bounded, and a probe that exceeds its bound SHALL count as no reading rather than as evidence.
 On expiry the extension SHALL first sweep every evidence channel it polls — exit sidecar (`exit.json`), sentinel file, and terminal tail — and prefer any real evidence found; only with no evidence SHALL it settle as a distinct abandoned-watch outcome that is not classified as a child or provider failure, routed through the normal delivery path.
+When a subagent attempt ends with a well-formed child error sidecar (`type: "error"`) and fewer than 3 total attempts have run, the extension SHALL close the failed attempt's pane and relaunch the same session file through the post-admission launch segment with a fresh per-attempt id after an abort-aware stepped delay, without claiming settlement for the failed attempt; malformed sidecars, pane disappearance, abandoned watch, and aborted runs SHALL NOT be retried.
+A failure of the relaunch mechanics itself — replacement surface creation, launch-script writing, pane run, or the failed attempt's pane persisting past its confirmed-absence bound — SHALL settle the run through the ordinary reported-error path.
 The exit sidecar SHALL be consumed (unlinked) on every read attempt regardless of outcome — valid, malformed, or stale.
 Sidecar-triggered settlement SHALL be gated on verified sidecar ownership: a sidecar whose run does not match the current owned run SHALL be consumed and rejected, never becoming the settlement outcome.
+For sidecar settlement the ownership comparand is the run's current attempt id — the id each attempt's sidecar runId is stamped with.
 Companion-directory deletion SHALL happen at exactly one settlement site: the run's settlement disposition, after transcript extraction and the final activity observation.
-The disposition SHALL key artifact deletion on the full completion outcome, per channel: a sidecar-derived success deletes only with exit code zero AND a runId present and equal to the run's own id (fail-closed — absent or mismatched means preserve); a sentinel success deletes on exit code zero alone, the sentinel being read from the run's own freshly launched pane tail and so inherently bound to this run; a nonzero exit on any channel never deletes.
+The disposition SHALL key artifact deletion on the full completion outcome, per channel: a sidecar-derived success deletes only with exit code zero AND a runId present and equal to the run's current attempt id (fail-closed — absent or mismatched means preserve); a sentinel success deletes on exit code zero alone, the sentinel being read from the run's own freshly launched pane tail and so inherently bound to this run; a nonzero exit on any channel never deletes.
 Upon such a verified success the disposition SHALL recursively remove the companion directory `<stem>/`; upon settlement with a nonzero exit code, crash, or abandoned watch, it SHALL preserve the remaining companion directory `<stem>/` for manual inspection and debugging.
 
 #### Scenario: valid sidecar wins
@@ -63,7 +66,7 @@ Upon such a verified success the disposition SHALL recursively remove the compan
 
 #### Scenario: unbound sidecar success preserves the companion directory
 
-- **WHEN** a sidecar-derived success reaches the disposition without a runId equal to the run's own id
+- **WHEN** a sidecar-derived success reaches the disposition without a runId equal to the run's current attempt id
 - **THEN** deletion is fail-closed and the companion directory is preserved rather than removed (production ownership checks make this unreachable; the guard is belt-and-suspenders)
 
 #### Scenario: pane disappears
@@ -80,6 +83,41 @@ Upon such a verified success the disposition SHALL recursively remove the compan
 
 - **WHEN** any read attempt of `<stem>/exit.json` completes — valid, malformed, or stale
 - **THEN** the sidecar file is unlinked as part of consumption, so a failed settlement leaves no readable sidecar behind
+
+#### Scenario: auto-retry on retryable error succeeds
+
+- **WHEN** a subagent attempt ends with a well-formed child error sidecar and fewer than 3 total attempts have run
+- **THEN** the extension closes the failed attempt's pane, relaunches the same session file after the stepped delay, and upon a subsequent successful completion delivers the final result without reporting an intermediate failure
+
+#### Scenario: retry reuses the original launch configuration
+
+- **WHEN** a failed attempt is automatically retried
+- **THEN** the relaunched command reproduces the agent-owned flags, companion extension, launch environment, skills, model, identity, and terminal sentinel verbatim through the same post-admission launch segment, with a fresh per-attempt id so earlier attempts' sidecars are rejected by the ownership check while the run's parent-side identity stays stable
+
+#### Scenario: non-retryable outcomes settle immediately
+
+- **WHEN** an attempt ends through a malformed sidecar, pane disappearance, watch abandonment, or an aborted run rather than a well-formed error sidecar
+- **THEN** the run settles immediately through its ordinary deterministic outcome and no automatic retry is attempted
+
+#### Scenario: auto-retry exhausted settles as failure
+
+- **WHEN** a subagent run encounters well-formed error sidecars on all 3 total attempts
+- **THEN** the run settles as a terminal failure through the ordinary failure path, preserving the final pane and companion directory, and reports that extension auto-retries were exhausted after 3 attempts with the session log path
+
+#### Scenario: retry preserves capacity and lease across attempts
+
+- **WHEN** a failed attempt is reaped and relaunched as a retry
+- **THEN** the run keeps its admission slot and session lease without re-acquiring, the widget row persists under the same run identity, and only the final attempt's pane is preserved for inspection
+
+#### Scenario: relaunch failure settles as reported error
+
+- **WHEN** the relaunch mechanics fail — the replacement surface cannot be created, the launch script cannot be written, the pane run fails, or the failed attempt's pane persists past its confirmed-absence bound
+- **THEN** the relaunch's own cleanup runs (close the replacement pane, remove the new launch script), the pre-existing session file and companion directory are untouched, and the run settles through the ordinary reported-error path with any surviving pane preserved
+
+#### Scenario: watch deadline applies per attempt
+
+- **WHEN** an attempt exhausts its watch deadline while automatic retries remain
+- **THEN** the timeout is not retried and the run settles as an abandoned watch per the base rules; watch bounds apply per attempt, so every attempt that begins starts a fresh watch of the same configured length, with backoff delays outside the watch budget
 
 #### Scenario: watch deadline expires without evidence
 
@@ -125,6 +163,7 @@ Upon such a verified success the disposition SHALL recursively remove the compan
 
 The extension SHALL walk the owned child JSONL backwards to the current run's final assistant message and join only text blocks.
 It SHALL surface provider errors and SHALL NOT let stale text from a prior turn mask the current exit state.
+When an error outcome is presented after exhausting automatic retries, the presentation SHALL keep the parseable provider/agent-error prefix, state that extension auto-retries were exhausted after 3 attempts, and reference the session log path.
 
 #### Scenario: thinking and tool blocks excluded
 
@@ -135,6 +174,11 @@ It SHALL surface provider errors and SHALL NOT let stale text from a prior turn 
 
 - **WHEN** the current turn ends with provider error and no text
 - **THEN** the result presents the provider error message
+
+#### Scenario: retry exhaustion presentation
+
+- **WHEN** the final attempt of an automatically retried run ends with a provider error and no text
+- **THEN** the result presents the provider error message with the extension auto-retry-exhausted statement and the session log path, distinguishable from Pi-internal provider retries
 
 #### Scenario: successful exit without assistant text
 
@@ -151,6 +195,7 @@ Notifying an idle parent SHALL NOT be gated on persistence acknowledgement, beca
 Once a send has been accepted, registering its acknowledgement SHALL precede any presentation work, and presentation failures SHALL NOT fail or repeat a delivery.
 An asynchronous delivery attempted while no matching session-bound completion API is active SHALL remain pending without consuming the ordinary send-attempt budget.
 Deferral on an inactive runtime SHALL NOT be unbounded: a delivery deferred past a bounded deferral budget SHALL be marked undeliverable with the cause recorded.
+The automated parent wake notice dispatched to wake an idle parent on delivery SHALL be `"Subagent result delivered. Continue."`.
 
 #### Scenario: async accepted
 
@@ -222,6 +267,11 @@ Deferral on an inactive runtime SHALL NOT be unbounded: a delivery deferred past
 - **WHEN** a delivery exhausted by the deferral budget is re-driven on a later reload or session start
 - **THEN** both its deferral interval and its exhausted flag are reset before retry, so it leaves the undeliverable count, renders as awaiting the runtime, and a broken or never-reactivated session does not immediately re-exhaust or oscillate between deferred and undeliverable
 
+#### Scenario: shortened wake notice content
+
+- **WHEN** an async subagent result wakes an idle parent session
+- **THEN** the injected user message content is `"Subagent result delivered. Continue."`, with provenance carried by the delivered result payload rather than the wake text
+
 ### Requirement: foreground delivery barrier
 
 While any parent tool call is queued for or running foreground subagent work, background completion and stall/recovery notifications SHALL be held without re-entering the parent turn.
@@ -250,7 +300,7 @@ The foreground result SHALL return first; held notifications SHALL then flush in
 ### Requirement: status widget includes queued and active work
 
 The extension SHALL always enable the human-only status widget.
-It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts.
+It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, retrying, and finalizing entries, with foreground/background class and active/open/queued counts.
 It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous.
 It SHALL NOT register a model-facing listing or lifecycle tool beyond `subagent`.
 It SHALL NOT require or honor a package `status.enabled` (or any other package config) toggle to disable the widget.
@@ -260,9 +310,9 @@ Results whose retry policy is exhausted SHALL be counted and labelled distinctly
 A delivery deferred because no session-bound runtime is active SHALL be counted and labelled as awaiting the runtime, distinctly from both actively-retrying and undeliverable results.
 
 The widget SHALL present tracked work as a tree under a `Subagents` title.
-Every tracked run (starting, running, active, waiting, interrupted, blocked, stalled, finalizing) SHALL render as a two-line row: an identity line carrying a state glyph, the agent display name, compact run-ID prefix, admission class, and elapsed duration, and an indented activity line that leads with the run's current state — the run label for starting/running/active runs, `blocked` with its wait duration for permission waits, the state name with its duration for waiting/interrupted/stalled runs, and the specific delivery-wait reason with its per-wait duration for settled runs awaiting handoff — followed, when reported by the child, by turn count, tool-call count, and context-token usage.
+Every tracked run (starting, running, active, waiting, interrupted, blocked, stalled, retrying, finalizing) SHALL render as a two-line row: an identity line carrying a state glyph, the agent display name, compact run-ID prefix, admission class, and elapsed duration, and an indented activity line that leads with the run's current state — the run label for starting/running/active runs, `retrying` with its attempt count (e.g. `retrying (2/3)`) for runs undergoing automatic attempt relaunch, `blocked` with its wait duration for permission waits, the state name with its duration for waiting/interrupted/stalled runs, and the specific delivery-wait reason with its per-wait duration for settled runs awaiting handoff — followed, when reported by the child, by turn count, tool-call count, and context-token usage.
 Opaque hexadecimal IDs SHALL use an eight-character widget prefix and expand only when needed to distinguish simultaneously visible entries; the full ID SHALL remain unchanged for runtime correlation.
-The glyph SHALL animate only for starting, running, and active entries; all other states SHALL use static glyphs.
+The glyph SHALL animate only for starting, running, active, and retrying entries; all other states SHALL use static glyphs.
 Queued entries SHALL render as individual rows with name, compact run-ID prefix, class, and queued state, up to three entries; entries beyond the third SHALL be summarized as a single overflow count line without claiming that a pane or process has started.
 Elapsed durations SHALL use an adaptive format: tenths of seconds under one minute, minutes and seconds under one hour, hours and minutes at one hour and beyond.
 
@@ -271,7 +321,7 @@ A run that completes successfully SHALL leave no row once its bookkeeping comple
 A run that fails SHALL persist as a sticky terminal row — `✗` for failures (non-zero exit, error, watch/launch error), `■` for runs interrupted before settling, `⚠` for watch-abandoned runs — with its frozen duration and final telemetry, until evicted.
 Sticky rows SHALL render after live, queued, and pending-delivery rows, most recent first, up to three rows with a `+N more` overflow line.
 The whole sticky set SHALL be evicted when the next subagent launch is admitted.
-The header SHALL render as `● Subagents` with the counts segment while live work exists (running, queued, or actively-retrying deliveries), and as `○ Subagents` with no counts segment when only sticky rows and/or exhausted deliveries remain.
+The header SHALL render as `● Subagents` with the counts segment while live work exists (running, retrying, queued, or actively-retrying deliveries), and as `○ Subagents` with no counts segment when only sticky rows and/or exhausted deliveries remain.
 
 #### Scenario: status is always enabled
 
@@ -344,6 +394,11 @@ The header SHALL render as `● Subagents` with the counts segment while live wo
 
 - **WHEN** a labelled run is active and its child reports turns, tool calls, and context usage
 - **THEN** the identity line shows a spinner glyph, the agent display name, run ID, class, and elapsed duration, and the activity line leads with the label followed by turn, tool, and token chunks
+
+#### Scenario: retrying run renders in the two-line family
+
+- **WHEN** a run is undergoing an automatic attempt relaunch after a well-formed error sidecar
+- **THEN** its row uses an animated glyph, the activity line leads with `retrying (2/3)`, the run is counted as open/active work in the header counts, and the row keeps its original identity and start time
 
 #### Scenario: blocked run renders in the two-line family with a static glyph
 

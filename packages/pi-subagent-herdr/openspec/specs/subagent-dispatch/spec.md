@@ -8,9 +8,10 @@ LLM-facing tools for running explicitly configured Pi subagents in Herdr panes, 
 
 ### Requirement: explicit named subagent tool
 
-The extension SHALL register `subagent` with required `agent` and `task`.
+The extension SHALL register `subagent` with required `agent` and `task`, and optional `session`.
 It SHALL NOT support a bare or default agent.
 It SHALL resolve the canonical agent definition before queue admission and derive display identity from the canonical ID unless an optional presentation-only `label` is supplied.
+When optional `session` is supplied, the extension SHALL validate it as an owned existing subagent session file — existing regular file under the invoking parent's child-sessions directory, header `subagentOwner.parentSessionId` equal to the invoking parent session and `subagentOwner.agentId` equal to the resolved canonical agent, and not held by a live session lease — before queue admission, and SHALL target that session file instead of generating a new one.
 
 #### Scenario: named async spawn
 
@@ -32,13 +33,28 @@ It SHALL resolve the canonical agent definition before queue admission and deriv
 - **WHEN** a valid call sets `blocking: true` and eventually settles
 - **THEN** its final assistant text blocks (excluding thinking/tool blocks) return as the tool result and no completion steer is sent
 
+#### Scenario: resume existing session via session parameter
+
+- **WHEN** a valid call supplies `session` with a path to an owned existing subagent session file
+- **THEN** the launch command invokes `pi` targeting that session file with the agent's standard launch configuration, continuing the session with existing history preserved
+
+#### Scenario: ungated resume target rejected
+
+- **WHEN** `session` names a nonexistent path, a path outside the invoking parent's child-sessions directory, a session whose header records a different `subagentOwner.parentSessionId` or `subagentOwner.agentId`, or a session held by a live lease
+- **THEN** validation fails with a concise error before queue admission, and no pane, session, lease, or admission state is created
+
+#### Scenario: failed launch preserves the pre-existing session
+
+- **WHEN** a launch fails after validation — whether the session was caller-supplied or retained from a previous attempt of the same run
+- **THEN** the launch rollback never deletes the pre-existing session file, its companion directory, or their provenance — only artifacts the launch itself created
+
 ### Requirement: canonical user-owned agent resolution
 
 The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<canonical-id>.md` and `${PI_CODING_AGENT_DIR}/agents/<canonical-id>.md` (Pi default `~/.pi/agent/agents`).
 A trusted project definition SHALL override the global definition.
 Package examples, bundled definitions, generated definitions, and unrelated directories SHALL NOT participate.
 The canonical ID SHALL be a validated filename stem and SHALL bind lookup, prompt tag, definition-owned model routing, permission identity, and session provenance for initial dispatch.
-It SHALL NOT authorize or identify a model-facing resume operation.
+The canonical ID SHALL NOT by itself authorize a model-facing resume operation; resumption of an existing subagent session SHALL occur only through the explicit ownership-gated `session` parameter defined in `explicit named subagent tool`, never through implicit metadata-derived resume.
 
 #### Scenario: trusted project override
 
@@ -60,21 +76,27 @@ It SHALL NOT authorize or identify a model-facing resume operation.
 - **WHEN** optional frontmatter `name` differs from the filename stem
 - **THEN** the definition is invalid and cannot be queued or launched
 
+#### Scenario: foreign parent session rejected
+
+- **WHEN** a `session` target resolves but its header records a `subagentOwner.parentSessionId` other than the invoking parent session
+- **THEN** resumption is refused before queue admission, and canonical-ID resolution alone grants no resume authority
+
 ### Requirement: minimal subagent call schema
 
-The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, or `autoExit`.
-The agent definition SHALL own tools, skills, seed, identity instructions, and optional model/thinking.
+The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, `seed`, or `autoExit`.
+The agent definition SHALL own tools, skills, identity instructions, and optional model/thinking, and SHALL NOT support a `seed` frontmatter option; its presence SHALL fail validation before queueing rather than being silently ignored.
 Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing.
 Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime.
 Package-level model maps (`models.default`, `models.agents`) and other package `config.json` keys SHALL NOT participate in routing or defaults.
 Optional `label` SHALL affect presentation only.
+Optional `session` SHALL specify a path to an owned existing subagent session file for resumption.
 Optional `blocking` SHALL default to false (background) when omitted.
 Optional `layout`, `surface`, and `direction` remain per-call overrides only—not package-configurable.
 
 #### Scenario: schema inspection
 
 - **WHEN** the registered `subagent` parameter schema is inspected
-- **THEN** it contains required `agent` and `task`, optional `label`, `blocking`, `layout`, `surface`, and `direction`, and none of the removed execution-profile fields
+- **THEN** it contains required `agent` and `task`, optional `session`, `label`, `blocking`, `layout`, `surface`, and `direction`, and none of the removed execution-profile fields
 
 #### Scenario: label does not change authority
 
@@ -105,6 +127,11 @@ Optional `layout`, `surface`, and `direction` remain per-call overrides only—n
 
 - **WHEN** an agent definition contains `system-prompt` frontmatter
 - **THEN** validation fails before queueing or resource creation rather than silently ignoring or applying it
+
+#### Scenario: obsolete seed frontmatter fails
+
+- **WHEN** an agent definition contains `seed` frontmatter with value `fresh` or `fork`
+- **THEN** validation fails before queueing with a migration-style error stating subagents always start fresh, rather than silently downgrading the definition
 
 #### Scenario: repeated labels remain distinguishable
 
