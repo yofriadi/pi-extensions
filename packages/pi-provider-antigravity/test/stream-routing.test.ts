@@ -16,18 +16,21 @@ describe("Gemini Flash stream routing", () => {
 	});
 
 	it.each([
-		["low", "LOW"],
-		["medium", "MEDIUM"],
-		["high", "HIGH"],
-	] satisfies [ThinkingLevel, string][])(
-		"routes 3.7 %s through the tiered wire ID with thinkingLevel %s",
-		async (reasoning, expectedThinkingLevel) => {
+		["gemini-3.7-flash", "low", "LOW"],
+		["gemini-3.7-flash", "medium", "MEDIUM"],
+		["gemini-3.7-flash", "high", "HIGH"],
+		["gemini-3.8-flash", "low", "LOW"],
+		["gemini-3.8-flash", "medium", "MEDIUM"],
+		["gemini-3.8-flash", "high", "HIGH"],
+	] satisfies [string, ThinkingLevel, string][])(
+		"routes %s %s through the tiered wire ID with thinkingLevel %s",
+		async (modelId, reasoning, expectedThinkingLevel) => {
 			let capturedPayload: Record<string, unknown> | undefined;
 			vi.spyOn(globalThis, "fetch").mockResolvedValue(
 				new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
 			);
 			const model = ANTIGRAVITY_MODELS.find(
-				(candidate) => candidate.id === "gemini-3.7-flash",
+				(candidate) => candidate.id === modelId,
 			) as Model<"google-gemini-cli">;
 
 			const response = await streamSimpleGoogleGeminiCli(
@@ -44,7 +47,7 @@ describe("Gemini Flash stream routing", () => {
 				},
 			).result();
 
-			expect(capturedPayload?.model).toBe("gemini-3.7-flash-tiered");
+			expect(capturedPayload?.model).toBe(`${modelId}-tiered`);
 			const request = capturedPayload?.request as
 				| { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }
 				| undefined;
@@ -54,17 +57,19 @@ describe("Gemini Flash stream routing", () => {
 	);
 
 	it.each([
-		["xhigh", "HIGH"],
-		["max", "HIGH"],
-	] satisfies [ThinkingLevel, string][])(
-		"clamps 3.7 %s to the tiered wire ID with thinkingLevel %s",
-		async (reasoning, expectedThinkingLevel) => {
+		["gemini-3.7-flash", "xhigh", "HIGH"],
+		["gemini-3.7-flash", "max", "HIGH"],
+		["gemini-3.8-flash", "xhigh", "HIGH"],
+		["gemini-3.8-flash", "max", "HIGH"],
+	] satisfies [string, ThinkingLevel, string][])(
+		"clamps %s %s to the tiered wire ID with thinkingLevel %s",
+		async (modelId, reasoning, expectedThinkingLevel) => {
 			let capturedPayload: Record<string, unknown> | undefined;
 			vi.spyOn(globalThis, "fetch").mockResolvedValue(
 				new Response(SUCCESS_STREAM, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
 			);
 			const model = ANTIGRAVITY_MODELS.find(
-				(candidate) => candidate.id === "gemini-3.7-flash",
+				(candidate) => candidate.id === modelId,
 			) as Model<"google-gemini-cli">;
 
 			const response = await streamSimpleGoogleGeminiCli(
@@ -81,7 +86,7 @@ describe("Gemini Flash stream routing", () => {
 				},
 			).result();
 
-			expect(capturedPayload?.model).toBe("gemini-3.7-flash-tiered");
+			expect(capturedPayload?.model).toBe(`${modelId}-tiered`);
 			const request = capturedPayload?.request as
 				| { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }
 				| undefined;
@@ -91,9 +96,10 @@ describe("Gemini Flash stream routing", () => {
 	);
 
 	// xhigh/max clamping is only observable on models whose routing map
-	// distinguishes efforts — 3.7-flash sends every effort to the same -tiered
-	// ID, so without these the fallback chain (routing[effort] ?? low ?? ...)
-	// could silently regress xhigh/max onto the low wire model.
+	// distinguishes efforts — the tiered Flash models (3.7/3.8) send every
+	// effort to the same -tiered ID, so without these the fallback chain
+	// (routing[effort] ?? low ?? ...) could silently regress xhigh/max onto
+	// the low wire model.
 	it.each([
 		["gemini-3.6-flash", "xhigh", "gemini-3.6-flash-high"],
 		["gemini-3.6-flash", "max", "gemini-3.6-flash-high"],

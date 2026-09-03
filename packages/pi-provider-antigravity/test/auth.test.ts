@@ -100,7 +100,7 @@ describe("pi-provider-antigravity extension", () => {
 		const availableModels = registry.getAll();
 		const antigravityModels = availableModels.filter((m) => m.provider === "google-antigravity");
 
-		expect(antigravityModels.length).toBe(7);
+		expect(antigravityModels.length).toBe(8);
 		expect(antigravityModels.map((m) => m.id).sort()).toEqual(
 			[
 				"claude-opus-4-6",
@@ -109,6 +109,7 @@ describe("pi-provider-antigravity extension", () => {
 				"gemini-3.5-flash",
 				"gemini-3.6-flash",
 				"gemini-3.7-flash",
+				"gemini-3.8-flash",
 				"gpt-oss-120b",
 			].sort(),
 		);
@@ -201,8 +202,8 @@ describe("google-antigravity stream fallback", () => {
 	});
 	it("does not send Gemini thinkingConfig for Antigravity thinking variants", async () => {
 		// Use an ID-encoded thinking variant (3.6 flash routes to `*-high`); the
-		// tiered 3.7 flash legitimately sends thinkingConfig, so it is not a valid
-		// subject for this assertion.
+		// tiered Flash models (3.7/3.8) legitimately send thinkingConfig, so they
+		// are not valid subjects for this assertion.
 		const antigravityModel = ANTIGRAVITY_MODELS.find(
 			(candidate) => candidate.id === "gemini-3.6-flash",
 		) as Model<"google-gemini-cli">;

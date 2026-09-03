@@ -26,6 +26,7 @@ describe("Antigravity CLI model parity", () => {
 				"gemini-3.5-flash",
 				"gemini-3.6-flash",
 				"gemini-3.7-flash",
+				"gemini-3.8-flash",
 				"gpt-oss-120b",
 			].sort(),
 		);
@@ -38,5 +39,6 @@ describe("Antigravity CLI model parity", () => {
 			["gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent"].sort(),
 		);
 		expect(getAntigravityRequestModelIds("gemini-3.7-flash")).toEqual(["gemini-3.7-flash-tiered"]);
+		expect(getAntigravityRequestModelIds("gemini-3.8-flash")).toEqual(["gemini-3.8-flash-tiered"]);
 	});
 });

@@ -20,8 +20,9 @@ pi -e /path/to/pi-extensions/packages/pi-provider-antigravity
 
 ### Current Antigravity CLI parity
 
-The seven logical Pi models below cover the twelve public backend choices currently exposed by Antigravity:
+The eight logical Pi models below cover the thirteen public backend choices currently exposed by Antigravity:
 
+- `gemini-3.8-flash`: Low, Medium, High — one tiered request ID (`gemini-3.8-flash-tiered`); the level is sent per request via `thinkingConfig.thinkingLevel`
 - `gemini-3.7-flash`: Low, Medium, High — one tiered request ID (`gemini-3.7-flash-tiered`); the level is sent per request via `thinkingConfig.thinkingLevel`
 - `gemini-3.6-flash`: Low, Medium, High
 - `gemini-3.5-flash`: Low, Medium, High
@@ -30,7 +31,7 @@ The seven logical Pi models below cover the twelve public backend choices curren
 - `claude-opus-4-6`: Thinking
 - `gpt-oss-120b`: Medium
 
-The static catalog is limited to the seven model families and their twelve public backend choices.
+The static catalog is limited to the eight model families and their thirteen public backend choices.
 
 After a successful login or token refresh, the extension fetches the account's public backend IDs and Pi's OAuth model hook filters unavailable static entries.
 If discovery is temporarily unavailable, it deliberately retains the static catalog rather than hiding models based on a failed probe.
@@ -43,7 +44,7 @@ After authenticating with Pi, capture a sanitized account catalog without printi
 pnpm --silent --dir packages/pi-provider-antigravity discover-models > /tmp/antigravity-models.json
 ```
 
-Run the opt-in, quota-consuming text happy-path validation for every current CLI selection (fourteen requests; the three 3.7 Flash levels share the tiered wire ID):
+Run the opt-in, quota-consuming text happy-path validation for every current CLI selection (seventeen requests; the three 3.8/3.7 Flash levels each share their tiered wire ID):
 
 ```bash
 ANTIGRAVITY_LIVE=1 pnpm --dir packages/pi-provider-antigravity test:live
