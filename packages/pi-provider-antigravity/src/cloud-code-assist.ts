@@ -18,7 +18,6 @@ import {
 	type StreamFunction,
 	type StreamOptions,
 	type TextContent,
-	type ThinkingBudgets,
 	type ThinkingContent,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -42,7 +41,7 @@ import {
 } from "./vendor/google-shared.ts";
 import { headersToRecord } from "./vendor/headers.ts";
 import { sanitizeSurrogates } from "./vendor/sanitize-unicode.ts";
-import { buildBaseOptions, clampReasoning } from "./vendor/simple-options.ts";
+import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./vendor/simple-options.ts";
 
 export interface GoogleGeminiCliOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -119,6 +118,10 @@ const BASE_DELAY_MS = 1000;
 const MAX_EMPTY_STREAM_RETRIES = 2;
 const EMPTY_STREAM_BASE_DELAY_MS = 500;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
+
+/** Error that must never be retried: terminal API failures (permanent
+ * 4xx, server retry delays beyond the allowed maximum). */
+class TerminalRequestError extends Error {}
 
 /**
  * Extract retry delay from Gemini error response (in milliseconds).
@@ -477,7 +480,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 						const maxDelayMs = options?.maxRetryDelayMs ?? 60000;
 						if (maxDelayMs > 0 && serverDelay && serverDelay > maxDelayMs) {
 							const delaySeconds = Math.ceil(serverDelay / 1000);
-							throw new Error(
+							throw new TerminalRequestError(
 								`Server requested ${delaySeconds}s retry delay (max: ${Math.ceil(maxDelayMs / 1000)}s). ${extractErrorMessage(errorText)}`,
 							);
 						}
@@ -486,8 +489,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 						continue;
 					}
 
-					// Not retryable or max retries exceeded
-					throw new Error(
+					// Not retryable or max retries exceeded — terminal, never retried
+					throw new TerminalRequestError(
 						`Cloud Code Assist API error (${response.status}): ${extractErrorMessage(errorText)}`,
 					);
 				} catch (error) {
@@ -496,6 +499,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
+					}
+					if (error instanceof TerminalRequestError) {
+						throw error;
 					}
 					// Extract detailed error message from fetch errors (Node includes cause)
 					lastError = error instanceof Error ? error : new Error(String(error));
@@ -517,6 +523,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 			}
 
 			let started = false;
+			// First raw upstream finish reason (e.g. "SAFETY") when it maps to an
+			// error stop — preserved for the surfaced error message.
+			let rawFinishReason: string | undefined;
 			const ensureStarted = () => {
 				if (!started) {
 					stream.push({ type: "start", partial: output });
@@ -736,6 +745,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 
 							if (candidate?.finishReason) {
 								output.stopReason = mapStopReasonString(candidate.finishReason);
+								rawFinishReason ||= candidate.finishReason;
 								if (output.content.some((b) => b.type === "toolCall")) {
 									output.stopReason = "toolUse";
 								}
@@ -829,6 +839,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 				}
 
 				const streamed = await streamResponse(currentResponse);
+				// A definitive blocked finish (SAFETY, RECITATION, …) is terminal —
+				// retrying the identical request will not change the safety decision.
+				if (output.stopReason === "error" && rawFinishReason) {
+					throw new Error(`Model finished with finishReason "${rawFinishReason}"`);
+				}
 				if (streamed) {
 					receivedContent = true;
 					break;
@@ -907,21 +922,12 @@ export const streamSimpleGoogleGeminiCli: StreamFunction<"google-gemini-cli", An
 		} satisfies GoogleGeminiCliOptions);
 	}
 
-	const defaultBudgets: ThinkingBudgets = {
-		minimal: 1024,
-		low: 2048,
-		medium: 8192,
-		high: 16384,
-	};
-	const budgets = { ...defaultBudgets, ...options.thinkingBudgets };
-
-	const minOutputTokens = 1024;
-	let thinkingBudget = budgets[effort]!;
-	const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
-
-	if (maxTokens <= thinkingBudget) {
-		thinkingBudget = Math.max(0, maxTokens - minOutputTokens);
-	}
+	const { maxTokens, thinkingBudget } = adjustMaxTokensForThinking(
+		base.maxTokens,
+		model.maxTokens,
+		effort,
+		options.thinkingBudgets,
+	);
 
 	return streamGoogleGeminiCli(model, context, {
 		...antigravityAwareBase,
