@@ -84,6 +84,12 @@ describe("pi-provider-antigravity extension", () => {
 		return { registry, runtime: result.runtime };
 	}
 
+	it("only registers src/index.ts as the default extension entrypoint", async () => {
+		const pkgDir = join(import.meta.dirname ?? "", "..");
+		const resolved = await packageManager.resolveExtensionSources([pkgDir]);
+		const resolvedPaths = resolved.extensions.filter((r) => r.enabled).map((r) => r.path);
+		expect(resolvedPaths).toEqual([join(pkgDir, "src", "index.ts")]);
+	});
 	it("loads through the real loader and registers the provider", async () => {
 		const { registry, runtime } = await loadPackageAndBind();
 

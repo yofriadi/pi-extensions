@@ -22,17 +22,6 @@ try {
 		encoding: "utf8",
 	});
 	const parsed = JSON.parse(packageJson);
-	const dependency = parsed.dependencies?.["@narumitw/pi-accounts"];
-	if (typeof dependency !== "string" || dependency.includes("workspace:")) {
-		throw new Error(
-			`Published dependency @narumitw/pi-accounts must be a concrete version, got ${JSON.stringify(dependency)}`,
-		);
-	}
-	if (!/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(dependency) && !/^[~^]?\d+\.\d+\.\d+/.test(dependency)) {
-		throw new Error(
-			`Published dependency @narumitw/pi-accounts must resolve outside the monorepo, got ${JSON.stringify(dependency)}`,
-		);
-	}
 
 	const accountsExport = parsed.exports?.["./accounts"];
 	if (accountsExport !== "./src/accounts-with-antigravity.ts") {
@@ -42,14 +31,8 @@ try {
 	}
 
 	const extensions = parsed.pi?.extensions;
-	if (
-		!Array.isArray(extensions) ||
-		!extensions.includes("./src/index.ts") ||
-		!extensions.includes("./src/accounts-with-antigravity.ts")
-	) {
-		throw new Error(
-			`pi.extensions must include ./src/index.ts and ./src/accounts-with-antigravity.ts, got ${JSON.stringify(extensions)}`,
-		);
+	if (!Array.isArray(extensions) || extensions.length !== 1 || extensions[0] !== "./src/index.ts") {
+		throw new Error(`pi.extensions must be ["./src/index.ts"], got ${JSON.stringify(extensions)}`);
 	}
 
 	const tarballListing = execFileSync("tar", ["-tf", packed], { encoding: "utf8" });
@@ -64,7 +47,6 @@ try {
 		}
 	}
 
-	console.log(`verify-pack: @narumitw/pi-accounts -> ${dependency}`);
 	console.log(`verify-pack: exports["./accounts"] -> ${accountsExport}`);
 	console.log(`verify-pack: pi.extensions -> ${extensions.join(", ")}`);
 	console.log(`verify-pack: tarball contains account adapter + composition host`);

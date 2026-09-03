@@ -23,7 +23,11 @@ describe("accounts-with-antigravity composition host", () => {
 		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 
 		const result = await discoverAndLoadExtensions(
-			[accountsPackageDir, packageDir],
+			[
+				join(accountsPackageDir, "src", "accounts.ts"),
+				join(packageDir, "src", "index.ts"),
+				join(packageDir, "src", "accounts-with-antigravity.ts"),
+			],
 			packageDir,
 			agentDir,
 			createEventBus(),
