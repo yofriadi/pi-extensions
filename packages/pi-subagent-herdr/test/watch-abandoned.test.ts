@@ -98,13 +98,15 @@ describe("resolveSettlementDisposition — pane and capacity policy", () => {
 		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).preservePane, true);
 	});
 
-	it("keeps a reported error's pane but frees its admission slot", () => {
-		// The child has exited, so the pane is inspectable but dead — yet leaving the
-		// admission slot held until the user closes that pane lets a handful of error
-		// panes block all later work. Only the session lease follows pane closure.
+	it("reaps a reported error's pane and releases ownership through the success path", () => {
+		// A settled child error is deterministic — the child has exited and the
+		// transcript survives — so the pane is reaped exactly like a success, at
+		// the same single site, releasing region membership and the session lease
+		// so the failed session file is immediately resumable through the
+		// `session` parameter.
 		const d = resolveSettlementDisposition({ reason: "error", exitCode: 1 });
-		assert.equal(d.preservePane, true);
-		assert.equal(d.releaseAdmissionNow, true);
+		assert.equal(d.preservePane, false);
+		assert.equal(d.releaseAdmissionNow, false, "release happens via the usual close/reap ownership path");
 		assert.equal(d.watchAbandoned, false);
 		assert.equal(d.preserveArtifacts, true, "an error preserves <stem>/ for diagnosis");
 	});

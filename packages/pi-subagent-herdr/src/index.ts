@@ -258,6 +258,11 @@ function resolveDirection(
 	return params.direction ?? defaults.direction;
 }
 
+/** Continuation `task` text embedded in the generated resume invocation. The
+ * failed transcript already carries the original task — the invocation only
+ * needs a short, unambiguous continue instruction. */
+const RESUME_CONTINUATION_TASK = "continue the task from where it failed";
+
 function resolveResultPresentation(
 	result: Pick<
 		SubagentResult,
@@ -269,9 +274,14 @@ function resolveResultPresentation(
 		| "watchAbandoned"
 		| "attempts"
 		| "maxAttempts"
+		| "agent"
+		| "permanentError"
 	>,
 	name: string,
 	runId?: string,
+	/** Canonical agent id for the resume invocation — threaded from the run so a
+	 * presentation-only label can never leak into `agent:`. */
+	agentId?: string,
 ): string {
 	const who = `"${name}"${runId ? ` [${runId}]` : ""}`;
 	const sessionRef = result.sessionFile ? `\n\nSession log: ${result.sessionFile}` : "";
@@ -292,19 +302,45 @@ function resolveResultPresentation(
 	}
 
 	if (result.errorMessage) {
-		// Provider/agent error. The exhaustion statement appears ONLY when the
-		// failure actually exhausted automatic retries — a non-retried failure
-		// (malformed sidecar, pane disappearance, errored watch) must never claim it.
+		// Provider/agent error. The qualifier is attempt-accurate: the exhaustion
+		// statement appears ONLY when the failure actually exhausted automatic
+		// retries; the permanent short-circuit instead states that no further
+		// automatic retry was attempted; and a non-retried failure (malformed
+		// sidecar, pane disappearance) claims neither — its pane was reaped at
+		// settlement, so never direct the parent to inspect a pane that no longer
+		// exists. The session log line stays last for the widget summary strip.
 		const exhausted = result.attempts != null && result.maxAttempts != null;
+		const earlierAttempts =
+			!exhausted && result.attempts != null && result.attempts > 1
+				? ` after ${result.attempts - 1} earlier ${result.attempts - 1 === 1 ? "attempt" : "attempts"}`
+				: "";
 		const qualifier = exhausted
 			? `provider/agent error — auto-retry exhausted after ${result.attempts} attempts`
-			: "provider/agent error";
+			: result.permanentError
+				? `provider/agent error — no further automatic retry attempted${earlierAttempts} because the error looked permanent`
+				: "provider/agent error";
+		// Canonical agent id — threaded from the run (or stamped on the result),
+		// never the presentation-only label. No silent fallback: if both are
+		// somehow absent, omitting the exact invocation is more honest than
+		// emitting an agent: that would fail resume validation.
+		const canonicalAgent = agentId ?? result.agent;
+		const resumeSessionFile = result.sessionFile;
+		// JSON-encode the embedded values: a caller-supplied resume path may
+		// legally contain `"` (POSIX), and a bare interpolation would render the
+		// invocation ambiguous. JSON string escaping matches JS source syntax.
+		const resumeInvocation =
+			canonicalAgent != null && resumeSessionFile != null
+				? `subagent({ agent: ${JSON.stringify(canonicalAgent)}, task: ${JSON.stringify(RESUME_CONTINUATION_TASK)}, session: ${JSON.stringify(resumeSessionFile)} })\n\n`
+				: "";
 		return (
 			`Sub-agent ${who} failed after ${formatElapsed(result.elapsed)} ` +
 			`(${qualifier}).\n\n` +
 			`Error: ${result.errorMessage}\n\n` +
-			`The subagent did not produce a result. You can retry by spawning a new ` +
-			`subagent; the user can inspect or continue it directly from its pane.${sessionRef}`
+			`The subagent did not produce a result. Resume the failed session instead of ` +
+			`spawning a replacement:\n` +
+			`${resumeInvocation}` +
+			`If the error is permanent (quota exhausted, billing, invalid credentials), do not ` +
+			`resume and do not spawn a replacement — surface this error to the user.${sessionRef}`
 		);
 	}
 
@@ -1055,12 +1091,13 @@ function registerSubagentTool(pi: ExtensionAPI): void {
 			"Spawn a sub-agent in a dedicated herdr surface (pane or tab). " +
 			"Default is async (fire-and-forget): the call returns immediately and the harness steers the result back when the child finishes. " +
 			"Pass blocking: true to await the child's final text as the tool result instead of a steer. " +
-			"The child auto-exits on normal completion (errors may leave the surface open) and always opens a real surface. " +
+			"Pass session: <path> to resume a previously failed run's session (the failed session path is handed to you in its failure delivery) instead of starting fresh. " +
+			"The child auto-exits on normal completion; a settled failure closes its surface (pre-settlement or unknown-outcome panes may remain open) and always opens a real surface. " +
 			"DO NOT fabricate results. After an async spawn, end your turn or work on other independent tasks.",
 		promptSnippet:
 			"Spawn a sub-agent in a herdr surface (pane or tab). Async (default): returns immediately; the result is steered back when the child finishes. " +
 			"blocking: true awaits the final text as the tool result (no steer). " +
-			"The child auto-exits on normal completion (errors may leave the surface open) and always opens a real surface.",
+			"The child auto-exits on normal completion; a settled failure closes its surface, and always opens a real surface.",
 		parameters: SubagentParams,
 		execute(_toolCallId: any, params: any, signal: any, _onUpdate: any, ctx: ExtensionContext) {
 			return executeSubagentTool(pi, _toolCallId, params, signal, _onUpdate, ctx);

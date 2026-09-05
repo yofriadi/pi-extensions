@@ -138,35 +138,43 @@ describe("preserve-then-release-admission policy is applied", () => {
 	// without real herdr. What CAN be pinned is the policy the catch applies: any
 	// preserved pane frees admission immediately while retaining session exclusivity.
 	it("preserved outcomes free admission but never the session lease", () => {
-		// Structured error and abandoned watch both preserve the pane; both must free
-		// admission. The session lease is released only by the pane monitor at
-		// explicit disappearance (releaseRunOwnership), never here.
-		for (const reason of ["timeout", "error"] as const) {
-			const d = resolveSettlementDisposition({ reason, exitCode: 1 });
-			assert.equal(d.preservePane, true, `${reason} preserves the pane`);
-			assert.equal(d.releaseAdmissionNow, true, `${reason} frees admission at once`);
-			assert.equal(d.preserveArtifacts, true, `${reason} preserves <stem>/ for inspection`);
-		}
-		// The session lease is deliberately not part of either: releasing it inline
+		// An abandoned watch preserves the pane and must free admission while
+		// keeping the session lease: the child may still be alive and writing.
+		const abandoned = resolveSettlementDisposition({ reason: "timeout", exitCode: 1 });
+		assert.equal(abandoned.preservePane, true, "timeout preserves the pane");
+		assert.equal(abandoned.releaseAdmissionNow, true, "timeout frees admission at once");
+		assert.equal(abandoned.preserveArtifacts, true, "timeout preserves <stem/> for inspection");
+		// The session lease is deliberately not part of it: releasing it inline
 		// is what made the subsequent transition throw (the Critical bug), so the
 		// disposition exposes only the admission decision — session release lives in
 		// the pane monitor at explicit disappearance.
+
+		// A settled child error no longer preserves: it reaps the pane through the
+		// same single site as a success, so the session file becomes immediately
+		// resumable. The preserved catch paths (relaunch-mechanics failures,
+		// watcher-threw with unknown child state, watch abandonment) keep their
+		// preserve-then-release-admission-only policy above.
+		const errored = resolveSettlementDisposition({ reason: "error", exitCode: 1 });
+		assert.equal(errored.preservePane, false, "a settled error reaps the pane");
+		assert.equal(errored.releaseAdmissionNow, false, "release runs via the ordinary close/reap ownership path");
+		assert.equal(errored.preserveArtifacts, true, "a settled error preserves <stem/> for diagnosis");
 	});
 });
 
 describe("resolveSettlementDisposition — admission vs session", () => {
-	it("frees admission for both abandoned watches and reported errors", () => {
-		// Both keep a pane for inspection, so neither may hold a slot until the user
-		// happens to close that pane: four such runs would block all later work.
+	it("frees admission immediately for abandoned watches; reaps settled errors through the success path", () => {
+		// An abandoned watch keeps its pane (outcome unknown), so its slot must not
+		// wait for the user to close that pane. A settled error closes its pane at
+		// settlement, so its capacity and session lease release through the same
+		// ownership path a success uses.
 		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).releaseAdmissionNow, true);
-		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).releaseAdmissionNow, true);
+		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).releaseAdmissionNow, false);
 	});
 
-	it("still preserves the pane for both", () => {
+	it("preserves the abandoned-watch pane and reaps the settled-error pane", () => {
 		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).preservePane, true);
-		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).preservePane, true);
+		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).preservePane, false);
 	});
-
 	it("marks only the timeout as an abandoned watch", () => {
 		assert.equal(resolveSettlementDisposition({ reason: "timeout", exitCode: 1 }).watchAbandoned, true);
 		assert.equal(resolveSettlementDisposition({ reason: "error", exitCode: 1 }).watchAbandoned, false);

@@ -61,9 +61,23 @@ subagent({ agent: "reviewer", task: "Continue where you left off", session: "/pa
 
 ### Automatic retries
 
-When a child attempt ends with a well-formed provider/agent error sidecar (for example a 429 rate limit or quota exhaustion), the extension automatically retries the run up to 3 total attempts: the failed attempt's pane is closed and confirmed gone, and after a stepped backoff (5s, then 15s) the same session file is relaunched through the same launch pipeline with a fresh per-attempt id — the transcript, agent configuration, flags, and environment are preserved verbatim.
+When a child attempt ends with a well-formed provider/agent error sidecar (for example a 429 rate limit), the extension automatically retries the run up to 3 total attempts: the failed attempt's pane is closed and confirmed gone, and after a stepped backoff (5s, then 15s) the same session file is relaunched through the same launch pipeline with a fresh per-attempt id — the transcript, agent configuration, flags, and environment are preserved verbatim.
 Malformed sidecars, pane disappearance, watch abandonment, and user aborts are never retried.
 The widget shows `retrying (2/3)` during backoff, and a failure that exhausts all attempts reports `provider/agent error — auto-retry exhausted after 3 attempts`.
+
+### Resuming a failed run
+
+A failed run is delivered resume-first: instead of being told to spawn a replacement, the parent receives the exact resume invocation — `subagent({ agent, task, session })` with the failed session's path — and a rule for permanent errors (quota exhausted, billing, invalid credentials): do not resume, do not spawn a replacement, surface the error to the user.
+The failure states what actually happened attempt-accurately: exhaustion (`auto-retry exhausted after N attempts`), the quota short-circuit (`no further automatic retry attempted because the error looked permanent`, noting earlier attempts when the pattern first matched after attempt 1), or a plain error for non-retried outcomes (malformed sidecar, pane disappearance) with no exhaustion claim and no pane-inspection wording.
+The run's pane is reaped when it settles as failed (region membership and session lease released, exactly like a success), so the failed session file is immediately resumable through the `session` parameter.
+The exceptions that keep their panes: sticky launch failures, relaunch-mechanics failures (the surviving pane may still hold a live writer), and watch-abandoned runs (the outcome is unknown; the child may still be alive).
+An error sidecar whose message matches a conservative permanent-failure pattern — quota exhaustion/exceedance, billing, or authentication/authorization failures — is not retried at all: the run settles immediately with 0 wasted attempts.
+The classifier is deliberately miss-side-biased: quota needs a exhaust/exceed verb (a bare `limit` is ambiguous — reset notices are transient), authentication needs a failure verb, any explicit transient marker (retry/reset/per-minute/temporarily) vetoes the classification, and a plain `rate limit` 429 does not match and keeps the full 3-attempt policy.
+The delivered permanent-error rule leaves the parent's judgment final.
+
+One caveat on the reap: `safeCloseSubagentPane` swallows close failures so settlement never stalls, so a reaped pane is not guaranteed gone.
+For settled errors — the outcome whose delivery advertises the session as resumable — the disposition verifies the pane actually closed; an explicit `present` reading escalates to the preserve semantics (pane monitor, admission released, session lease retained until confirmed disappearance), so a resume can never race a pane that may still hold a live writer.
+Successes and non-error outcomes keep the ordinary unconditional release.
 
 ### Explicit session resume
 

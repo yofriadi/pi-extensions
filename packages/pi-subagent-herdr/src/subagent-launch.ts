@@ -7,6 +7,7 @@ import {
 	ABORT_MESSAGE,
 	abortableDelay,
 	type CompletionResult,
+	isPermanentErrorCompletion,
 	isRetryableCompletion,
 	waitForCompletion,
 } from "./completion.ts";
@@ -100,7 +101,7 @@ type LaunchDeps = {
 	updateWidget: () => void;
 	startWidgetRefresh: () => void;
 	startStatusRefresh: () => void;
-	resolveResultPresentation: (result: SubagentResult, name: string, runId?: string) => string;
+	resolveResultPresentation: (result: SubagentResult, name: string, runId?: string, agentId?: string) => string;
 	shouldDeliverSubagentCompletion: (running: RunningSubagent) => boolean;
 };
 
@@ -226,7 +227,12 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			return { watchAbandoned: true, preservePane: true, preserveArtifacts, releaseAdmissionNow: true };
 		}
 		if (result.reason === "error") {
-			return { watchAbandoned: false, preservePane: true, preserveArtifacts, releaseAdmissionNow: true };
+			// A settled error run reaps its pane exactly like a success — same site, same
+			// order — so the failed session file becomes immediately resumable through
+			// the ownership-gated `session` parameter. The carve-outs that still
+			// preserve (sticky launch failures, relaunch-mechanics failures, watch
+			// abandonment) settle through their own paths and never reach this branch.
+			return { watchAbandoned: false, preservePane: false, preserveArtifacts, releaseAdmissionNow: false };
 		}
 		return { watchAbandoned: false, preservePane: false, preserveArtifacts, releaseAdmissionNow: false };
 	}
@@ -252,8 +258,39 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		}
 		running.errorPanePreserved = disposition.preservePane && preserveErrorPane(running);
 		if (!running.errorPanePreserved) safeCloseAndReap(running);
+		// Fail-closed reap verification (error sidecars only — the settled outcome
+		// whose delivery advertises the session as immediately resumable):
+		// safeCloseSubagentPane swallows close failures, so a reaped pane is not
+		// guaranteed gone. When the close left the pane present, escalate to the
+		// preserve semantics — pane monitor, admission released now, session lease
+		// retained until confirmed disappearance — instead of releasing ownership
+		// against a pane that may still hold a live writer. The happy path pays
+		// one extra sync probe; a pane reporting missing (the normal case)
+		// settles exactly as before, and successes/sentinels keep today's
+		// unconditional-release behavior.
+		if (result.reason === "error" && !running.errorPanePreserved && paneStillPresentAfterReap(running)) {
+			// Escalate WITHOUT re-probing: presence was just confirmed by the
+			// post-reap probe, so preserve unconditionally and start the monitor.
+			// (Re-probing here would race the close and could revert a confirmed
+			// survival back to the reaped posture.)
+			running.errorPanePreserved = true;
+			startErrorPaneMonitor(running);
+			releaseAdmissionOnly(running);
+		}
 		if (disposition.releaseAdmissionNow) releaseAdmissionOnly(running);
 		return disposition;
+	}
+
+	/** Post-reap probe: did the pane actually close? An unavailable probe is
+	 * never evidence a pane survived (fail-open direction) — only an explicit
+	 * `present` reading escalates to preserve semantics. */
+	function paneStillPresentAfterReap(running: RunningSubagent): boolean {
+		const probe = running.verifyPaneClosedOverride ?? inspectHerdrPaneSync;
+		try {
+			return probe(running.surface).kind === "present";
+		} catch {
+			return false;
+		}
 	}
 
 	function classifyStickyTerminal(
@@ -1293,6 +1330,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 		watchAbandoned: boolean,
 	): SubagentResult {
 		const exhausted = exhaustionAttempts(running, completion);
+		const permanentError = isPermanentErrorCompletion(completion);
 		return {
 			name: running.name,
 			task: running.task,
@@ -1302,6 +1340,12 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			elapsed: Math.floor((detectedAt - running.startTime) / 1000),
 			...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
 			...(exhausted ? { attempts: exhausted.attempts, maxAttempts: exhausted.maxAttempts } : {}),
+			// `attempts` without `maxAttempts` marks the permanent short-circuit: the
+			// pattern first matched after earlier retries already ran, so the
+			// presentation can state them attempt-accurately without claiming exhaustion.
+			...(!exhausted && permanentError && running.attempt != null ? { attempts: running.attempt } : {}),
+			...(permanentError ? { permanentError: true } : {}),
+			...(running.agent ? { agent: running.agent } : {}),
 			...(watchAbandoned ? { watchAbandoned: true } : {}),
 		};
 	}
@@ -1444,7 +1488,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 	}
 
 	function backgroundResultContent(running: RunningSubagent, result: SubagentResult): string {
-		const presentation = deps.resolveResultPresentation(result, running.name, running.id);
+		const presentation = deps.resolveResultPresentation(result, running.name, running.id, running.agent);
 		const mismatch = running.runtimePlan?.runtimeMismatch;
 		return mismatch ? `${presentation}\n\nRuntime warning: ${mismatch}` : presentation;
 	}
@@ -1460,6 +1504,7 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			sessionFile: result.sessionFile,
 			...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
 			...(result.attempts != null ? { attempts: result.attempts, maxAttempts: result.maxAttempts } : {}),
+			...(result.permanentError ? { permanentError: true } : {}),
 			...(result.watchAbandoned ? { watchAbandoned: true } : {}),
 			...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
 		};

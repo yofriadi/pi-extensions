@@ -27,6 +27,12 @@ export interface SubagentResult {
 	alreadySettled?: boolean;
 	/** Watching stopped without completion evidence; outcome remains unknown. */
 	watchAbandoned?: boolean;
+	/** Canonical agent id — distinct from the presentation-only `name` label — so a
+	 * failure presentation can name the exact `session` resume invocation. */
+	agent?: string;
+	/** True when the error sidecar matched the conservative permanent-failure
+	 * pattern and the run settled without further automatic retries. */
+	permanentError?: boolean;
 }
 
 /** State for a launched but not yet completed subagent. */
@@ -63,6 +69,9 @@ export interface RunningSubagent {
 	completionTimeoutMs?: number;
 	watchAbandoned?: boolean;
 	inspectPaneOverride?: () => Promise<PaneInspection>;
+	/** Test-only: overrides the sync post-reap pane verification probe so the
+	 * fail-closed reap fallback is exercisable without a live herdr binary. */
+	verifyPaneClosedOverride?: (surface: string) => { kind: "present" | "missing" | "unavailable"; error?: string };
 	/** Test-only: replaces replacement-surface creation during a retry relaunch. */
 	attachSurfaceOverride?: (options: {
 		name: string;

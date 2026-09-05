@@ -651,13 +651,20 @@ function resultRunTag(details: ResultMessageDetails): string {
 
 /** Strip the presentation's provider/agent-error first line so the widget's own
  * `failed (provider/agent error)` header is not duplicated in the summary. Handles
- * all wording variants: exhausted (old and new) and non-exhausted. */
+ * all wording variants: exhausted (with the attempt count), the permanent
+ * short-circuit (with its optional earlier-attempts clause), and plain. */
 function providerFailurePrefix(presentation: ResultMessagePresentation): RegExp {
 	const name = escapeRegExp(presentation.name);
 	const id = presentation.details.id ? ` \\[${escapeRegExp(String(presentation.details.id))}\\]` : "";
-	return new RegExp(
-		`^Sub-agent "${name}"${id} failed after ${presentation.elapsed} \\(provider/agent error(?: — auto-retry exhausted(?: after \\d+ attempts)?)?\\)\\.\\n\\n`,
-	);
+	const qualifier =
+		"provider/agent error(?:" +
+		// exhausted: — auto-retry exhausted after N attempts
+		" — auto-retry exhausted(?: after \\d+ attempts)?" +
+		"|" +
+		// short-circuit: — no further automatic retry attempted [after N earlier attempt(s)] because the error looked permanent
+		" — no further automatic retry attempted(?: after \\d+ earlier (?:attempt|attempts))? because the error looked permanent" +
+		")?";
+	return new RegExp(`^Sub-agent "${name}"${id} failed after ${presentation.elapsed} \\(${qualifier}\\)\\.\\n\\n`);
 }
 
 function escapeRegExp(value: string): string {

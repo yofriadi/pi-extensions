@@ -80,7 +80,7 @@ type ToolExecuteDeps = {
 	startWidgetRefresh: () => void;
 	startStatusRefresh: () => void;
 	appendLayoutWarning: (text: string, warning?: string) => string;
-	resolveResultPresentation: (result: SubagentResult, name: string, runId?: string) => string;
+	resolveResultPresentation: (result: SubagentResult, name: string, runId?: string, agentId?: string) => string;
 	shouldDeliverSubagentCompletion: (running: RunningSubagent) => boolean;
 	/** Injectable only to exercise the tool path without a live Herdr binary. */
 	isTerminalAvailable?: () => boolean;
@@ -685,7 +685,7 @@ function blockingResult(deps: ToolExecuteDeps, running: RunningSubagent, result:
 }
 
 function blockingResultText(deps: ToolExecuteDeps, running: RunningSubagent, result: SubagentResult): string {
-	const base = deps.resolveResultPresentation(result, running.name, running.id);
+	const base = deps.resolveResultPresentation(result, running.name, running.id, running.agent);
 	const mismatch = running.runtimePlan?.runtimeMismatch;
 	return deps.appendLayoutWarning(mismatch ? `${base}\n\nRuntime warning: ${mismatch}` : base, running.layoutWarning);
 }

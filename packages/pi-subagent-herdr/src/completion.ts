@@ -90,12 +90,54 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
 	};
 }
 
+/** Conservative permanent-failure pattern for the retry short-circuit: obvious
+ * quota exhaustion, billing, and authentication/authorization failures are
+ * never worth retrying, so the run settles immediately instead of burning the
+ * attempt budget. Deliberately narrow — the classifier is an attempt-saving
+ * optimization, not the classifier of record: a transient 429 phrased as a
+ * plain "rate limit" does NOT match and keeps the full retry policy, and the
+ * delivered permanent-error rule leaves the parent's judgment final.
+ *
+ * The quota family allows a bounded word gap between the noun and its verb
+ * ("Quota has been exhausted", "exceeded your quota limit") because providers
+ * interleave words there; the quota verbs are exhaust/exceed only (a bare
+ * "limit" is ambiguous — "quota limit resets at midnight" is transient);
+ * authentication must co-occur with a failure verb ("authentication backend
+ * timeout, retry" is transient). */
+export const PERMANENT_ERROR_RE =
+	/(?:\bquota\b[^.]{0,40}?\b(?:exhaust\w+|exceed\w+)\b|\b(?:exceed\w+|exhaust\w+)\b[^.]{0,20}?\bquota\b|\bbilling\b|\binvalid[\s_-]*api[\s_-]*key\b|\bunauthorized\b|\bauthentication\s+(?:failed|failure|error|required)\b|\b(?:failed|invalid)\s+authentication\b)/i;
+
+/** Explicitly-transient markers: a message that says it retries, resets, or is
+ * per-minute/temporary can never be classified permanent — providers phrase
+ * rolling-window 429s and quota-reset notices textually near-identically to
+ * permanent quota exhaustion, and a false positive skips the retry policy
+ * AND burns a resume on an account that is merely cooling down. This guard
+ * only ever REMOVES matches, so a miss degrades to the full 3-attempt
+ * policy — never to wrong delivery. */
+export const TRANSIENT_HINT_RE = /\b(?:retry\w*|resets?|per[- ]minute|temporarily?|cooldown|backoff)\b/i;
+
+/** True for a well-formed child error sidecar whose message matches the
+ * conservative permanent-failure pattern without any explicit transient
+ * marker. Malformed sidecars, pane disappearance, and non-sidecar errors
+ * never qualify — they are not retried for different reasons and must keep
+ * their distinct presentations. */
+export function isPermanentErrorCompletion(result: CompletionResult): boolean {
+	return (
+		result.reason === "error" &&
+		result.fromErrorSidecar === true &&
+		typeof result.errorMessage === "string" &&
+		PERMANENT_ERROR_RE.test(result.errorMessage) &&
+		!TRANSIENT_HINT_RE.test(result.errorMessage)
+	);
+}
+
 /** A retryable attempt outcome: a well-formed child error sidecar (provider
- * rate limit, quota exhaustion, or an error-terminated child turn). Every
- * other error-shaped outcome — malformed sidecar, unsupported payload, pane
- * disappearance — plus timeout and abort settles immediately. */
+ * rate limit or an error-terminated child turn) that does not look permanent.
+ * Every other error-shaped outcome — malformed sidecar, unsupported payload,
+ * pane disappearance, a permanent-looking quota/billing/auth failure — plus
+ * timeout and abort settles immediately. */
 export function isRetryableCompletion(result: CompletionResult): boolean {
-	return result.reason === "error" && result.fromErrorSidecar === true;
+	return result.reason === "error" && result.fromErrorSidecar === true && !isPermanentErrorCompletion(result);
 }
 
 function consumeExitSidecar(sessionFile: string | undefined, expectedRunId?: string): CompletionResult | null {
