@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-08
+goal: Expose tilth's MCP code-intelligence server as native pi tools via mcporter,
+  with optional hashline anchor interop with pi-hashline-edit

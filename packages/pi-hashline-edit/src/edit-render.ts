@@ -1,0 +1,316 @@
+/**
+ * TUI rendering helpers for the edit tool.
+ *
+ * Extracted from `src/edit.ts` to separate presentation (color themes, diff
+ * formatting, Markdown rendering) from tool execution logic.
+ */
+
+import { getCapabilities, hyperlink } from "@earendil-works/pi-tui";
+import { keyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { normalizeEditRequest } from "./edit-normalize";
+import { resolveToCwd } from "./path-utils";
+import type { EditRequestParams } from "./edit";
+import type { HashlineEditToolDetails } from "./edit-response";
+
+// ─── Theme type aliases ─────────────────────────────────────────────────
+
+export type FgTheme = Pick<Theme, "fg">;
+export type CallTheme = Pick<Theme, "fg" | "bold">;
+export type RenderedMarkdownTheme = Pick<
+	Theme,
+	"fg" | "bold" | "italic" | "underline" | "strikethrough"
+>;
+
+const EDIT_DIFF_PREVIEW_LINES = 10;
+
+// ─── Render state ───────────────────────────────────────────────────────
+
+export type EditPreview = { diff: string } | { error: string };
+
+export type EditRenderState = {
+	argsKey?: string;
+	preview?: EditPreview;
+	previewGeneration?: number;
+};
+
+// ─── Preview input extraction ───────────────────────────────────────────
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function getRenderablePreviewInput(
+	args: unknown,
+): EditRequestParams | null {
+	let normalized: unknown;
+	try {
+		normalized = normalizeEditRequest(args);
+	} catch {
+		return null;
+	}
+	if (
+		!isRecord(normalized) ||
+		typeof normalized.path !== "string" ||
+		!Array.isArray(normalized.edits)
+	) {
+		return null;
+	}
+
+	return {
+		path: normalized.path,
+		edits: normalized.edits,
+	} as EditRequestParams;
+}
+
+// ─── Diff formatting ────────────────────────────────────────────────────
+
+export function colorDiffLines(lines: string[], theme: FgTheme): string[] {
+	return lines.map((line) => {
+		if (line.startsWith("+") && !line.startsWith("+++")) {
+			return theme.fg("success", line);
+		}
+		if (line.startsWith("-") && !line.startsWith("---")) {
+			return theme.fg("error", line);
+		}
+		return theme.fg("dim", line);
+	});
+}
+
+export function formatDiff(
+	diff: string,
+	expanded: boolean,
+	theme: FgTheme,
+): string {
+	const lines = diff.split("\n");
+	// A newline-terminated diff splits into a trailing empty sentinel; drop it
+	// so it is neither rendered nor counted as a hidden line.
+	if (lines.at(-1) === "") {
+		lines.pop();
+	}
+	const maxLines = expanded ? lines.length : EDIT_DIFF_PREVIEW_LINES;
+	const shown = colorDiffLines(lines.slice(0, maxLines), theme);
+
+	if (lines.length > maxLines) {
+		shown.push(
+			theme.fg("muted", `... (${lines.length - maxLines} more diff lines,`) +
+				` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+		);
+	}
+	return shown.join("\n");
+}
+
+// ─── Edit call formatting ───────────────────────────────────────────────
+
+// Mirrors Pi core's `renderToolPath` (dist/core/tools/render-utils.js), which
+// is not exported: the built-in read tool inherits it and renders its header
+// path as a clickable OSC 8 file:// hyperlink, so the edit header should too.
+function shortenDisplayPath(path: string): string {
+	const home = homedir();
+	// Windows paths mix separators (`C:\Users\me/notes.md`), so compare on a
+	// slash-normalized form. `\` -> `/` preserves length, so slicing the original
+	// string by home.length stays correct.
+	const toSlash = (value: string) =>
+		sep === "\\" ? value.split("\\").join("/") : value;
+	const normalizedHome = toSlash(home);
+	const normalizedPath = toSlash(path);
+	if (normalizedPath === normalizedHome) return "~";
+	// Only shorten on a path boundary: `/home/alice2` is not inside `/home/alice`.
+	return normalizedPath.startsWith(`${normalizedHome}/`)
+		? `~${path.slice(home.length)}`
+		: path;
+}
+
+function linkDisplayPath(
+	styledText: string,
+	rawPath: string,
+	cwd: string | undefined,
+): string {
+	if (!getCapabilities().hyperlinks) return styledText;
+	// Resolve through the same helper execute() uses, so the link target can never
+	// point somewhere other than the file the edit touches (Windows drive-relative
+	// paths like `C:notes.md` resolve differently under join vs resolve).
+	const absolutePath = resolveToCwd(rawPath, cwd ?? process.cwd());
+	return hyperlink(styledText, pathToFileURL(absolutePath).href);
+}
+
+export function formatEditCall(
+	args: EditRequestParams | undefined,
+	state: EditRenderState,
+	expanded: boolean,
+	theme: CallTheme,
+	cwd?: string,
+): string {
+	const path = args?.path;
+	const pathDisplay =
+		typeof path === "string" && path.length > 0
+			? linkDisplayPath(
+					theme.fg("accent", shortenDisplayPath(path)),
+					path,
+					cwd,
+				)
+			: theme.fg("toolOutput", "...");
+	let text = `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+
+	if (!state.preview) {
+		return text;
+	}
+
+	if ("error" in state.preview) {
+		text += `\n\n${theme.fg("error", state.preview.error)}`;
+		return text;
+	}
+
+	if (state.preview.diff) {
+		text += `\n\n${formatDiff(state.preview.diff, expanded, theme)}`;
+	}
+	return text;
+}
+
+// ─── Result text extraction ─────────────────────────────────────────────
+
+export function getRenderedEditTextContent(result: {
+	content?: Array<{ type: string; text?: string }>;
+}): string | undefined {
+	const textContent = result.content?.find(
+		(entry): entry is { type: "text"; text: string } =>
+			entry.type === "text" && typeof entry.text === "string",
+	);
+	return textContent?.text;
+}
+
+// ─── Result classification ──────────────────────────────────────────────
+
+export function isAppliedChangedResult(
+	details: HashlineEditToolDetails | undefined,
+): boolean {
+	return details?.classification === "applied";
+}
+
+export function buildAppliedChangedResultText(
+	_text: string | undefined,
+	details: HashlineEditToolDetails | undefined,
+	preview: EditPreview | undefined,
+	expanded: boolean,
+	theme: FgTheme,
+): string | undefined {
+	const previewDiff =
+		preview && !("error" in preview) ? preview.diff : undefined;
+	const sections: string[] = [];
+
+	if (details?.diff && details.diff !== previewDiff) {
+		sections.push(formatDiff(details.diff, expanded, theme));
+	}
+
+	if (details?.warnings.length) {
+		sections.push(["Warnings:", ...details.warnings].join("\n"));
+	}
+
+	return sections.length > 0 ? sections.join("\n\n") : undefined;
+}
+
+// ─── Markdown rendering ─────────────────────────────────────────────────
+
+function trimEdgeEmptyLines(lines: string[]): string[] {
+	let start = 0;
+	let end = lines.length;
+
+	while (start < end && lines[start] === "") {
+		start++;
+	}
+	while (end > start && lines[end - 1] === "") {
+		end--;
+	}
+
+	return lines.slice(start, end);
+}
+
+function isRenderedEditSectionBoundary(line: string): boolean {
+	return line.startsWith("--- Anchors ") || line === "Warnings:";
+}
+
+export function formatRenderedEditResultMarkdown(text: string): string {
+	const lines = text.split("\n");
+	const sections: string[] = [];
+	let plainLines: string[] = [];
+
+	const flushPlainLines = () => {
+		const trimmed = trimEdgeEmptyLines(plainLines);
+		if (trimmed.length > 0) {
+			sections.push(trimmed.join("\n"));
+		}
+		plainLines = [];
+	};
+
+	let index = 0;
+	while (index < lines.length) {
+		const line = lines[index]!;
+
+		if (line.startsWith("--- Anchors ")) {
+			flushPlainLines();
+			const title = line.replace(/^---\s*/, "").replace(/\s*---$/, "");
+			index++;
+			const bodyLines: string[] = [];
+			while (
+				index < lines.length &&
+				!isRenderedEditSectionBoundary(lines[index]!)
+			) {
+				bodyLines.push(lines[index]!);
+				index++;
+			}
+			sections.push(
+				[
+					`#### ${title}`,
+					"```text",
+					...trimEdgeEmptyLines(bodyLines),
+					"```",
+				].join("\n"),
+			);
+			continue;
+		}
+
+		plainLines.push(line);
+		index++;
+	}
+
+	flushPlainLines();
+
+	return sections.join("\n\n");
+}
+
+export function createRenderedEditMarkdownTheme(theme: RenderedMarkdownTheme) {
+	return {
+		heading: (text: string) => theme.fg("mdHeading", text),
+		link: (text: string) => theme.fg("mdLink", text),
+		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
+		code: (text: string) => theme.fg("mdCode", text),
+		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
+		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),
+		quote: (text: string) => theme.fg("mdQuote", text),
+		quoteBorder: (text: string) => theme.fg("mdQuoteBorder", text),
+		hr: (text: string) => theme.fg("mdHr", text),
+		listBullet: (text: string) => theme.fg("mdListBullet", text),
+		bold: (text: string) => theme.bold(text),
+		italic: (text: string) => (theme.italic ? theme.italic(text) : text),
+		underline: (text: string) =>
+			theme.underline ? theme.underline(text) : text,
+		strikethrough: (text: string) =>
+			theme.strikethrough ? theme.strikethrough(text) : text,
+		highlightCode: (code: string, lang?: string) =>
+			code.split("\n").map((line) => {
+				if (lang === "diff") {
+					if (line.startsWith("+") && !line.startsWith("+++")) {
+						return theme.fg("toolDiffAdded", line);
+					}
+					if (line.startsWith("-") && !line.startsWith("---")) {
+						return theme.fg("toolDiffRemoved", line);
+					}
+					return theme.fg("toolDiffContext", line);
+				}
+
+				return theme.fg("mdCodeBlock", line);
+			}),
+	};
+}

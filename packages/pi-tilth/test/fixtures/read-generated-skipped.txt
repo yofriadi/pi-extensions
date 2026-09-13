@@ -1,0 +1,1 @@
+# /Users/ycm/Developer/oss/pi-extensions/pnpm-lock.yaml (5043 lines, ~42.1k tokens) [generated — skipped]

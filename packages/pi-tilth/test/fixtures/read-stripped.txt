@@ -1,0 +1,8 @@
+# /tmp/tilth-probe/comments.ts (7 lines, ~13 tokens) [stripped]
+// stripped 2 of 7 lines (plain comments, debug logs, blank collapse) — non-editable view
+
+1  # Title
+2  
+4  real code
+5  
+7  more code

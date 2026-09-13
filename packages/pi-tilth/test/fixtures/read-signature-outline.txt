@@ -1,0 +1,24 @@
+# /Users/ycm/Developer/oss/pi-extensions/packages/pi-hashline-edit/src/read.ts (252 lines, ~2.1k tokens) [signature]
+
+1:c06|import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+2:225|import {
+10:d34|import { Type } from "@sinclair/typebox";
+11:6d4|import { access as fsAccess } from "fs/promises";
+12:38f|import { constants } from "fs";
+13:e12|import { normalizeToLF, stripBom } from "./edit-diff";
+14:d2b|import { loadFileKindAndText } from "./file-kind";
+15:3df|import { formatHashlineRegion } from "./hashline";
+16:c26|import { resolveToCwd } from "./path-utils";
+17:520|import { loadPrompt } from "./prompt-loader";
+18:95e|import { throwIfAborted } from "./runtime";
+19:d6a|import { getFileSnapshot } from "./snapshot";
+20:6de|import { resolveMutationTargetPath } from "./fs-write";
+21:954|import { rememberReadSnapshot } from "./read-snapshot";
+22:c83|import { clearAppliedPayload } from "./noop-loop-guard";
+24:87d|const READ_DESC = loadPrompt(new URL("../prompts/read.md", import.meta.url))
+29:b6c|const READ_PROMPT_SNIPPET = loadPrompt(
+33:8b6|const READ_PROMPT_GUIDELINES = loadPrompt(
+41:48f|function normalizePositiveInteger(
+56:5eb|function getPreviewLines(text: string): string[] {
+65:012|export function formatHashlineReadPreview(
+131:bf0|export function registerReadTool(pi: ExtensionAPI): void {

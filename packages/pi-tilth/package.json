@@ -1,0 +1,74 @@
+{
+	"name": "@yofriadi/pi-tilth",
+	"version": "0.1.0",
+	"description": "Tilth code-intelligence tools for pi-coding-agent via mcporter",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"pi-coding-agent",
+		"tilth",
+		"mcporter",
+		"mcp",
+		"code-search"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-tilth"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"files": [
+		"src",
+		"skills",
+		"THIRD_PARTY_LICENSES",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"exports": {
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.75.0",
+		"@earendil-works/pi-tui": ">=0.75.0",
+		"pi-hashline-edit": "*"
+	},
+	"peerDependenciesMeta": {
+		"pi-hashline-edit": {
+			"optional": true
+		}
+	},
+	"dependencies": {
+		"typebox": "^1.2.8"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19",
+		"pi-hashline-edit": "workspace:*",
+		"typescript": "5.9.3",
+		"vitest": "3.2.4"
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:integration": "vitest run --config vitest.integration.config.ts"
+	}
+}

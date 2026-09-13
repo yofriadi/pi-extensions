@@ -1,0 +1,150 @@
+/**
+ * Edit response builders.
+ *
+ * `changed` response is only model-facing success mode. Rich post-edit payloads
+ * belong in fresh `read` calls, not invisible `details` branches.
+ */
+
+import { computePatchRelativePath, generateDiffString, generateUnifiedPatch } from "./edit-diff";
+import { computeAffectedLineRange, formatHashlineRegion } from "./hashline";
+
+const CHANGED_ANCHOR_TEXT_BUDGET_BYTES = 50 * 1024;
+
+type ToolResult = {
+	content: Array<{ type: "text"; text: string }>;
+	isError?: boolean;
+	details: HashlineEditToolDetails;
+};
+
+export type EditClassification = "applied" | "noop";
+
+export type HashlineEditToolDetails = {
+	diff: string;
+	/** Standard git-style unified patch; empty string for noop responses */
+	patch: string;
+	firstChangedLine?: number;
+	classification: EditClassification;
+	warnings: string[];
+};
+
+export type EditMeta = {
+	firstChangedLine?: number;
+	lastChangedLine?: number;
+};
+
+type NoopEditEntry = {
+	editIndex: number;
+	loc: string;
+	currentContent: string;
+};
+
+export interface NoopResponseInput {
+	path: string;
+	noopEdits: NoopEditEntry[] | undefined;
+	warnings: string[] | undefined;
+}
+
+export interface SuccessResponseInput {
+	/** Absolute target path (resolveToCwd output) */
+	resolvedPath: string;
+	/** Directory the patch path is relative to (tool cwd) */
+	patchRoot: string;
+	originalNormalized: string;
+	result: string;
+	warnings: string[] | undefined;
+	editMeta: EditMeta;
+}
+
+function getVisibleLines(text: string): string[] {
+	if (text.length === 0) return [];
+	const lines = text.split("\n");
+	return text.endsWith("\n") ? lines.slice(0, -1) : lines;
+}
+
+function warningsBlockOf(warnings: string[] | undefined): string {
+	return warnings?.length ? `\n\nWarnings:\n${warnings.join("\n")}` : "";
+}
+
+const ANCHORS_OMITTED_TEXT = "Anchors omitted; use read for subsequent edits.";
+
+/**
+ * Model-facing anchor block for the changed region: fresh LINE#HASH lines the
+ * model can chain into nearby follow-up edits without a re-read. Falls back to
+ * a re-read hint when the region is unbounded or exceeds the text budget.
+ */
+function buildAnchorsBlock(
+	resultLines: string[],
+	anchorRange: { start: number; end: number } | null,
+): string {
+	if (!anchorRange) { return ANCHORS_OMITTED_TEXT; }
+	const formatted = formatHashlineRegion(resultLines, anchorRange.start, anchorRange.end);
+	const block = `--- Anchors ${anchorRange.start}-${anchorRange.end} ---\n${formatted}`;
+	return Buffer.byteLength(block, "utf8") <= CHANGED_ANCHOR_TEXT_BUDGET_BYTES
+		? block
+		: ANCHORS_OMITTED_TEXT;
+}
+
+export function buildNoopResponse(input: NoopResponseInput): ToolResult {
+	const { path, noopEdits, warnings } = input;
+
+	const noopDetailsText = noopEdits?.length
+		? noopEdits
+				.map(
+					(edit) =>
+						`Edit ${edit.editIndex}: replacement for ${edit.loc} is identical to current content:\n  ${edit.loc}: ${edit.currentContent}`,
+				)
+				.join("\n")
+		: "The edits produced identical content.";
+
+	return {
+		content: [
+			{
+				type: "text",
+				text: `No changes made to ${path}\nClassification: noop\n${noopDetailsText}${warningsBlockOf(warnings)}`,
+			},
+		],
+		details: {
+			diff: "",
+			patch: "",
+			firstChangedLine: undefined,
+			classification: "noop",
+			warnings: warnings ?? [],
+		},
+	};
+}
+
+export function buildChangedResponse(input: SuccessResponseInput): ToolResult {
+	const { result, warnings, originalNormalized, editMeta, resolvedPath, patchRoot } = input;
+
+	const diffResult = generateDiffString(originalNormalized, result);
+	// The patch is only emitted when the target resolves to a safe relative
+	// path under the patch root; empty otherwise (see computePatchRelativePath).
+	const patchRelativePath = computePatchRelativePath(resolvedPath, patchRoot);
+	const patch = patchRelativePath === null
+		? ""
+		: generateUnifiedPatch(originalNormalized, result, patchRelativePath);
+	const warningsBlock = warningsBlockOf(warnings);
+
+	const resultLines = getVisibleLines(result);
+	const anchorRange = computeAffectedLineRange({
+		firstChangedLine: editMeta.firstChangedLine,
+		lastChangedLine: editMeta.lastChangedLine,
+		resultLineCount: resultLines.length,
+	});
+	const anchorsBlock = buildAnchorsBlock(resultLines, anchorRange);
+
+	const text = [anchorsBlock, warningsBlock.trimStart()]
+		.filter((section) => section.length > 0)
+		.join("\n\n");
+
+	return {
+		content: [{ type: "text", text }],
+		details: {
+			diff: diffResult.diff,
+			patch,
+			firstChangedLine: editMeta.firstChangedLine,
+			classification: "applied",
+			warnings: warnings ?? [],
+		},
+	};
+}

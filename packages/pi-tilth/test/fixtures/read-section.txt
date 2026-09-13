@@ -1,0 +1,13 @@
+# /tmp/tilth-probe/big.ts (11 lines, ~189 tokens) [section]
+
+ 995  line 995 some code content here for probing elisions in long output
+ 996  line 996 some code content here for probing elisions in long output
+ 997  line 997 some code content here for probing elisions in long output
+ 998  line 998 some code content here for probing elisions in long output
+ 999  line 999 some code content here for probing elisions in long output
+1000  line 1000 some code content here for probing elisions in long output
+1001  line 1001 some code content here for probing elisions in long output
+1002  line 1002 some code content here for probing elisions in long output
+1003  line 1003 some code content here for probing elisions in long output
+1004  line 1004 some code content here for probing elisions in long output
+1005  line 1005 some code content here for probing elisions in long output

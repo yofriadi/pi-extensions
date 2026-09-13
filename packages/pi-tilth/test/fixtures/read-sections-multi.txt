@@ -1,0 +1,14 @@
+# /Users/ycm/Developer/oss/pi-extensions/packages/pi-hashline-edit/src/hashline.ts (8 lines, ~60 tokens) [section]
+
+─── lines 1-5 ───
+1  /**
+2   * Hashline engine — hash-anchored line editing.
+3   *
+4   * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
+5   *
+
+
+─── lines 10-12 ───
+10   *   hashline/format.ts — formatHashlineRegion, computeAffectedLineRange, computeChangedLineRange
+11   */
+12  

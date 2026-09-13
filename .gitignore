@@ -24,3 +24,9 @@ coverage/
 # Tool caches
 .fallow/
 .rumdl_cache/
+# Session export artifacts (pi export_html) and blob dirs
+pi-session-*.html
+*-blobs/
+
+# Subagent session transcripts (adversarial review babysit logs)
+.babysit/

@@ -1,0 +1,173 @@
+import { describe, expect, it } from "vitest";
+import { readFile, writeFile } from "fs/promises";
+import register from "../../index";
+import { computeLineHash } from "../../src/hashline";
+import { getText, makeFakePiRegistry, makeToolContext, withTempFile } from "../support/fixtures";
+
+describe("snapshotId surface (details-only after W2)", () => {
+	it("read writes snapshotId to details but not to text", async () => {
+		await withTempFile("sample.txt", "alpha\nbeta\n", async ({ cwd }) => {
+			const { pi, getTool } = makeFakePiRegistry();
+			register(pi);
+			const readTool = getTool("read");
+
+			const result = await readTool.execute(
+				"r1",
+				{ path: "sample.txt" },
+				undefined,
+				undefined,
+				makeToolContext(cwd),
+			);
+
+			expect(getText(result)).not.toContain("snapshotId");
+			expect(getText(result)).not.toContain("SnapshotId");
+			expect(result.details?.snapshotId).toEqual(expect.any(String));
+		});
+	});
+
+	it("edit no longer accepts a snapshotId field on the request", async () => {
+		await withTempFile("sample.txt", "alpha\nbeta\n", async ({ cwd, path }) => {
+			const { pi, getTool } = makeFakePiRegistry();
+			register(pi);
+			const editTool = getTool("edit");
+
+			let errorMessage = "";
+			try {
+				await editTool.execute(
+					"e1",
+					{
+						path: "sample.txt",
+						snapshotId: "v1|fake|0|0",
+						edits: [
+							{
+								op: "replace",
+								pos: `2#${computeLineHash(["alpha", "beta", ""], 1)}`,
+								lines: ["BETA"],
+							},
+						],
+					},
+					undefined,
+					undefined,
+					makeToolContext(cwd),
+				);
+			} catch (error: unknown) {
+				errorMessage = error instanceof Error ? error.message : String(error);
+			}
+
+			expect(errorMessage).toContain("unknown or unsupported fields");
+			expect(errorMessage).toContain("snapshotId");
+			expect(await readFile(path, "utf-8")).toBe("alpha\nbeta\n");
+		});
+	});
+
+	it("edit succeeds even when the file changed on disk between read and edit, as long as anchors still match", async () => {
+		await withTempFile(
+			"sample.txt",
+			"one\ntwo\nthree\nfour\nfive\n",
+			async ({ cwd, path }) => {
+				const { pi, getTool } = makeFakePiRegistry();
+				register(pi);
+				const editTool = getTool("edit");
+
+				// External, unrelated change: line 2 mutated, line 4 still "four".
+				await writeFile(path, "one\nTWO!\nthree\nfour\nfive\n", "utf-8");
+
+				const result = await editTool.execute(
+					"e1",
+					{
+						path: "sample.txt",
+						edits: [
+							{
+								op: "replace",
+								pos: `4#${computeLineHash(["one", "TWO!", "three", "four", "five", ""], 3)}`,
+								lines: ["FOUR"],
+							},
+						],
+					},
+					undefined,
+					undefined,
+					makeToolContext(cwd),
+				);
+
+				expect(getText(result)).toContain("--- Anchors");
+				expect(await readFile(path, "utf-8")).toBe(
+					"one\nTWO!\nthree\nFOUR\nfive\n",
+				);
+			},
+		);
+	});
+
+	it("edit text response no longer contains a SnapshotId line", async () => {
+		await withTempFile("sample.txt", "alpha\nbeta\n", async ({ cwd }) => {
+			const { pi, getTool } = makeFakePiRegistry();
+			register(pi);
+			const editTool = getTool("edit");
+
+			const result = await editTool.execute(
+				"e1",
+				{
+					path: "sample.txt",
+					edits: [
+						{
+							op: "replace",
+							pos: `2#${computeLineHash(["alpha", "beta", ""], 1)}`,
+							lines: ["BETA"],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				makeToolContext(cwd),
+			);
+
+			expect(getText(result)).not.toContain("SnapshotId");
+			// snapshotId is no longer surfaced in edit details (removed in cleanup).
+			expect(result.details?.snapshotId).toBeUndefined();
+		});
+	});
+
+	it("a stale anchor still triggers [E_STALE_ANCHOR] with refresh hints", async () => {
+		await withTempFile(
+			"sample.txt",
+			"one\ntwo\nthree\n",
+			async ({ cwd, path }) => {
+				const { pi, getTool } = makeFakePiRegistry();
+				register(pi);
+				const editTool = getTool("edit");
+
+				// External change: rewrite the line we are about to target.
+				await writeFile(path, "one\nTWO!\nthree\n", "utf-8");
+
+				let errorMessage = "";
+				try {
+					await editTool.execute(
+						"e1",
+						{
+							path: "sample.txt",
+							edits: [
+								{
+									op: "replace",
+									pos: `2#${computeLineHash(["one", "two", "three", ""], 1)}`,
+									lines: ["TWO"],
+								},
+							],
+						},
+						undefined,
+						undefined,
+						makeToolContext(cwd),
+					);
+				} catch (error: unknown) {
+					errorMessage = error instanceof Error ? error.message : String(error);
+				}
+
+				expect(errorMessage).toMatch(/^\[E_STALE_ANCHOR\]/);
+				// The stale anchor (the model's old hash for line 2) is named in the
+				// error; the current content window is no longer echoed with `>>>`.
+				expect(errorMessage).toContain(
+					`2#${computeLineHash(["one", "two", "three", ""], 1)}`,
+				);
+				expect(errorMessage).not.toContain(">>>");
+			},
+		);
+	});
+});

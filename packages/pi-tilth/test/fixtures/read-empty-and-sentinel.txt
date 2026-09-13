@@ -1,0 +1,7 @@
+# /tmp/tilth-probe/empty.txt (0 lines, ~0 tokens) [empty]
+
+# /tmp/tilth-probe/sentinel.txt (4 lines, ~9 tokens) [full]
+
+normal line
+[skipped]
+another line

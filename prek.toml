@@ -7,8 +7,8 @@ default_install_hook_types = ["pre-commit"]
 [[repos]]
 repo = "builtin"
 hooks = [
-    { id = "trailing-whitespace", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/''' },
-    { id = "end-of-file-fixer", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/''' },
+    { id = "trailing-whitespace", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/''' },
+    { id = "end-of-file-fixer", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/''' },
     { id = "check-added-large-files" },
 ]
 

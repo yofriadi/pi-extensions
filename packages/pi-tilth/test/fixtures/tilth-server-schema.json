@@ -1,0 +1,622 @@
+{
+	"mode": "server",
+	"name": "tilth",
+	"status": "ok",
+	"durationMs": 1283,
+	"transport": "STDIO npx -y tilth --mcp",
+	"source": {
+		"kind": "local",
+		"path": "<adhoc>"
+	},
+	"tools": [
+		{
+			"name": "tilth_search",
+			"description": "Search for symbols, text, or regex patterns in code. Replaces grep/rg and the host Grep tool — use this for all code search. Symbol search returns definitions first (via tree-sitter AST), then usages, with full source code inlined for top matches. Content search finds literal text. Regex search supports full regex patterns. For cross-file tracing, pass comma-separated symbol names (max 5).",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"budget": {
+						"description": "Max tokens in response.",
+						"type": "number"
+					},
+					"context": {
+						"description": "Path to the file the agent is currently editing. Boosts ranking of matches in the same directory or package.",
+						"type": "string"
+					},
+					"expand": {
+						"default": 2,
+						"description": "Number of top matches to expand with full source code. Definitions show the full function/class body. Usages show ±10 context lines.",
+						"type": "number"
+					},
+					"glob": {
+						"description": "File pattern filter. Whitelist: \"*.rs\" (only Rust files). Exclude: \"!*.test.ts\" (skip test files). Brace expansion: \"*.{go,rs}\" (Go and Rust). Path patterns: \"src/**/*.ts\".",
+						"type": "string"
+					},
+					"kind": {
+						"default": "symbol",
+						"description": "Search type. symbol: structural definitions + usages. content: literal text. regex: regex pattern. callers: find all call sites of a symbol.",
+						"enum": ["symbol", "content", "regex", "callers"],
+						"type": "string"
+					},
+					"query": {
+						"description": "Symbol name, text string, or regex pattern to search for. e.g. 'resolve_dependencies' or 'ServeHTTP,Next' for comma-separated multi-symbol lookup (max 5).",
+						"type": "string"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"scope": {
+						"description": "Only use scope to search a specific subdirectory. DO NOT USE scope if you want to search the current working directory (initial search).",
+						"type": "string"
+					}
+				},
+				"required": ["query"]
+			},
+			"options": [
+				{
+					"property": "budget",
+					"cliName": "budget",
+					"description": "Max tokens in response.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<budget:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "context",
+					"cliName": "context",
+					"description": "Path to the file the agent is currently editing. Boosts ranking of matches in the same directory or package.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<context>"
+				},
+				{
+					"property": "expand",
+					"cliName": "expand",
+					"description": "Number of top matches to expand with full source code. Definitions show the full function/class body. Usages show ±10 context lines.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<expand:number>",
+					"exampleValue": "2",
+					"defaultValue": 2
+				},
+				{
+					"property": "glob",
+					"cliName": "glob",
+					"description": "File pattern filter. Whitelist: \"*.rs\" (only Rust files). Exclude: \"!*.test.ts\" (skip test files). Brace expansion: \"*.{go,rs}\" (Go and Rust). Path patterns: \"src/**/*.ts\".",
+					"required": false,
+					"type": "string",
+					"placeholder": "<glob>"
+				},
+				{
+					"property": "kind",
+					"cliName": "kind",
+					"description": "Search type. symbol: structural definitions + usages. content: literal text. regex: regex pattern. callers: find all call sites of a symbol.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<kind:symbol|content|regex|callers>",
+					"exampleValue": "symbol",
+					"enumValues": ["symbol", "content", "regex", "callers"],
+					"defaultValue": "symbol"
+				},
+				{
+					"property": "query",
+					"cliName": "query",
+					"description": "Symbol name, text string, or regex pattern to search for. e.g. 'resolve_dependencies' or 'ServeHTTP,Next' for comma-separated multi-symbol lookup (max 5).",
+					"required": true,
+					"type": "string",
+					"placeholder": "<query>"
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "scope",
+					"cliName": "scope",
+					"description": "Only use scope to search a specific subdirectory. DO NOT USE scope if you want to search the current working directory (initial search).",
+					"required": false,
+					"type": "string",
+					"placeholder": "<scope>"
+				}
+			]
+		},
+		{
+			"name": "tilth_read",
+			"description": "Read a file with smart outlining. Replaces cat/head/tail and the host Read tool — use this for all file reading. Small files return full content. Large files return a structural outline (functions, classes, imports) so you see the shape without consuming your context window. Use `section` to read a specific line range or heading. Use `sections` to grab several disjoint slices from the same file in one call. Use `full` to force complete content. Use `paths` to read multiple files in one call.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"budget": {
+						"description": "Max tokens in response.",
+						"type": "number"
+					},
+					"full": {
+						"default": false,
+						"description": "Legacy alias for mode='full'. Force full content output, bypass smart outlining.",
+						"type": "boolean"
+					},
+					"mode": {
+						"default": "auto",
+						"description": "Read view. auto: smart default. full: full content. signature: hash-prefixed declarations only. stripped: whole-file content with plain comments/debug logs/extra blanks removed.",
+						"enum": ["auto", "full", "signature", "stripped"],
+						"type": "string"
+					},
+					"path": {
+						"description": "Absolute or relative file path to read. A relative path requires an absolute `root`; the server cannot see your shell cwd.",
+						"type": "string"
+					},
+					"paths": {
+						"description": "Multiple file paths to read in one call. Each file gets independent smart handling. Saves round-trips vs multiple single reads.",
+						"items": {
+							"type": "string"
+						},
+						"type": "array"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"section": {
+						"description": "Line range e.g. '45-89', or heading e.g. '## Architecture'. Bypasses smart view. Use `sections` for multiple ranges.",
+						"type": "string"
+					},
+					"sections": {
+						"description": "Multiple ranges from the same file in one call. Each entry is a line range or heading. Emits each block in user-supplied order, separated by `─── lines X-Y ───` delimiters. Mutually exclusive with `section`. Capped at 20 ranges.",
+						"items": {
+							"type": "string"
+						},
+						"type": "array"
+					}
+				}
+			},
+			"options": [
+				{
+					"property": "budget",
+					"cliName": "budget",
+					"description": "Max tokens in response.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<budget:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "full",
+					"cliName": "full",
+					"description": "Legacy alias for mode='full'. Force full content output, bypass smart outlining.",
+					"required": false,
+					"type": "boolean",
+					"placeholder": "<full:true|false>",
+					"exampleValue": "false",
+					"defaultValue": false
+				},
+				{
+					"property": "mode",
+					"cliName": "mode",
+					"description": "Read view. auto: smart default. full: full content. signature: hash-prefixed declarations only. stripped: whole-file content with plain comments/debug logs/extra blanks removed.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<mode:auto|full|signature|stripped>",
+					"exampleValue": "auto",
+					"enumValues": ["auto", "full", "signature", "stripped"],
+					"defaultValue": "auto"
+				},
+				{
+					"property": "path",
+					"cliName": "path",
+					"description": "Absolute or relative file path to read. A relative path requires an absolute `root`; the server cannot see your shell cwd.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<path>",
+					"exampleValue": "/path/to/file.md"
+				},
+				{
+					"property": "paths",
+					"cliName": "paths",
+					"description": "Multiple file paths to read in one call. Each file gets independent smart handling. Saves round-trips vs multiple single reads.",
+					"required": false,
+					"type": "array",
+					"arrayItemType": "string",
+					"placeholder": "<paths:value1,value2>",
+					"exampleValue": "value1,value2"
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "section",
+					"cliName": "section",
+					"description": "Line range e.g. '45-89', or heading e.g. '## Architecture'. Bypasses smart view. Use `sections` for multiple ranges.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<section>"
+				},
+				{
+					"property": "sections",
+					"cliName": "sections",
+					"description": "Multiple ranges from the same file in one call. Each entry is a line range or heading. Emits each block in user-supplied order, separated by `─── lines X-Y ───` delimiters. Mutually exclusive with `section`. Capped at 20 ranges.",
+					"required": false,
+					"type": "array",
+					"arrayItemType": "string",
+					"placeholder": "<sections:value1,value2>",
+					"exampleValue": "value1,value2"
+				}
+			]
+		},
+		{
+			"name": "tilth_list",
+			"description": "List files matching glob patterns as a directory tree. Replaces find/ls/tree and the host Glob tool — use this to see project structure with per-directory token-size rollups. Pass `patterns` to combine several globs into one tree.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"budget": {
+						"description": "Max tokens in response.",
+						"type": "number"
+					},
+					"depth": {
+						"description": "Cap directory depth (1 = top-level only).",
+						"type": "number"
+					},
+					"patterns": {
+						"description": "Glob patterns rendered into one tree, e.g. ['*.rs'] or ['*.rs', '*.toml']. Capped at 20.",
+						"items": {
+							"type": "string"
+						},
+						"maxItems": 20,
+						"minItems": 1,
+						"type": "array"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"scope": {
+						"description": "Directory to root the tree at. DO NOT USE scope if you want to list the current working directory.",
+						"type": "string"
+					}
+				},
+				"required": ["patterns"]
+			},
+			"options": [
+				{
+					"property": "budget",
+					"cliName": "budget",
+					"description": "Max tokens in response.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<budget:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "depth",
+					"cliName": "depth",
+					"description": "Cap directory depth (1 = top-level only).",
+					"required": false,
+					"type": "number",
+					"placeholder": "<depth:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "patterns",
+					"cliName": "patterns",
+					"description": "Glob patterns rendered into one tree, e.g. ['*.rs'] or ['*.rs', '*.toml']. Capped at 20.",
+					"required": true,
+					"type": "array",
+					"arrayItemType": "string",
+					"placeholder": "<patterns:value1,value2>",
+					"exampleValue": "value1,value2"
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "scope",
+					"cliName": "scope",
+					"description": "Directory to root the tree at. DO NOT USE scope if you want to list the current working directory.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<scope>"
+				}
+			]
+		},
+		{
+			"name": "tilth_deps",
+			"description": "Blast-radius check before breaking changes. Shows what a file imports (local + external) and what other files call its exports, with symbol-level detail. Use ONLY when your planned edit changes a function signature, removes/renames an export, or modifies behavior that callers rely on. Do NOT use for reading files, adding new code, or internal-only changes — use tilth_read instead.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"budget": {
+						"description": "Max tokens. Truncates 'Used by' first.",
+						"type": "number"
+					},
+					"path": {
+						"description": "File to check before making breaking changes.",
+						"type": "string"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"scope": {
+						"description": "Directory to search for dependents. Default: project root.",
+						"type": "string"
+					}
+				},
+				"required": ["path"]
+			},
+			"options": [
+				{
+					"property": "budget",
+					"cliName": "budget",
+					"description": "Max tokens. Truncates 'Used by' first.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<budget:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "path",
+					"cliName": "path",
+					"description": "File to check before making breaking changes.",
+					"required": true,
+					"type": "string",
+					"placeholder": "<path>",
+					"exampleValue": "/path/to/file.md"
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "scope",
+					"cliName": "scope",
+					"description": "Directory to search for dependents. Default: project root.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<scope>"
+				}
+			]
+		},
+		{
+			"name": "tilth_grok",
+			"description": "Get everything structural about a symbol in one call — definition, body, signature, doc, callees, callers, siblings, tests. Use ONLY for 'understand this symbol' questions. Do NOT use for concept search (use tilth_search) or reading file contents (use tilth_read).",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"full": {
+						"default": false,
+						"description": "Widen caps: 50 callers, 30 callees, 30 siblings, 30 tests (default 5/5/8/8).",
+						"type": "boolean"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"scope": {
+						"description": "Subdirectory to narrow the search. Default: project root.",
+						"type": "string"
+					},
+					"target": {
+						"description": "Symbol name, e.g. 'parse_unified_diff'. Also accepts 'src/diff/parse.rs:7' or 'Type::method'.",
+						"type": "string"
+					}
+				},
+				"required": ["target"]
+			},
+			"options": [
+				{
+					"property": "full",
+					"cliName": "full",
+					"description": "Widen caps: 50 callers, 30 callees, 30 siblings, 30 tests (default 5/5/8/8).",
+					"required": false,
+					"type": "boolean",
+					"placeholder": "<full:true|false>",
+					"exampleValue": "false",
+					"defaultValue": false
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "scope",
+					"cliName": "scope",
+					"description": "Subdirectory to narrow the search. Default: project root.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<scope>"
+				},
+				{
+					"property": "target",
+					"cliName": "target",
+					"description": "Symbol name, e.g. 'parse_unified_diff'. Also accepts 'src/diff/parse.rs:7' or 'Type::method'.",
+					"required": true,
+					"type": "string",
+					"placeholder": "<target>"
+				}
+			]
+		},
+		{
+			"name": "tilth_diff",
+			"description": "Structural diff showing function-level changes. Replaces git diff. Call with no args for uncommitted changes overview.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"a": {
+						"description": "First file for a file-to-file diff. Must be used together with b.",
+						"type": "string"
+					},
+					"b": {
+						"description": "Second file for a file-to-file diff. Must be used together with a.",
+						"type": "string"
+					},
+					"blast": {
+						"default": false,
+						"description": "Show blast-radius warnings for signature-changed symbols.",
+						"type": "boolean"
+					},
+					"budget": {
+						"description": "Max tokens in response.",
+						"type": "number"
+					},
+					"expand": {
+						"default": 0,
+						"description": "Number of changed symbols to expand with full source context.",
+						"type": "number"
+					},
+					"log": {
+						"description": "Git log range (e.g. 'HEAD~5..HEAD') — shows per-commit structural summaries.",
+						"type": "string"
+					},
+					"patch": {
+						"description": "Path to a .patch file to parse instead of running git diff.",
+						"type": "string"
+					},
+					"root": {
+						"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+						"type": "string"
+					},
+					"scope": {
+						"description": "Restrict diff output to a specific file or directory path.",
+						"type": "string"
+					},
+					"search": {
+						"description": "Filter output to symbols or files matching this substring (case-insensitive).",
+						"type": "string"
+					},
+					"source": {
+						"description": "Diff source: 'uncommitted' (default), 'staged', or a git ref (e.g. 'HEAD~1', 'main..feat'). Ignored when a, b, patch, or log is set.",
+						"type": "string"
+					}
+				}
+			},
+			"options": [
+				{
+					"property": "a",
+					"cliName": "a",
+					"description": "First file for a file-to-file diff. Must be used together with b.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<a>"
+				},
+				{
+					"property": "b",
+					"cliName": "b",
+					"description": "Second file for a file-to-file diff. Must be used together with a.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<b>"
+				},
+				{
+					"property": "blast",
+					"cliName": "blast",
+					"description": "Show blast-radius warnings for signature-changed symbols.",
+					"required": false,
+					"type": "boolean",
+					"placeholder": "<blast:true|false>",
+					"exampleValue": "false",
+					"defaultValue": false
+				},
+				{
+					"property": "budget",
+					"cliName": "budget",
+					"description": "Max tokens in response.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<budget:number>",
+					"exampleValue": "1"
+				},
+				{
+					"property": "expand",
+					"cliName": "expand",
+					"description": "Number of changed symbols to expand with full source context.",
+					"required": false,
+					"type": "number",
+					"placeholder": "<expand:number>",
+					"exampleValue": "0",
+					"defaultValue": 0
+				},
+				{
+					"property": "log",
+					"cliName": "log",
+					"description": "Git log range (e.g. 'HEAD~5..HEAD') — shows per-commit structural summaries.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<log>"
+				},
+				{
+					"property": "patch",
+					"cliName": "patch",
+					"description": "Path to a .patch file to parse instead of running git diff.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<patch>"
+				},
+				{
+					"property": "root",
+					"cliName": "root",
+					"description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<root>"
+				},
+				{
+					"property": "scope",
+					"cliName": "scope",
+					"description": "Restrict diff output to a specific file or directory path.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<scope>"
+				},
+				{
+					"property": "search",
+					"cliName": "search",
+					"description": "Filter output to symbols or files matching this substring (case-insensitive).",
+					"required": false,
+					"type": "string",
+					"placeholder": "<search>"
+				},
+				{
+					"property": "source",
+					"cliName": "source",
+					"description": "Diff source: 'uncommitted' (default), 'staged', or a git ref (e.g. 'HEAD~1', 'main..feat'). Ignored when a, b, patch, or log is set.",
+					"required": false,
+					"type": "string",
+					"placeholder": "<source>"
+				}
+			]
+		},
+		{
+			"name": "tilth_savings",
+			"description": "Report tokens tilth saved this session vs naive grep/cat (conservative lower bound). Call ONLY when the user explicitly asks how much tilth saved — never proactively.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {}
+			},
+			"options": []
+		}
+	]
+}

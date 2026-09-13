@@ -1,0 +1,8 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"entry": ["index.ts!", "src/compat.ts!"],
+	"project": ["index.ts!", "src/compat.ts!", "src/**/*.ts!", "test/**/*.ts"],
+	"ignoreBinaries": ["rg"],
+	"ignoreExportsUsedInFile": true,
+	"tags": ["-@internal"]
+}

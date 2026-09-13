@@ -1,0 +1,17 @@
+# /tmp/tilth-review/ws.txt (4 lines, ~11 tokens) [full]
+
+tabbed:	here
+trailing:   
+  indented	line
+
+
+# /tmp/tilth-review/nt.txt (2 lines, ~6 tokens) [full]
+
+no trailing
+second line
+
+# /tmp/tilth-review/ewb.txt (3 lines, ~5 tokens) [full]
+
+ends with blank
+
+
