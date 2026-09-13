@@ -72,12 +72,16 @@ pi -e ./index.ts
 ## Fork notes
 
 Fork of [`jellyhuck/pi-auto-continue`](https://github.com/jellyhuck/pi-auto-continue).
-This repo is the source of truth for `packages/pi-auto-continue` in the
-`pi-extensions` monorepo, which re-syncs from here (`pnpm run update:pi-auto-continue`);
-upstream changes should be merged in here first.
-Changes against upstream:
-Two behaviours were added; both are **off by default**, so an unconfigured
-install behaves exactly like upstream.
+
+**Lineage.** Upstream changes are merged into this fork first; the
+`pi-extensions` monorepo then vendors a byte-faithful copy of this fork at
+`packages/pi-auto-continue` and re-syncs it with
+`pnpm run update:pi-auto-continue` (the fork commit it holds is recorded in
+`packages/pi-auto-continue/.synced-from`). Edits made only inside the vendored
+copy are lost on the next sync.
+
+**Changes against upstream.** Two behaviours were added, both **off by
+default**, so an unconfigured install behaves exactly like upstream.
 
 ### 1. Rolling quota windows
 
