@@ -41,7 +41,7 @@
 
 - There is no build step and no `dist/`: Pi loads source files directly, and each package's `package.json` declares the entry in `pi.extensions`.
   Entry locations vary per package:
-  - `./src/index.ts` — pi-mlflow, pi-provider-antigravity, pi-subagent-herdr, pi-tilth
+  - `./src/index.ts` — pi-event-sounds, pi-mlflow, pi-provider-antigravity, pi-subagent-herdr, pi-tilth
   - `./index.ts` (package root) — pi-condense, pi-hashline-edit, pi-session-recap
   - `./src/accounts.ts` — pi-accounts
   - `./extensions/index.ts` — pi-cc-ui

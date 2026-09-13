@@ -1,0 +1,60 @@
+{
+	"name": "@yofriadi/pi-event-sounds",
+	"version": "0.1.0",
+	"description": "Configurable sound effects for pi-coding-agent lifecycle events: session start, prompt submit, agent settled, extension questions, tool errors, provider quota/rate-limit responses, turn milestones, and elapsed-time reminders",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"pi-coding-agent",
+		"sounds",
+		"audio",
+		"notifications"
+	],
+	"license": "MIT",
+	"author": "Yofriadi Yahya",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-event-sounds"
+	},
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"files": [
+		"src",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE",
+		"package.json"
+	],
+	"exports": {
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit",
+		"check:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.85.1"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.85.1",
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3",
+		"vitest": "3.2.4"
+	}
+}
