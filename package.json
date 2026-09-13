@@ -15,7 +15,8 @@
 		"fallow:audit": "fallow audit",
 		"fallow:health": "fallow health --score --hotspots --targets",
 		"fallow:dead-code": "fallow dead-code",
-		"fallow:dupes": "fallow dupes"
+		"fallow:dupes": "fallow dupes",
+		"update:pi-auto-continue": "bash scripts/update-pi-auto-continue-subtree.sh"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",

@@ -9,7 +9,8 @@
 			"*.md",
 			"!packages/pi-condense",
 			"!packages/pi-cc-ui",
-			"!packages/pi-hashline-edit"
+			"!packages/pi-hashline-edit",
+			"!packages/pi-auto-continue"
 		],
 		"ignoreUnknown": false
 	},
