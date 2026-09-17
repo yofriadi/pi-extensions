@@ -385,6 +385,27 @@ describe("AgentPrepHandler.handle", () => {
     expect(result).toEqual({});
   });
 
+  it("returns no override for a CRLF custom prompt", async () => {
+    // Line endings survive because the handler returns nothing at all: it
+    // never normalizes what it never reads, where the render pass would
+    // return an override carrying normalized line endings.
+    const custom = [
+      "You are my personal coding assistant.",
+      "",
+      "Answer with one word.",
+    ].join("\r\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(custom, { customPrompt: custom }),
+      makeCtx(),
+    );
+
+    expect(result).toEqual({});
+  });
+
   it("leaves Pi-style literal headers in a custom prompt untouched", async () => {
     // Header style never decides ownership: the exact lines Pi writes
     // belong to the operator when the whole prompt is theirs.

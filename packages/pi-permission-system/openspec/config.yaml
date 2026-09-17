@@ -4,7 +4,10 @@ context: |
   Local fork of @gotgenes/pi-permission-system (upstream: gotgenes/pi-packages,
   packages/pi-permission-system), imported as a git subtree.
   Tech stack: TypeScript, Node 22 strip-only syntax, vitest, biome.
+  Upstream's constructor parameter properties are a recorded exception to the
+  strip-only rule; see packages/pi-permission-system/FORK_NOTES.md.
   Upstream conventions this fork keeps: Conventional Commits, tests-first for
   bug fixes, one sentence per line in Markdown.
-  Local fixes stay in separate commits from subtree imports so they can be
-  split back upstream with `git subtree split`.
+  Local fixes stay in separate commits from subtree imports, and an upstream
+  contribution is a hand-applied patch against a clean clone rather than a
+  `git subtree split` (a split would carry the fork's noise).

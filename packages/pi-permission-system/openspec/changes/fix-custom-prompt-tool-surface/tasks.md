@@ -15,7 +15,7 @@ Each task here fixes a constraint verified against this repository; skipping any
       Prefer the versions the root already pins (`typescript 5.9.3`, `vitest 3.2.4`, `@types/node 22.19.19`, `@biomejs/biome 2.3.5`) so the workspace resolves one copy.
       Upstream's catalog asks for `typescript ^6.0.3` and `vitest ^4.1.11`, both majors ahead of this repo's pins, so treat this as a real compatibility question rather than a version nit: type-check and run the suite on the pinned versions in 2.9, and if either fails, install the package-local version it needs instead of weakening the code.
 - [x] 2.2 Give the package a local `tsconfig.json` that does not inherit `../../tsconfig.base.json`, reproducing upstream's own base options (ES2024 target, `strict`, `skipLibCheck`, `esModuleInterop`, `allowSyntheticDefaultImports`, `resolveJsonModule`, bundler resolution) plus the `#src/*` and `#test/*` paths.
-      This repository's base adds `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, and an ES2022 lib that upstream source is not written against — `tool-surface-prompt.ts:241` indexes `lines[index]` unguarded — so inheriting it would demand hundreds of unrelated edits and destroy the byte relationship the upstream patch needs.
+      This repository's base adds `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, and an ES2022 lib that upstream source is not written against — `tool-surface-prompt.ts:317` indexes `lines[end]` unguarded — so inheriting it would demand hundreds of unrelated edits and destroy the byte relationship the upstream patch needs.
 - [x] 2.3 Add `"!packages/pi-permission-system"` to `files.includes` in the root `biome.json`, matching the existing exclusions for the other vendored packages.
       Without it `biome check .` reformats the whole subtree from space/2 to tab/4/120.
 - [x] 2.4 Adjust the package's `lint` script to drop `eslint .`, which this repository does not provide, keeping `biome check .` and the markdown lint.
@@ -57,7 +57,7 @@ Each task here fixes a constraint verified against this repository; skipping any
 
 ## 4. Implementation
 
-- [x] 4.1 In `src/handlers/before-agent-start.ts`, widen `BeforeAgentStartPayload.systemPromptOptions` with `customPrompt?: string`, and update the interface comment: `toolSnippets` explains rendering, and `customPrompt` explains when rendering is skipped.
+- [x] 4.1 In `src/handlers/before-agent-start.ts`, update the `systemPromptOptions.customPrompt` interface comment — the field itself arrived with the imported tip, which already reads it — so `toolSnippets` explains rendering and `customPrompt` explains when rendering is skipped.
 - [x] 4.2 Guard the `renderToolSurface` call on a non-empty `customPrompt`, passing `event.systemPrompt` through unchanged when one is present.
       Keep the guard on that call alone, after `setActive` and the changed-surface log and before `resolveSkillPromptEntries`, so no other per-turn work is skipped.
 - [x] 4.3 Add a comment at the guard recording why the prompt is left alone — the operator defined it, the surface is prose, and the gates enforce — with a pointer to the proposal's rejected alternatives so a future reader does not reintroduce in-place rewriting.
@@ -69,10 +69,10 @@ Each task here fixes a constraint verified against this repository; skipping any
 - [x] 5.1 Run the package suite and confirm every new test passes and the count matches the 2.9 baseline plus the added cases, with the existing prefix-stability cases for #890 green.
 - [x] 5.2 Run `pnpm run check` from the repo root with full output; confirm the package type-checks and that biome reports no findings attributable to this change.
 - [x] 5.3 Run `pnpm test` from the repo root to confirm no sibling package regressed, `pi-subagent-herdr`'s permission integration tests in particular.
-- [ ] 5.4 Live-check the parent case: launch a session with a custom `SYSTEM.md` and confirm the prompt carries one tool-surface section and no generated block after `Current working directory:`.
-- [ ] 5.5 Live-check that enforcement is unchanged: with a tool denied by policy under a custom prompt, confirm the tool is inactive and a call to it is refused.
-- [ ] 5.6 Live-check a subagent child: confirm its prompt is its own agent definition and carries no generated tool block.
-- [ ] 5.7 Diff the rendered parent prompt against the pre-fix prompt and confirm the only difference is the removal of the appended block.
+- [x] 5.4 Live-check the parent case: launch a session with a custom `SYSTEM.md` and confirm the prompt carries one tool-surface section and no generated block after `Current working directory:`.
+- [x] 5.5 Live-check that enforcement is unchanged: with a tool denied by policy under a custom prompt, confirm the tool is inactive and a call to it is refused.
+- [x] 5.6 Live-check a subagent child: confirm its prompt is its own agent definition and carries no generated tool block.
+- [x] 5.7 Diff the rendered parent prompt against the pre-fix prompt and confirm the only difference is the removal of the appended block.
 
 ## 6. Upstream contribution
 

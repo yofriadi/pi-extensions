@@ -69,3 +69,11 @@ The exception has one boundary worth knowing: the package's own `gen:schema` scr
 It only imports `src/config/config-schema.ts`, whose import chain reaches none today, so the script works — but an import that pulls one in would break it.
 
 Code this fork authors still follows the repo rule.
+
+## Known upstream interactions
+
+Pi's custom-prompt branch appends `<available_skills>` only when `read` or `bash` is in the session's active tool set (upstream `system-prompt.js` resolves `skillFileReadTool` from those two names).
+
+If policy withholds both, later turns' prompts carry no skills catalogue at all, so this package's skill filtering has nothing to resolve and the session's skill entries go empty.
+
+That is Pi and this package's shared upstream behavior, unchanged by the custom-prompt skip, and worth knowing before blaming the divergence.

@@ -17,7 +17,7 @@ Appending a second tool surface to it contradicts that, and the extension gains 
 ## What Changes
 
 - `AgentPrepHandler.handle` skips `renderToolSurface` when Pi reports a non-empty `systemPromptOptions.customPrompt`, passing the prompt through to skill sanitization unchanged.
-- `BeforeAgentStartPayload` widens to carry `systemPromptOptions.customPrompt`, which Pi already supplies on `BeforeAgentStartEvent`.
+- Pi already supplies `systemPromptOptions.customPrompt` on `BeforeAgentStartEvent`, and the imported tip already reads it, so the fork's only interface change is the comment: `customPrompt` explains when rendering is skipped.
 - Skill filtering, tool filtering, `setActive`, and the debug log for a changed surface are unaffected and continue to run on every turn for every prompt.
 - When no custom prompt is in use, behavior is byte-for-byte unchanged: Pi's sections are stripped and this session's are relocated to the tail, preserving the shared leading-byte prefix a subagent child inherits (#890).
 - `renderToolSurface` and its helpers are not modified.
@@ -35,13 +35,13 @@ Appending a second tool surface to it contradicts that, and the extension gains 
 
 ## Impact
 
-- **Code:** `src/handlers/before-agent-start.ts` only — widen the payload type and guard one call. `src/exposure/tool-surface-prompt.ts` is untouched.
+- **Code:** `src/handlers/before-agent-start.ts` only — guard one call and update the interface comment (the `customPrompt` field itself arrived with the imported tip). `src/exposure/tool-surface-prompt.ts` is untouched.
 - **Tests:** `test/handlers/before-agent-start.test.ts` gains cases for the skip, for skill filtering still applying under a custom prompt, and for unchanged relocation without one.
   The existing `makeEvent` helper already accepts `Partial<BuildSystemPromptOptions>`, so `customPrompt` needs no fixture change.
 - **Runtime:** No change to enforcement. `toolRegistry.setActive` and the permission gates remain the sole authority over what a session may call.
 - **Interaction:** `pi-subagent-herdr` launches children with `--system-prompt` carrying the agent definition body, so a child's tool surface comes from its own agent file rather than from the parent's prompt.
   A child is therefore also an operator-authored prompt for the purposes of this change.
-- **Package:** First local fix on top of the subtree import, kept in its own commit so it can be offered upstream against #919.
+- **Package:** First local fix on top of the subtree import, kept in its own commit (offering it upstream was superseded by upstream's own #919 fix; see the tasks.md disposition).
 
 ## Alternatives considered and rejected
 
@@ -50,14 +50,15 @@ Appending a second tool surface to it contradicts that, and the extension gains 
 Rewrite the operator's `Available Tools` section, intersecting their bullets with the session's allowed set so the stated list is always exactly right.
 
 Rejected as unsafe.
-Adversarial review found three independent ways it destroys operator text, each verified against the real upstream code and a real `SYSTEM.md`:
+Adversarial review found three independent ways it destroys operator text, each verified against the pre-rebase import (upstream 32.0.5) and a real `SYSTEM.md`.
+The line references below are to that pre-rebase code; the landed tip has since removed `isTopLevelSectionHeader` (upstream af79199) and moved the survivors (`isSectionBodyLine` to `:297`, `findSection` to `:307`).
 
-- `isTopLevelSectionHeader` (`tool-surface-prompt.ts:215`) requires a trailing `:`, so `## Guidelines` is not a section boundary.
+- `isTopLevelSectionHeader` — since removed by the landed tip — required a trailing `:`, so `## Guidelines` is not a section boundary.
   A section starting at `## Available Tools` runs to the first colon-terminated line, capturing 40 of 50 lines of the reproduction prompt — the operator's entire guidelines prose, deleted.
-- Removing the blank-line clause from `isSectionBodyLine` (`:221`), needed so a section stops at a paragraph break, makes the other branch capture the header alone and produces a *new* duplicate.
+- Removing the blank-line clause from `isSectionBodyLine` (now `:297` in the landed tip), needed so a section stops at a paragraph break, makes the other branch capture the header alone and produces a *new* duplicate.
 - A bullet parser accepting "identifier then `:` or whitespace" reads prose bullets as tool names (`- Offload research…` → tool `Offload`) and dropped 13 of the reproduction prompt's guideline bullets.
 
-`findSection` also matches only the first occurrence (`:231`), so a prompt carrying more than one surface region cannot be fully reconciled.
+`findSection` (now `:307` in the landed tip) also matches only the first occurrence, so a prompt carrying more than one surface region cannot be fully reconciled.
 For a permission extension, silently deleting operator instructions is a worse failure than an over-broad tool list, and every one of these defects follows from parsing prose that the operator owns.
 
 ### Append a line naming withheld tools

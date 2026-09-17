@@ -28,12 +28,20 @@ git -C "$tmp_dir/repo" subtree split \
 	--branch=pi-permission-system-root \
 	"$upstream_ref" >/dev/null
 
-git subtree pull \
+if ! git subtree pull \
 	--prefix="$prefix" \
 	"$tmp_dir/repo" \
 	pi-permission-system-root \
 	--squash \
-	-m "Update gotgenes pi-permission-system subtree"
+	-m "Update gotgenes pi-permission-system subtree"; then
+	echo "The subtree pull stopped, most likely on a conflict in files both" >&2
+	echo "sides changed (expect $prefix/src/handlers/before-agent-start.ts and" >&2
+	echo "$prefix/package.json)." >&2
+	echo "Resolve within $prefix, 'git add' the resolved files, and conclude the" >&2
+	echo "merge with 'git commit'; or discard it with 'git merge --abort' and" >&2
+	echo "re-apply the local changes on top of the refreshed import." >&2
+	exit 1
+fi
 
 echo "Updated $prefix from $upstream_url ($upstream_ref, $(git -C "$tmp_dir/repo" rev-parse --short HEAD))."
 echo "Review and preserve the local changes: the fork rename and forkOf block in"

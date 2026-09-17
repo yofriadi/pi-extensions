@@ -83,10 +83,10 @@ The package is imported as a git subtree from `gotgenes/pi-packages`, and this f
 
 Four import constraints were verified against this repository and must be handled in the import phase, or the package will not install, compile, or lint here:
 
-- The upstream manifest uses `"catalog:"` for five dev dependencies.
+- The upstream manifest uses `"catalog:"` for seven dev dependencies.
   This repository's `pnpm-workspace.yaml` defines no catalog, so `pnpm install` fails until they are pinned to the versions this repo already uses.
 - The package `tsconfig.json` extends `../../tsconfig.base.json`, which after import resolves to this repository's stricter base (`noUncheckedIndexedAccess`, `verbatimModuleSyntax`, ES2022).
-  Upstream source is not written against those options — `tool-surface-prompt.ts:241` indexes `lines[index]` unguarded — so the package needs a local tsconfig that does not inherit the fork base.
+  Upstream source is not written against those options — `tool-surface-prompt.ts:317` indexes `lines[end]` unguarded — so the package needs a local tsconfig that does not inherit the fork base.
 - This repository's `biome.json` includes `packages/**/*.ts` and excludes every other vendored package by name.
   Without adding this one, `biome check` reformats the whole subtree to tab/width-4, destroying the byte relationship an upstream patch depends on.
 - Upstream's ESLint config carries three rules scoped specifically to this package (a same-directory import convention, a ban on interior `process.platform` reads, and an import restriction keeping the permission manager string-based).
