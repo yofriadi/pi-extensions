@@ -1,0 +1,64 @@
+# Troubleshooting
+
+## Common Issues
+
+| Problem                                                                                                 | Cause                                                                                   | Solution                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Config not applied (everything asks)                                                                    | File not found or parse error                                                           | Verify the global config at `~/.pi/agent/extensions/pi-permission-system/config.json` (respects `PI_CODING_AGENT_DIR`); check for trailing commas                                                                                                                           |
+| Per-agent override not applied                                                                          | Frontmatter parsing issue                                                               | Ensure `---` delimiters at file top; keep YAML simple; restart session                                                                                                                                                                                                      |
+| Tool blocked as unregistered                                                                            | Unknown tool name                                                                       | Use a registered `mcp` tool for server tools: `{ "tool": "server:tool" }`                                                                                                                                                                                                   |
+| `/skill:<name>` blocked                                                                                 | Deny policy or confirmation unavailable                                                 | Check merged `skill` policy (global/project/agent layers). `ask` still requires UI or forwarded confirmation.                                                                                                                                                               |
+| External file path blocked                                                                              | `external_directory` is `ask` without UI or `deny`                                      | Allow/ask the permission or keep file tools inside the active working directory.                                                                                                                                                                                            |
+| Spurious external-path prompt for `cd <subdir> && grep … ../path`                                       | Relative path was resolved against cwd instead of the `cd` target                       | Fixed in current version — paths after a leading `cd <subdir> &&` are resolved against the cd target, matching actual shell behavior.                                                                                                                                       |
+| Permission prompt is too verbose                                                                        | Generic extension tool input is large                                                   | Built-in file tools are summarized automatically; third-party tools are capped to a bounded one-line JSON preview.                                                                                                                                                          |
+| Windows: `permission_forwarding.error — EPERM … rename` in the logs, and a subagent's tool call refused | An antivirus scanner or the search indexer held a transient handle on a forwarding file | The write is retried automatically for a short window. If it still fails, enable `debugLog` and look for `permission_forwarding.fs_retried` entries — their `attempts` and `code` say whether retrying is helping — then exclude the forwarding directory from the scanner. |
+
+## Diagnostic Logging
+
+Enable `"debugLog": true` in your config to write verbose diagnostics to `logs/pi-permission-system-debug.jsonl`.
+
+On every session start, the extension emits a `config.resolved` entry to both logs listing the resolved config paths and whether each exists.
+This makes it easy to verify which files the extension actually loaded:
+
+```jsonc
+{
+  "event": "config.resolved",
+  "globalConfigPath": "/…/.pi/agent/extensions/pi-permission-system/config.json",
+  "globalConfigExists": true,
+  "projectConfigPath": "/…/my-project/.pi/extensions/pi-permission-system/config.json",
+  "projectConfigExists": false,
+  "agentsDir": "/…/.pi/agent/agents",
+  "agentsDirExists": true,
+  "projectAgentsDir": "/…/my-project/.pi/agents",
+  "projectAgentsDirExists": false,
+  "legacyGlobalPolicyDetected": false,
+  "legacyProjectPolicyDetected": false,
+  "legacyExtensionConfigDetected": false
+}
+```
+
+## Threat Model
+
+**Goal:** Enforce policy at the host level, not the model level.
+
+**What this stops:**
+
+- Agent calling tools it shouldn't use (e.g., `write`, dangerous `bash`)
+- Tool switching attempts (calling non-existent tool names)
+- Accidental escalation via skill loading
+- Unapproved path-bearing tool access outside the active working directory when `external_directory` is `ask` or `deny`
+
+**Limitations:**
+
+- If a dangerous action is possible via an allowed tool, policy must explicitly restrict it
+- This is a permission decision layer, not a sandbox — for true isolation see [Agent Sandboxes](https://engine.build/lab/agent-sandboxes).
+  The two are complementary rather than alternatives: a sandbox enforces which paths are in scope and in which direction, while this package decides whether a particular action on an in-scope path may proceed.
+  [ADR 0013] §8 records that division and the seam that exports this package's scope decisions to a sandbox launcher.
+- The review log records bash command strings, masked only where a name binds the secret.
+  Log files are created owner-only (`0600`), and a value bound to a sensitive name (`authorization`, `token`, `password`, a bare or suffixed `key`, …) is masked — whether the name is a log key, a shell variable, or a request header field.
+  A secret with no name bound to it, such as one typed as a `grep` pattern, is not.
+  Review-log values are shortened at `reviewLogFieldMaxWidth` (1000 characters by default), which bounds the file's growth but is a length cap, not redaction.
+  See [Log file sensitivity](configuration.md#log-file-sensitivity) and [ADR 0010].
+
+[ADR 0010]: https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/docs/decisions/0010-permission-log-secret-exposure.md
+[ADR 0013]: https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/docs/decisions/0013-permission-policy-model.md

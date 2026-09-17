@@ -1,0 +1,294 @@
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import {
+  checkRequestedToolRegistration,
+  getToolNameFromValue,
+  getToolPromptGuidelinesFromValue,
+  readRegisteredTools,
+} from "#src/exposure/tool-registry";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("getToolNameFromValue", () => {
+  test("returns string value directly", () => {
+    expect(getToolNameFromValue("read")).toBe("read");
+  });
+
+  test("returns null for empty string", () => {
+    expect(getToolNameFromValue("")).toBeNull();
+  });
+
+  test("returns null for whitespace-only string", () => {
+    expect(getToolNameFromValue("   ")).toBeNull();
+  });
+
+  test("returns null for null", () => {
+    expect(getToolNameFromValue(null)).toBeNull();
+  });
+
+  test("returns null for undefined", () => {
+    expect(getToolNameFromValue(undefined)).toBeNull();
+  });
+
+  test("extracts toolName from object", () => {
+    expect(getToolNameFromValue({ toolName: "write" })).toBe("write");
+  });
+
+  test("extracts name from object", () => {
+    expect(getToolNameFromValue({ name: "edit" })).toBe("edit");
+  });
+
+  test("extracts tool from object", () => {
+    expect(getToolNameFromValue({ tool: "bash" })).toBe("bash");
+  });
+
+  test("prefers toolName over name over tool", () => {
+    expect(
+      getToolNameFromValue({
+        toolName: "first",
+        name: "second",
+        tool: "third",
+      }),
+    ).toBe("first");
+  });
+
+  test("falls back to name when toolName is empty", () => {
+    expect(getToolNameFromValue({ toolName: "", name: "edit" })).toBe("edit");
+  });
+
+  test("returns null for object with no recognised keys", () => {
+    expect(getToolNameFromValue({ unknown: "read" })).toBeNull();
+  });
+
+  test("returns null for number input", () => {
+    expect(getToolNameFromValue(42)).toBeNull();
+  });
+});
+
+describe("getToolPromptGuidelinesFromValue", () => {
+  test("returns the tool's guideline bullets", () => {
+    expect(
+      getToolPromptGuidelinesFromValue({
+        name: "read",
+        promptGuidelines: [
+          "Use read to examine files instead of cat or sed.",
+          "Read whole files.",
+        ],
+      }),
+    ).toEqual([
+      "Use read to examine files instead of cat or sed.",
+      "Read whole files.",
+    ]);
+  });
+
+  test("returns an empty array when the tool declares none", () => {
+    expect(getToolPromptGuidelinesFromValue({ name: "read" })).toEqual([]);
+  });
+
+  test("drops blank and non-string entries", () => {
+    expect(
+      getToolPromptGuidelinesFromValue({
+        name: "bash",
+        promptGuidelines: ["Use bash.", "", "   ", 42, null, "Be careful."],
+      }),
+    ).toEqual(["Use bash.", "Be careful."]);
+  });
+
+  test("trims surrounding whitespace, mirroring Pi's own normalization", () => {
+    expect(
+      getToolPromptGuidelinesFromValue({
+        name: "edit",
+        promptGuidelines: ["  Use edit for precise changes.  "],
+      }),
+    ).toEqual(["Use edit for precise changes."]);
+  });
+
+  test("returns an empty array when promptGuidelines is not an array", () => {
+    expect(
+      getToolPromptGuidelinesFromValue({
+        name: "read",
+        promptGuidelines: "Use read.",
+      }),
+    ).toEqual([]);
+  });
+
+  test("returns an empty array for a non-object value", () => {
+    expect(getToolPromptGuidelinesFromValue("read")).toEqual([]);
+    expect(getToolPromptGuidelinesFromValue(null)).toEqual([]);
+    expect(getToolPromptGuidelinesFromValue(undefined)).toEqual([]);
+  });
+});
+
+describe("readRegisteredTools", () => {
+  test("reads names and guidelines in one pass", () => {
+    const registered = readRegisteredTools([
+      { name: "read", promptGuidelines: ["Use read."] },
+      { name: "bash", promptGuidelines: ["Use bash.", "Be careful."] },
+    ]);
+
+    expect(registered.names).toEqual(["read", "bash"]);
+    expect(registered.guidelinesByTool.get("read")).toEqual(["Use read."]);
+    expect(registered.guidelinesByTool.get("bash")).toEqual([
+      "Use bash.",
+      "Be careful.",
+    ]);
+  });
+
+  test("records no guidelines entry for a tool that declares none", () => {
+    const registered = readRegisteredTools([{ name: "read" }]);
+
+    expect(registered.names).toEqual(["read"]);
+    expect(registered.guidelinesByTool.has("read")).toBe(false);
+  });
+
+  test("reads bare tool-name strings, as getActive() returns", () => {
+    const registered = readRegisteredTools(["read", "bash"]);
+
+    expect(registered.names).toEqual(["read", "bash"]);
+    expect(registered.guidelinesByTool.size).toBe(0);
+  });
+
+  test("skips entries carrying no resolvable tool name", () => {
+    const registered = readRegisteredTools([
+      { name: "read" },
+      { unknown: "x" },
+      42,
+      null,
+    ]);
+
+    expect(registered.names).toEqual(["read"]);
+  });
+});
+
+describe("checkRequestedToolRegistration", () => {
+  test("returns missing-tool-name for null requested name", () => {
+    const result = checkRequestedToolRegistration(null, []);
+    expect(result.status).toBe("missing-tool-name");
+  });
+
+  test("returns missing-tool-name for whitespace-only requested name", () => {
+    const result = checkRequestedToolRegistration("   ", []);
+    expect(result.status).toBe("missing-tool-name");
+  });
+
+  test("returns registered when tool name matches a string entry", () => {
+    const result = checkRequestedToolRegistration("read", ["read", "write"]);
+    expect(result.status).toBe("registered");
+    if (result.status === "registered") {
+      expect(result.requestedToolName).toBe("read");
+      expect(result.normalizedToolName).toBe("read");
+    }
+  });
+
+  test("returns registered when tool name matches an object entry by name", () => {
+    const result = checkRequestedToolRegistration("edit", [{ name: "edit" }]);
+    expect(result.status).toBe("registered");
+  });
+
+  test("returns registered when tool name matches an object entry by toolName", () => {
+    const result = checkRequestedToolRegistration("bash", [
+      { toolName: "bash" },
+    ]);
+    expect(result.status).toBe("registered");
+  });
+
+  test("returns unregistered when tool is not in the list", () => {
+    const result = checkRequestedToolRegistration("ghost", ["read", "write"]);
+    expect(result.status).toBe("unregistered");
+    if (result.status === "unregistered") {
+      expect(result.requestedToolName).toBe("ghost");
+      expect(result.availableToolNames).toContain("read");
+      expect(result.availableToolNames).toContain("write");
+    }
+  });
+
+  test("available tool names are sorted alphabetically", () => {
+    const result = checkRequestedToolRegistration("ghost", [
+      "write",
+      "read",
+      "edit",
+    ]);
+    if (result.status === "unregistered") {
+      expect(result.availableToolNames).toEqual(["edit", "read", "write"]);
+    }
+  });
+
+  test("resolves alias: requested alias maps to registered canonical name", () => {
+    const aliases = { Execute: "bash" };
+    const result = checkRequestedToolRegistration("Execute", ["bash"], aliases);
+    expect(result.status).toBe("registered");
+    if (result.status === "registered") {
+      expect(result.normalizedToolName).toBe("bash");
+    }
+  });
+
+  test("resolves alias: registered canonical is found via reverse alias lookup", () => {
+    // "bash" is registered; alias maps "Execute" → "bash"
+    // requesting "bash" directly should still resolve via the alias table
+    const aliases = { Execute: "bash" };
+    const result = checkRequestedToolRegistration("bash", ["bash"], aliases);
+    expect(result.status).toBe("registered");
+  });
+
+  test("returns unregistered with empty availableToolNames for empty tool list", () => {
+    const result = checkRequestedToolRegistration("read", []);
+    expect(result.status).toBe("unregistered");
+    if (result.status === "unregistered") {
+      expect(result.availableToolNames).toEqual([]);
+    }
+  });
+
+  test("skips tool list entries that yield no name", () => {
+    const result = checkRequestedToolRegistration("read", [
+      null,
+      {},
+      { unrelated: "x" },
+      "read",
+    ]);
+    expect(result.status).toBe("registered");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Moved from permission-system.test.ts catch-all (#342)
+// ---------------------------------------------------------------------------
+
+test("Tool registry resolves event tool names from string and object payloads", () => {
+  expect(getToolNameFromValue("  read  ")).toBe("read");
+  expect(getToolNameFromValue({ toolName: "write" })).toBe("write");
+  expect(getToolNameFromValue({ name: "find" })).toBe("find");
+  expect(getToolNameFromValue({ tool: "grep" })).toBe("grep");
+  expect(getToolNameFromValue({})).toBe(null);
+});
+
+test("Tool registry blocks unregistered tools and handles aliases", () => {
+  const registeredTools = [
+    { toolName: "mcp" },
+    { toolName: "read" },
+    { toolName: "bash" },
+  ];
+
+  const unknownCheck = checkRequestedToolRegistration(
+    "third_party_tool",
+    registeredTools,
+  );
+  expect(unknownCheck.status).toBe("unregistered");
+  if (unknownCheck.status === "unregistered") {
+    expect(unknownCheck.availableToolNames).toEqual(["bash", "mcp", "read"]);
+  }
+
+  const aliasCheck = checkRequestedToolRegistration(
+    "legacy_read",
+    registeredTools,
+    { legacy_read: "read" },
+  );
+  expect(aliasCheck.status).toBe("registered");
+
+  const missingNameCheck = checkRequestedToolRegistration(
+    "   ",
+    registeredTools,
+  );
+  expect(missingNameCheck.status).toBe("missing-tool-name");
+});

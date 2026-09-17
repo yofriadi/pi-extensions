@@ -1,0 +1,701 @@
+/**
+ * Unit tests for AuthorizerSelection.
+ *
+ * AuthorizerSelection owns the stored ExtensionContext and is the sole
+ * implementation of the AskEscalator role. These tests verify the
+ * escalate/reject contract across activation state.
+ */
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
+
+import { ParentAuthorizer } from "#src/authority/approval-escalator";
+import type { Authorizer } from "#src/authority/authorizer";
+import { AuthorizerRegistry } from "#src/authority/authorizer-registry";
+import {
+  type AdjudicationRole,
+  AuthorizerSelection,
+} from "#src/authority/authorizer-selection";
+import { LocalUserAuthorizer } from "#src/authority/local-user-authorizer";
+import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
+import type { PromptPermissionDetails } from "#src/authority/permission-prompter";
+import {
+  makeChainAudit,
+  makeAuthorizerSelectionDeps as makeDeps,
+  makeDetection,
+  makeInvokingPrompter,
+  makePrompterApi,
+  neutralizeSubagentEnvHints,
+  registerLink as register,
+} from "#test/helpers/authorizer-fixtures";
+import { makeAuthorizerLog } from "#test/helpers/authorizer-log-fixtures";
+import { DECIDED_BY_HUMAN } from "#test/helpers/decision-fixtures";
+import { makePromptDetails as makeDetails } from "#test/helpers/prompt-details-fixtures";
+
+neutralizeSubagentEnvHints();
+
+// ── Test helpers ──────────────────────────────────────────────────────────
+
+function makeCtx(overrides: Partial<ExtensionContext> = {}): ExtensionContext {
+  return {
+    cwd: "/test/project",
+    hasUI: true,
+    ui: {
+      setStatus: vi.fn(),
+      notify: vi.fn(),
+      select: vi.fn(),
+      input: vi.fn(),
+    },
+    sessionManager: {
+      getEntries: vi.fn().mockReturnValue([]),
+      getSessionDir: vi.fn().mockReturnValue("/sessions/test"),
+      getSessionId: vi.fn().mockReturnValue(null),
+      addEntry: vi.fn(),
+    },
+    ...overrides,
+  } as unknown as ExtensionContext;
+}
+
+/** Details whose gate-computed surface drives the delegation envelope. */
+function makeDetailsOn(surface: string): PromptPermissionDetails {
+  return makeDetails({
+    accessIntent: { surface, matchValues: ["/v"], boundaryValue: null },
+  });
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+describe("AuthorizerSelection", () => {
+  describe("escalate", () => {
+    it("rejects before activate", async () => {
+      const selection = new AuthorizerSelection(makeDeps());
+      await expect(selection.escalate(makeDetails())).rejects.toThrow(
+        "escalate called before the session was activated",
+      );
+    });
+
+    it("delegates to deps.prompter.prompt with the selected authorizer", async () => {
+      const prompter = makePrompterApi();
+      const selection = new AuthorizerSelection(makeDeps({ prompter }));
+      const ctx = makeCtx({ hasUI: true });
+      selection.activate(ctx);
+      const details = makeDetails();
+
+      const result = await selection.escalate(details);
+
+      expect(prompter.prompt).toHaveBeenCalledWith(
+        expect.any(LocalUserAuthorizer),
+        details,
+      );
+      expect(result).toEqual({
+        approved: true,
+        state: "approved",
+        decidedBy: DECIDED_BY_HUMAN,
+      });
+    });
+
+    it("uses the most recently selected authorizer", async () => {
+      const prompter = makePrompterApi();
+      const selection = new AuthorizerSelection(makeDeps({ prompter }));
+      selection.activate(makeCtx({ hasUI: false }));
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetails());
+
+      expect(prompter.prompt).toHaveBeenCalledWith(
+        expect.any(LocalUserAuthorizer),
+        expect.anything(),
+      );
+    });
+
+    it("rejects after deactivate", async () => {
+      const selection = new AuthorizerSelection(makeDeps());
+      selection.activate(makeCtx());
+      selection.deactivate();
+      await expect(selection.escalate(makeDetails())).rejects.toThrow(
+        "escalate called before the session was activated",
+      );
+    });
+
+    it("returns the prompter decision", async () => {
+      const decision: PermissionPromptDecision = {
+        approved: false,
+        state: "denied",
+        decidedBy: DECIDED_BY_HUMAN,
+        denialReason: "user declined",
+      };
+      const prompter = makePrompterApi();
+      prompter.prompt.mockResolvedValue(decision);
+      const selection = new AuthorizerSelection(makeDeps({ prompter }));
+      selection.activate(makeCtx());
+
+      const result = await selection.escalate(makeDetails());
+
+      expect(result).toEqual(decision);
+    });
+  });
+
+  describe("lifecycle", () => {
+    it("activate then deactivate rejects a subsequent escalate", async () => {
+      const selection = new AuthorizerSelection(makeDeps());
+      selection.activate(makeCtx());
+      selection.deactivate();
+      await expect(selection.escalate(makeDetails())).rejects.toThrow(
+        "escalate called before the session was activated",
+      );
+    });
+
+    it("multiple activate calls escalate against the most recent context", async () => {
+      const prompter = makePrompterApi();
+      const selection = new AuthorizerSelection(makeDeps({ prompter }));
+      selection.activate(makeCtx({ cwd: "/old" }));
+      selection.activate(makeCtx({ cwd: "/new" }));
+
+      await selection.escalate(makeDetails());
+
+      expect(prompter.prompt).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("chain resolution", () => {
+    it("consults a configured link before the terminal", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "deny", reason: "typo path" });
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["judge"],
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      const decision = await selection.escalate(makeDetailsOn("bash"));
+
+      // The link decided (deny_with_reason); the LocalUserAuthorizer terminal
+      // was never reached (it would have approved by default).
+      expect(decision).toEqual({
+        approved: false,
+        state: "denied_with_reason",
+        denialReason: "typo path",
+        decidedBy: {
+          kind: "authorizer",
+          name: "judge",
+          verdict: "deny",
+          reason: "typo path",
+        },
+      });
+    });
+
+    it("injects the session review-log seam into each link (ADR 0007 §3)", async () => {
+      const logger = makeAuthorizerLog();
+      const link = vi
+        .fn<Authorizer["authorize"]>()
+        .mockResolvedValue({ kind: "defer" });
+      const registry = new AuthorizerRegistry();
+      registry.register("judge", link);
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["judge"],
+          logger,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      // The link is handed the session logger as its third argument, so it can
+      // record a decision trail to the shared review log.
+      expect(link).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        logger,
+      );
+    });
+
+    it("resolves links in config order (first non-defer wins)", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "a", { kind: "deny", reason: "a-wins" });
+      register(registry, "b", { kind: "deny", reason: "b-wins" });
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["a", "b"],
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      const decision = await selection.escalate(makeDetailsOn("bash"));
+
+      expect(decision).toEqual({
+        approved: false,
+        state: "denied_with_reason",
+        denialReason: "a-wins",
+        decidedBy: {
+          kind: "authorizer",
+          name: "a",
+          verdict: "deny",
+          reason: "a-wins",
+        },
+      });
+    });
+
+    it("skips an unregistered configured name with a warning", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "present", {
+        kind: "deny",
+        reason: "present-decided",
+      });
+      const chainAudit = makeChainAudit();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["missing", "present"],
+          chainAudit,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      const decision = await selection.escalate(makeDetailsOn("bash"));
+
+      // The unregistered "missing" link is skipped fail-safe; "present"
+      // decides, and is the name credited — the skipped one is not.
+      expect(decision).toEqual({
+        approved: false,
+        state: "denied_with_reason",
+        denialReason: "present-decided",
+        decidedBy: {
+          kind: "authorizer",
+          name: "present",
+          verdict: "deny",
+          reason: "present-decided",
+        },
+      });
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledOnce();
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledWith({
+        requestId: "req-1",
+        name: "missing",
+      });
+    });
+
+    it("hands the audit every skip, so its record stays per ask", async () => {
+      const chainAudit = makeChainAudit();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          getAuthorizerChain: () => ["missing"],
+          chainAudit,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetails({ requestId: "req-a" }));
+      await selection.escalate(makeDetails({ requestId: "req-b" }));
+
+      // The selection relays every skip; latching the *warning* is the audit's
+      // job, and the review stream stays complete because this does not latch.
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledTimes(2);
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenLastCalledWith({
+        requestId: "req-b",
+        name: "missing",
+      });
+    });
+
+    it("records the resolved link names on the ask", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "defer" });
+      const logger = makeAuthorizerLog();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["judge"],
+          logger,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      // Positive evidence the link was consulted: a link that defers decides
+      // nothing and would otherwise leave no trace of having run.
+      expect(logger.review).toHaveBeenCalledWith("authorizer_chain_resolved", {
+        requestId: "req-1",
+        links: ["judge"],
+      });
+    });
+
+    it("records only the names it could resolve", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "present", { kind: "defer" });
+      const logger = makeAuthorizerLog();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["missing", "present"],
+          logger,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      expect(logger.review).toHaveBeenCalledWith("authorizer_chain_resolved", {
+        requestId: "req-1",
+        links: ["present"],
+      });
+    });
+
+    it("records no consultation when no configured name resolved", async () => {
+      const logger = makeAuthorizerLog();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          getAuthorizerChain: () => ["missing"],
+          logger,
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      // Nothing ran, so there is no consultation to record; the per-name
+      // warning already reports the skip.
+      expect(logger.review).not.toHaveBeenCalledWith(
+        "authorizer_chain_resolved",
+        expect.anything(),
+      );
+    });
+
+    it("caps a link's allow on an excluded surface, falling through to the terminal", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "allow" });
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["judge"],
+        }),
+      );
+      // No UI, not a subagent → the terminal is DenyingAuthorizer.
+      selection.activate(makeCtx({ hasUI: false }));
+
+      const decision = await selection.escalate(
+        makeDetailsOn("external_directory"),
+      );
+
+      // The envelope downgraded the link's allow to defer, so the terminal
+      // (denying) owns the decision — the allow did not leak through.
+      expect(decision.approved).toBe(false);
+    });
+
+    it("lets a link's allow through on a non-excluded surface", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "allow" });
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter: makeInvokingPrompter(),
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => ["judge"],
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: false }));
+
+      const decision = await selection.escalate(makeDetailsOn("bash"));
+
+      // bash is not excluded, so the link's allow stands (a non-persistent
+      // approved grant) — the denying terminal is never reached.
+      expect(decision).toEqual({
+        approved: true,
+        state: "approved",
+        decidedBy: {
+          kind: "authorizer",
+          name: "judge",
+          verdict: "allow",
+          reason: null,
+        },
+      });
+    });
+
+    it("a registered but un-named link grants no authority (terminal identity)", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "allow" });
+      const prompter = makePrompterApi();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          prompter,
+          authorizerRegistry: registry,
+          getAuthorizerChain: () => [], // not named → opt-in withheld
+        }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetails());
+
+      // Empty chain ⇒ the selected value is the terminal instance itself.
+      expect(prompter.prompt).toHaveBeenCalledWith(
+        expect.any(LocalUserAuthorizer),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe("adjudicatesLocally", () => {
+    it("satisfies the AdjudicationRole seam", () => {
+      const role: AdjudicationRole = new AuthorizerSelection(makeDeps());
+      expect(role).toBeDefined();
+    });
+
+    it("reports true for a node with its own UI", () => {
+      const selection = new AuthorizerSelection(makeDeps());
+      selection.activate(makeCtx({ hasUI: true }));
+      expect(selection.adjudicatesLocally()).toBe(true);
+    });
+
+    it("reports false for a relaying subagent node", () => {
+      const selection = new AuthorizerSelection(
+        makeDeps({ detection: makeDetection(true) }),
+      );
+      selection.activate(makeCtx({ hasUI: false }));
+      expect(selection.adjudicatesLocally()).toBe(false);
+    });
+
+    it("reports true for a subagent node that has its own UI and no parent", () => {
+      // A node with a UI relays only while a declared parent is serving, so the
+      // role cannot be re-derived from subagent detection alone.
+      const selection = new AuthorizerSelection(
+        makeDeps({ detection: makeDetection(true) }),
+      );
+      selection.activate(makeCtx({ hasUI: true }));
+      expect(selection.adjudicatesLocally()).toBe(true);
+    });
+
+    it("reports true for a headless non-subagent node", () => {
+      const selection = new AuthorizerSelection(makeDeps());
+      selection.activate(makeCtx({ hasUI: false }));
+      expect(selection.adjudicatesLocally()).toBe(true);
+    });
+
+    it("reports true before activation and after deactivation", () => {
+      const selection = new AuthorizerSelection(
+        makeDeps({ detection: makeDetection(true) }),
+      );
+      expect(selection.adjudicatesLocally()).toBe(true);
+      selection.activate(makeCtx({ hasUI: false }));
+      selection.deactivate();
+      expect(selection.adjudicatesLocally()).toBe(true);
+    });
+  });
+
+  describe("chain delegation on a relaying node", () => {
+    /** A no-UI subagent node: its terminal relays the ask to the serving node. */
+    function makeRelayingSelection(
+      overrides: Parameters<typeof makeDeps>[0] = {},
+    ): AuthorizerSelection {
+      const selection = new AuthorizerSelection(
+        makeDeps({ detection: makeDetection(true), ...overrides }),
+      );
+      selection.activate(makeCtx({ hasUI: false }));
+      return selection;
+    }
+
+    it("composes no links, so the ask reaches the relaying terminal unchanged", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "deny", reason: "judged locally" });
+      const prompter = makePrompterApi();
+      const selection = makeRelayingSelection({
+        prompter,
+        authorizerRegistry: registry,
+        getAuthorizerChain: () => ["judge"],
+      });
+      const details = makeDetailsOn("bash");
+
+      await selection.escalate(details);
+
+      // Zero links ⇒ the composed chain *is* the terminal instance, so the
+      // registered link never ran: the serving node adjudicates this ask.
+      expect(prompter.prompt).toHaveBeenCalledWith(
+        expect.any(ParentAuthorizer),
+        details,
+      );
+    });
+
+    it("records the delegated chain instead of the resolved one", async () => {
+      const registry = new AuthorizerRegistry();
+      register(registry, "judge", { kind: "deny", reason: "judged locally" });
+      const logger = makeAuthorizerLog();
+      const selection = makeRelayingSelection({
+        authorizerRegistry: registry,
+        getAuthorizerChain: () => ["judge"],
+        logger,
+      });
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      expect(logger.review).toHaveBeenCalledWith("authorizer_chain_delegated", {
+        requestId: "req-1",
+        links: ["judge"],
+      });
+      expect(logger.review).not.toHaveBeenCalledWith(
+        "authorizer_chain_resolved",
+        expect.anything(),
+      );
+    });
+
+    it("does not report an unregistrable link as an unregistered one", async () => {
+      const chainAudit = makeChainAudit();
+      const selection = makeRelayingSelection({
+        getAuthorizerChain: () => ["model-judge"],
+        chainAudit,
+      });
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      // A child cannot host a link at all (#699), so its absence is the design,
+      // not the misconfiguration `authorizer_chain_unregistered_link` reports.
+      // The audit is never reached, so no warning can escape here either.
+      expect(chainAudit.auditUnregisteredLink).not.toHaveBeenCalled();
+    });
+
+    it("records nothing when no chain is configured", async () => {
+      const logger = makeAuthorizerLog();
+      const selection = makeRelayingSelection({ logger });
+
+      await selection.escalate(makeDetailsOn("bash"));
+
+      expect(logger.review).not.toHaveBeenCalledWith(
+        "authorizer_chain_delegated",
+        expect.anything(),
+      );
+    });
+  });
+
+  describe("relay transition records", () => {
+    /**
+     * A node with a UI whose environment names a parent that is serving — the
+     * shape that relays. `activate` runs on every turn event, so the record has
+     * to mark the transition rather than the activation.
+     */
+    function makeUiSelection(
+      logger: ReturnType<typeof makeAuthorizerLog>,
+      serving = true,
+    ) {
+      return new AuthorizerSelection(
+        makeDeps({
+          logger,
+          detection: makeDetection(true),
+          serving: {
+            isServing: () => serving,
+            describe: () => ({
+              channel: "none",
+              state: null,
+              servingIds: [],
+            }),
+          },
+        }),
+      );
+    }
+
+    it("records the target and its channel when relaying starts", () => {
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "lead-session");
+      const logger = makeAuthorizerLog();
+
+      makeUiSelection(logger).activate(makeCtx({ hasUI: true }));
+
+      expect(logger.review).toHaveBeenCalledWith(
+        "forwarded_permission.relay_started",
+        { targetSessionId: "lead-session", channel: "env" },
+      );
+    });
+
+    it("records nothing further while the same target keeps serving", () => {
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "lead-session");
+      const logger = makeAuthorizerLog();
+      const selection = makeUiSelection(logger);
+
+      selection.activate(makeCtx({ hasUI: true }));
+      selection.activate(makeCtx({ hasUI: true }));
+      selection.activate(makeCtx({ hasUI: true }));
+
+      expect(logger.review).toHaveBeenCalledTimes(1);
+    });
+
+    it("records the stop when the declared parent stops serving", () => {
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "lead-session");
+      const logger = makeAuthorizerLog();
+      let serving = true;
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          logger,
+          detection: makeDetection(true),
+          serving: {
+            isServing: () => serving,
+            describe: () => ({
+              channel: "none",
+              state: null,
+              servingIds: [],
+            }),
+          },
+        }),
+      );
+
+      selection.activate(makeCtx({ hasUI: true }));
+      serving = false;
+      selection.activate(makeCtx({ hasUI: true }));
+
+      expect(logger.review).toHaveBeenCalledWith(
+        "forwarded_permission.relay_stopped",
+        { targetSessionId: "lead-session" },
+      );
+    });
+
+    it("records a stop and a start when the target changes", () => {
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "lead-session");
+      const logger = makeAuthorizerLog();
+      const selection = makeUiSelection(logger);
+
+      selection.activate(makeCtx({ hasUI: true }));
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "other-lead");
+      selection.activate(makeCtx({ hasUI: true }));
+
+      expect(logger.review).toHaveBeenNthCalledWith(
+        2,
+        "forwarded_permission.relay_stopped",
+        { targetSessionId: "lead-session" },
+      );
+      expect(logger.review).toHaveBeenNthCalledWith(
+        3,
+        "forwarded_permission.relay_started",
+        { targetSessionId: "other-lead", channel: "env" },
+      );
+    });
+
+    it("records the stop when a relaying node is deactivated", () => {
+      vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", "lead-session");
+      const logger = makeAuthorizerLog();
+      const selection = makeUiSelection(logger);
+
+      selection.activate(makeCtx({ hasUI: true }));
+      selection.deactivate();
+
+      expect(logger.review).toHaveBeenNthCalledWith(
+        2,
+        "forwarded_permission.relay_stopped",
+        { targetSessionId: "lead-session" },
+      );
+    });
+
+    it("records nothing for a node that never relays", () => {
+      const logger = makeAuthorizerLog();
+      const selection = makeUiSelection(logger, false);
+
+      selection.activate(makeCtx({ hasUI: true }));
+      selection.deactivate();
+
+      expect(logger.review).not.toHaveBeenCalled();
+    });
+  });
+});
