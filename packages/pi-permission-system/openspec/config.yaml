@@ -1,0 +1,10 @@
+schema: spec-driven
+
+context: |
+  Local fork of @gotgenes/pi-permission-system (upstream: gotgenes/pi-packages,
+  packages/pi-permission-system), imported as a git subtree.
+  Tech stack: TypeScript, Node 22 strip-only syntax, vitest, biome.
+  Upstream conventions this fork keeps: Conventional Commits, tests-first for
+  bug fixes, one sentence per line in Markdown.
+  Local fixes stay in separate commits from subtree imports so they can be
+  split back upstream with `git subtree split`.
