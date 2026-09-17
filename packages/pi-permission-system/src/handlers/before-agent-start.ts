@@ -22,8 +22,9 @@ interface BeforeAgentStartPayload {
    * The parts Pi assembled the prompt from. `toolSnippets` is what lets this
    * handler render the session's own tool list instead of editing the one Pi
    * wrote — including in a child, whose inherited identity carries none.
-   * `customPrompt` says whether Pi wrote a preamble at all: under one, it
-   * writes no tool surface, so there is nothing of Pi's to remove.
+   * `customPrompt` says the operator authored the whole prompt: a SYSTEM.md,
+   * a --system-prompt, or an agent definition. Under one, tool-surface
+   * rendering is skipped — nothing of Pi's to remove, nothing of ours to add.
    */
   systemPromptOptions?: {
     customPrompt?: string;
@@ -105,14 +106,27 @@ export class AgentPrepHandler {
       });
     }
 
-    const toolSurfacePrompt = renderToolSurface(event.systemPrompt, {
-      allowedTools,
-      toolSnippets: event.systemPromptOptions?.toolSnippets ?? {},
-      guidelinesByTool: registered.guidelinesByTool,
-      // Pi's own `if (customPrompt)` test, so an empty string reads here the
-      // way it reads there: as no custom prompt at all.
-      piAuthoredPreamble: !event.systemPromptOptions?.customPrompt,
-    });
+    // The prompt is the operator's when Pi built it from a `customPrompt`:
+    // a SYSTEM.md, a --system-prompt, or a subagent child's agent definition,
+    // which states its own tools. Leave it alone — nothing removed, nothing
+    // appended. The surface is prose; the active-set write above and the
+    // permission gates are what actually decide what this session may call,
+    // and every way of rewriting operator text failed review (see the fork's
+    // fix-custom-prompt-tool-surface proposal). Upstream's landed #919 fix
+    // scopes removal and keeps appending; this fork skips the pass instead.
+    // Truthiness matches Pi's own `if (customPrompt)` branch: an empty
+    // string reads as no custom prompt.
+    const customPrompt = event.systemPromptOptions?.customPrompt;
+    const toolSurfacePrompt = customPrompt
+      ? event.systemPrompt
+      : renderToolSurface(event.systemPrompt, {
+          allowedTools,
+          toolSnippets: event.systemPromptOptions?.toolSnippets ?? {},
+          guidelinesByTool: registered.guidelinesByTool,
+          // Always true in this branch: the guard above means no custom
+          // prompt is in play, so Pi authored the preamble.
+          piAuthoredPreamble: !customPrompt,
+        });
     const skillPromptResult = resolveSkillPromptEntries(
       toolSurfacePrompt,
       this.resolver,

@@ -26,7 +26,11 @@ Upstream fixed [#919](https://github.com/gotgenes/pi-packages/issues/919) in 32.
 
 This fork keeps the imported code as-is but *skips* `renderToolSurface` when Pi built the prompt from a custom one (`src/handlers/before-agent-start.ts`).
 
-An operator-supplied prompt is left byte-identical, with no second block appended.
+An operator-supplied prompt is left alone: nothing removed, nothing appended.
+
+The tool-surface pass never touches it, so byte-identity holds for that concern unconditionally.
+
+Skill filtering can still rewrite the prompt's skills catalogue when policy withholds a skill, so the handler returns no override only when no skill is withheld.
 
 Every `pi-subagent-herdr` child is such a prompt: its `--system-prompt` is its own agent definition, which states its own tools, so upstream's reason for always appending does not apply here.
 

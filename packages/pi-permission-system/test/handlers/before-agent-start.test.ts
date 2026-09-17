@@ -279,9 +279,12 @@ describe("AgentPrepHandler.handle", () => {
     expect(result.systemPrompt?.startsWith(prompt)).toBe(true);
   });
 
-  it("states the session's tools when Pi built the prompt from a custom one", async () => {
-    // Every pi-subagents child is a customPrompt session too, so skipping the
-    // pass on that field would leave every child with no tool prose (#919).
+  it("adds no tool surface to a custom prompt that states none", async () => {
+    // This is where the fork diverges from upstream's #919 fix: upstream
+    // still appends this session's block, because their pi-subagents
+    // children carry no tool prose of their own. An operator-authored
+    // prompt is left alone here — a pi-subagent-herdr child states the
+    // tools its agent definition declares, and the gates enforce.
     const { handler } = makeSetup({
       toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
     });
@@ -294,9 +297,7 @@ describe("AgentPrepHandler.handle", () => {
       makeCtx(),
     );
 
-    expect(result.systemPrompt).toContain(
-      "Available tools:\n- read: Read file contents",
-    );
+    expect(result.systemPrompt).toBeUndefined();
   });
 
   it("keeps a custom system prompt's own tool and guideline sections", async () => {
@@ -323,7 +324,264 @@ describe("AgentPrepHandler.handle", () => {
       makeCtx(),
     );
 
-    expect(result.systemPrompt?.startsWith(custom)).toBe(true);
+    // No override at all, so the wire prompt is Pi's own assembly of the
+    // operator's text, byte-identical.
+    expect(result).toEqual({});
+  });
+
+  it("appends no second tool surface when a custom prompt states its own", async () => {
+    // The #919 reproduction: a generator writes exactly these two headings
+    // and the prompt reaches Pi through --system-prompt.
+    const custom = [
+      "# My Assistant",
+      "",
+      "## Available Tools",
+      "- read: only for reviewing code",
+      "",
+      "## Guidelines",
+      "- Always ask before writing files",
+      "",
+      "Answer with one word.",
+    ].join("\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(custom, {
+        customPrompt: custom,
+        toolSnippets: { read: "Read file contents" },
+      }),
+      makeCtx(),
+    );
+
+    // No override at all, so nothing can append a second surface to it.
+    expect(result).toEqual({});
+  });
+
+  it("returns no override for a custom prompt no skill is withheld from", async () => {
+    // Headings, bullets, prose, and a blank-line run all survive exactly:
+    // the guard returns no override at all, so the wire prompt is what Pi
+    // assembled, byte-identical, and skill sanitization has nothing to
+    // rewrite when nothing is withheld.
+    const custom = [
+      "# My Assistant",
+      "",
+      "You are my personal coding assistant.",
+      "",
+      "",
+      "",
+      "Answer with one word.",
+    ].join("\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(custom, { customPrompt: custom }),
+      makeCtx(),
+    );
+
+    expect(result).toEqual({});
+  });
+
+  it("leaves Pi-style literal headers in a custom prompt untouched", async () => {
+    // Header style never decides ownership: the exact lines Pi writes
+    // belong to the operator when the whole prompt is theirs.
+    const custom = [
+      "You are my personal coding assistant.",
+      "",
+      "Available tools:",
+      "- read: only for reviewing code",
+      "",
+      "Guidelines:",
+      "- Always ask before writing files",
+    ].join("\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(custom, {
+        customPrompt: custom,
+        toolSnippets: { read: "Read file contents" },
+      }),
+      makeCtx(),
+    );
+
+    // No override at all: the operator's exact lines stand, whatever their
+    // header style, because the prompt is theirs.
+    expect(result).toEqual({});
+  });
+
+  it("still relocates the surface when no custom prompt is in use", async () => {
+    const prompt = [
+      "You are an assistant.",
+      "",
+      "Available tools:",
+      "- read",
+      "",
+      "Guidelines:",
+      "- Be terse",
+    ].join("\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(prompt, { toolSnippets: { read: "Read file contents" } }),
+      makeCtx(),
+    );
+
+    expect(result.systemPrompt).toContain(
+      "Available tools:\n- read: Read file contents",
+    );
+    expect(result.systemPrompt).not.toContain("- Be terse");
+    expect(result.systemPrompt?.startsWith("You are an assistant.")).toBe(
+      true,
+    );
+  });
+
+  it("treats an empty customPrompt as no custom prompt", async () => {
+    // Pi's own `if (customPrompt)` test reads an empty string as absent, and
+    // the guard matches it, so relocation still runs.
+    const prompt = [
+      "You are an assistant.",
+      "",
+      "Available tools:",
+      "- read",
+    ].join("\n");
+    const { handler } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read"]) },
+    });
+
+    const result = await handler.handle(
+      makeEvent(prompt, {
+        customPrompt: "",
+        toolSnippets: { read: "Read file contents" },
+      }),
+      makeCtx(),
+    );
+
+    expect(result.systemPrompt).toContain(
+      "Available tools:\n- read: Read file contents",
+    );
+  });
+
+  it("registers the same active tools under a custom prompt as without one", async () => {
+    const options = {
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read", "bash"]) },
+    };
+    const denyBash = (tool: string) => tool === "bash";
+    const plain = makeSetup(options);
+    const authored = makeSetup(options);
+    vi.mocked(plain.permissionManager.isToolFullyDenied).mockImplementation(
+      denyBash,
+    );
+    vi.mocked(
+      authored.permissionManager.isToolFullyDenied,
+    ).mockImplementation(denyBash);
+
+    await plain.handler.handle(makeEvent(), makeCtx());
+    await authored.handler.handle(
+      makeEvent("You are my personal coding assistant.", {
+        customPrompt: "You are my personal coding assistant.",
+      }),
+      makeCtx(),
+    );
+
+    expect(plain.toolRegistry.setActive).toHaveBeenCalledWith(["read"]);
+    expect(vi.mocked(authored.toolRegistry.setActive).mock.calls).toEqual(
+      vi.mocked(plain.toolRegistry.setActive).mock.calls,
+    );
+  });
+
+  it("still filters a denied skill from a custom prompt", async () => {
+    const custom = [
+      "You are my personal coding assistant.",
+      "",
+      "<available_skills>",
+      "  <skill>",
+      "    <name>secret</name>",
+      "    <description>A denied skill</description>",
+      "    <location>/skills/secret/SKILL.md</location>",
+      "  </skill>",
+      "</available_skills>",
+    ].join("\n");
+    const { handler, permissionManager, session } = makeSetup();
+    vi.mocked(permissionManager.check).mockImplementation((intent) =>
+      intent.surface === "skill"
+        ? makeCheckResult({ state: "deny" })
+        : makeCheckResult(),
+    );
+    const spy = vi.spyOn(session, "setActiveSkillEntries");
+
+    const result = await handler.handle(
+      makeEvent(custom, { customPrompt: custom }),
+      makeCtx(),
+    );
+
+    expect(result.systemPrompt).not.toContain("secret");
+    const entries = spy.mock.calls[0]?.[0] ?? [];
+    expect(entries.some((entry) => entry.name === "secret")).toBe(false);
+  });
+
+  it("filters a denied skill from a custom prompt on every turn, not just the first", async () => {
+    const custom = [
+      "You are my personal coding assistant.",
+      "",
+      "<available_skills>",
+      "  <skill>",
+      "    <name>secret</name>",
+      "    <description>A denied skill</description>",
+      "    <location>/skills/secret/SKILL.md</location>",
+      "  </skill>",
+      "</available_skills>",
+    ].join("\n");
+    const { handler, permissionManager } = makeSetup();
+    vi.mocked(permissionManager.check).mockImplementation((intent) =>
+      intent.surface === "skill"
+        ? makeCheckResult({ state: "deny" })
+        : makeCheckResult(),
+    );
+
+    const first = await handler.handle(
+      makeEvent(custom, { customPrompt: custom }),
+      makeCtx(),
+    );
+    const second = await handler.handle(
+      makeEvent(custom, { customPrompt: custom }),
+      makeCtx(),
+    );
+
+    expect((first as { systemPrompt: string }).systemPrompt).not.toContain(
+      "secret",
+    );
+    expect((second as { systemPrompt: string }).systemPrompt).not.toContain(
+      "secret",
+    );
+  });
+
+  it("still records a changed surface under a custom prompt", async () => {
+    const { handler, permissionManager, logger } = makeSetup({
+      toolRegistry: { getActive: vi.fn().mockReturnValue(["read", "bash"]) },
+    });
+    vi.mocked(permissionManager.isToolFullyDenied).mockImplementation(
+      (tool: string) => tool === "bash",
+    );
+
+    await handler.handle(
+      makeEvent("You are my personal coding assistant.", {
+        customPrompt: "You are my personal coding assistant.",
+      }),
+      makeCtx(),
+    );
+
+    expect(logger.debug).toHaveBeenCalledWith("tool_surface.changed", {
+      exposed: ["read"],
+      withheld: ["bash"],
+      restored: [],
+    });
   });
 
   it("states the allowed tools instead of editing the listing Pi wrote", async () => {
