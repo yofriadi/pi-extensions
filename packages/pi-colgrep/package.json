@@ -1,0 +1,70 @@
+{
+	"name": "@yofriadi/pi-colgrep",
+	"version": "1.5.3",
+	"description": "Pi extension that integrates ColGrep semantic code search as an agent tool. (local fork: skill hidden from model invocation by default)",
+	"type": "module",
+	"imports": {
+		"#src/*": "./src/*",
+		"#test/*": "./test/*"
+	},
+	"license": "MIT",
+	"author": {
+		"name": "Chris Lasher"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"pi-coding-agent",
+		"colgrep",
+		"semantic-search",
+		"code-search"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-colgrep"
+	},
+	"forkOf": {
+		"name": "@gotgenes/pi-colgrep",
+		"version": "1.5.3",
+		"repository": "git+https://github.com/gotgenes/pi-packages.git",
+		"directory": "packages/pi-colgrep"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"files": [
+		"src",
+		"skills",
+		"THIRD_PARTY_LICENSES",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./src/extension.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.75.0",
+		"@earendil-works/pi-tui": ">=0.75.0"
+	},
+	"dependencies": {
+		"typebox": "^1.2.8"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3"
+	},
+	"scripts": {
+		"check": "tsc --noEmit",
+		"typecheck": "tsc --noEmit",
+		"lint:md": "rumdl check *.md skills/**/*.md"
+	}
+}
