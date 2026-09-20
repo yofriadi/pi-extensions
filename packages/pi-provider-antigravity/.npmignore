@@ -1,8 +1,0 @@
-# Dev/test tooling — not shipped
-test/
-tsconfig.json
-vitest.config.ts
-.fallow.toml
-scripts/verify-pack.mjs
-openspec/
-HANDOFF.md

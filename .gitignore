@@ -30,3 +30,6 @@ pi-session-*.html
 
 # Subagent session transcripts (adversarial review babysit logs)
 .babysit/
+
+# Archived packages (kept on disk, not tracked)
+packages/archived/
