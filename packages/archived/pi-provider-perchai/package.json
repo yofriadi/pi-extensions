@@ -1,0 +1,64 @@
+{
+	"name": "@yofriadi/pi-provider-perchai",
+	"version": "0.1.0",
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"description": "Pi extension that adds the Perch AI (free Starter pool) OAuth provider.",
+	"license": "MIT",
+	"author": {
+		"name": "Yofriadi Yahya",
+		"email": "yofriadi.yahya@proton.me"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-provider-perchai"
+	},
+	"bugs": {
+		"url": "https://github.com/yofriadi/pi-extensions/issues"
+	},
+	"homepage": "https://github.com/yofriadi/pi-extensions#readme",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"perch",
+		"perchai",
+		"perch-ai",
+		"oauth"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"discover-models": "jiti scripts/discover-models.ts",
+		"test": "vitest run",
+		"test:live": "jiti scripts/validate-live.ts",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit",
+		"verify-pack": "node scripts/verify-pack.mjs",
+		"prepublishOnly": "npm run typecheck && npm test && npm run verify-pack"
+	},
+	"dependencies": {
+		"jiti": "2.7.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "0.84.3",
+		"@earendil-works/pi-coding-agent": "0.84.3",
+		"vitest": "4.1.11"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	}
+}
