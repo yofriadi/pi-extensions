@@ -34,3 +34,6 @@ pi-session-*.html
 # Archived packages (kept on disk, not tracked) — except pi-provider-perchai
 packages/archived/*
 !packages/archived/pi-provider-perchai
+
+# Stray Pi session transcripts leaked into the repo root
+/*.jsonl
