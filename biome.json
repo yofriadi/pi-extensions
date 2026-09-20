@@ -10,7 +10,10 @@
 			"!packages/pi-condense",
 			"!packages/pi-cc-ui",
 			"!packages/pi-hashline-edit",
-			"!packages/pi-auto-continue"
+			"!packages/pi-auto-continue",
+			"!packages/pi-colgrep",
+			"!packages/pi-permission-system",
+			"!packages/archived"
 		],
 		"ignoreUnknown": false
 	},
@@ -45,18 +48,6 @@
 		}
 	},
 	"overrides": [
-		{
-			"includes": [
-				"packages/pi-provider-antigravity/src/cloud-code-assist.ts",
-				"packages/pi-provider-antigravity/src/vendor/**"
-			],
-			"linter": {
-				"rules": {
-					"style": { "noNonNullAssertion": "off" },
-					"suspicious": { "noExplicitAny": "off" }
-				}
-			}
-		},
 		{
 			"includes": ["packages/pi-mlflow/test/**/*.ts"],
 			"linter": {

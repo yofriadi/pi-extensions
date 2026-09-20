@@ -8,7 +8,7 @@
 		"update:pi-accounts": "bash scripts/update-pi-accounts-subtree.sh",
 		"update:pi-condense": "bash scripts/update-pi-condense-subtree.sh",
 		"update:session-recap": "bash scripts/update-session-recap-subtree.sh",
-		"check": "biome check . && pnpm --filter @yofriadi/pi-condense run typecheck && pnpm --filter @yofriadi/pi-tilth run check && tsc --noEmit -p packages/pi-accounts/tsconfig.json && tsc --noEmit -p packages/pi-provider-antigravity/tsconfig.json && tsc --noEmit -p packages/pi-event-sounds/tsconfig.json",
+		"check": "biome check . && pnpm --filter @yofriadi/pi-condense run typecheck && pnpm --filter @yofriadi/pi-tilth run check && pnpm --filter @yofriadi/pi-colgrep run typecheck && tsc --noEmit -p packages/pi-event-sounds/tsconfig.json && tsc --noEmit -p packages/pi-permission-system/tsconfig.json",
 		"check:fix": "biome check --write .",
 		"prepare": "prek install",
 		"fallow": "fallow",
@@ -16,7 +16,8 @@
 		"fallow:health": "fallow health --score --hotspots --targets",
 		"fallow:dead-code": "fallow dead-code",
 		"fallow:dupes": "fallow dupes",
-		"update:pi-auto-continue": "bash scripts/update-pi-auto-continue-subtree.sh"
+		"update:pi-auto-continue": "bash scripts/update-pi-auto-continue-subtree.sh",
+		"update:pi-permission-system": "bash scripts/update-pi-permission-system-subtree.sh"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
