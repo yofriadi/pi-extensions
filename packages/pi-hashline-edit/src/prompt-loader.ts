@@ -43,19 +43,24 @@ export function rewriteAnchorExamples(text: string, len: number): string {
 }
 
 /**
- * Remove the `replace_text` op bullet and its inline `oldText`/`newText`
- * description from a prompt string. Matches the exact authored line in
- * prompts/edit.md; other prompt files that have no such line are returned
- * unchanged.
+ * Remove the `replace_text` op bullet and its indented continuation lines
+ * from a prompt string. Matches the authored block in prompts/edit.md:
+ * the bullet line plus every following line indented by two spaces, with
+ * blank lines consumed only while another indented continuation follows,
+ * so the blank line that ends the block is preserved. Prompt files with
+ * no such block are returned unchanged.
  *
- * The authored line is:
+ * The authored block is:
  *   - `replace_text` — `{ "op": "replace_text", "oldText": ..., "newText": ... }` …
+ *     Prefer anchors; use this only when uniqueness is certain.
  *
- * The regex matches the leading `- ` bullet, the op name, and everything to the
- * end of the line, including a trailing newline if present.
+ *     `oldText`/`newText` are invalid on any other op.
  */
 export function stripReplaceTextFromPrompt(text: string): string {
-	return text.replace(/^- `replace_text`[^\n]*\n?/m, "");
+	return text.replace(
+		/^- `replace_text`[^\n]*(?:\n {2}[^\n]*|\n(?=\n {2}))*/m,
+		"",
+	);
 }
 
 /**
