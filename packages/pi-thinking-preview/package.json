@@ -1,0 +1,58 @@
+{
+	"name": "@yofriadi/pi-thinking-preview",
+	"version": "0.1.0",
+	"description": "Collapse streaming thinking blocks into a compact live preview; marker glyph configurable and italic-safe (✶ instead of ✻); alt+t or /thinking-preview toggles full text",
+	"keywords": [
+		"pi-package"
+	],
+	"license": "MIT",
+	"author": "ycm (fork of 0x2E/pi-spice thinking-preview)",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/yofriadi/pi-extensions.git",
+		"directory": "packages/pi-thinking-preview"
+	},
+	"files": [
+		"src/",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE",
+		"package.json"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"check": "biome check . && pnpm run typecheck",
+		"check:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": ">=0.81.0",
+		"@earendil-works/pi-coding-agent": ">=0.81.0",
+		"@earendil-works/pi-tui": ">=0.81.0"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "^0.84.1",
+		"@earendil-works/pi-coding-agent": "^0.84.1",
+		"@earendil-works/pi-tui": "^0.84.1",
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
