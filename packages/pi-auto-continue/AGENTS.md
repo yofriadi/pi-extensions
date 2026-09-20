@@ -26,13 +26,13 @@ When AI coding agents execute complex or long-running tasks, they frequently enc
 
 | Component | Specification |
 | :--- | :--- |
-| **Runtime** | Node.js (>= 22.0.0) |
+| **Runtime** | Node.js (>= 22.19.0) |
 | **Language** | TypeScript 5.7+ |
 | **Module System** | Pure ES Modules (`"type": "module"`) |
 | **TypeScript Target** | `ES2022`, `module: NodeNext`, `moduleResolution: NodeNext` |
 | **Import Syntax** | Relative imports require `.ts` extension (`import ... from "./types.ts"`) |
 | **Test Runner** | Node.js built-in `node:test` + `node:assert/strict` |
-| **Platform Target** | `@earendil-works/pi-coding-agent` (>= 0.80.0) |
+| **Platform Target** | `@earendil-works/pi-coding-agent` (>= 0.85.1) |
 
 ---
 
@@ -41,14 +41,15 @@ When AI coding agents execute complex or long-running tasks, they frequently enc
 Always run verification commands before completing tasks:
 
 ```bash
-# Run all unit tests
+# Run package unit tests and real-loader runtime regressions
 npm test
 
 # Run type-checking (no compilation output)
 npm run typecheck
 
-# Run full TypeScript compilation
-npm run build
+# From the monorepo root: run every package's tests and checks
+pnpm test
+pnpm run check
 
 # Run a specific test file
 node --test --experimental-strip-types tests/classifier.test.ts
@@ -56,9 +57,10 @@ node --test --experimental-strip-types tests/retry-manager.test.ts
 node --test --experimental-strip-types tests/config.test.ts
 node --test --experimental-strip-types tests/formatter.test.ts
 node --test --experimental-strip-types tests/extension.test.ts
+node --test --experimental-strip-types tests/runtime.test.ts
 ```
 
-> **Note**: Do not install external test frameworks (Jest, Vitest, Mocha) or assertion libraries. Use the native `node:test` runner.
+> **Note**: Pi loads source directly; there is no build script or `dist/`. Do not install external test frameworks (Jest, Vitest, Mocha) or assertion libraries. Use the native `node:test` runner.
 
 ---
 
@@ -67,7 +69,6 @@ node --test --experimental-strip-types tests/extension.test.ts
 ```
 pi-auto-continue/
 ├── index.ts                 # Extension package entrypoint; re-exports modules and default extension fn
-├── draft.ts                 # Scratch/reference implementation file
 ├── package.json             # Package configuration, scripts, and dependencies
 ├── tsconfig.json            # NodeNext + allowImportingTsExtensions configuration
 ├── src/
@@ -81,45 +82,61 @@ pi-auto-continue/
 └── tests/
     ├── classifier.test.ts   # Tests for header parsing, text regexes, and error classifications
     ├── config.test.ts       # Tests for duration string parsing and configuration loading/fallbacks
-    ├── extension.test.ts    # Integration tests for Pi lifecycle events, prompt injection, commands
+    ├── extension.test.ts    # Mock API unit tests for lifecycle, cancellation, and commands
     ├── formatter.test.ts    # Tests for duration and delay string formatters
-    └── retry-manager.test.ts# Tests for backoff math, jitter, retry limits, and reset state
+    ├── retry-manager.test.ts# Tests for backoff math, jitter, retry limits, and reset state
+    └── runtime.test.ts      # Real Pi loader + AgentSession tests with a local fake provider
 ```
 
 ---
 
 ## 5. Architectural Lifecycle & Data Flow
 
-```
+```text
 [Pi Coding Agent Session]
-         │
-         ├─── session_start ────────► loadConfig(), retryManager.reset(), resetTurnState()
-         │
-         ├─── after_provider_response ─► cache lastHttpResponse (status & headers for 30s)
-         │
-         ├─── before_agent_start ───► inject Auto-Continue guidance into systemPrompt
-         │
-         ├─── message_end ──────────► classifyInterruption(message, lastHttpResponse)
-         │                               │
-         │                               ├─► RATE_LIMIT:
-         │                               │     retryManager.evaluateRetry() -> sleep(delayMs) -> sendUserMessage(retryPrompt)
-         │                               │
-         │                               ├─► TOKEN_LIMIT (stopReason: "length"):
-         │                               │     retryManager.evaluateContinuation() -> sleep(delayMs) -> sendUserMessage(continuePrompt)
-         │                               │
-         │                               ├─► INCOMPLETE_TOOL_CALL:
-         │                               │     retryManager.evaluateContinuation() -> sleep(delayMs) -> sendUserMessage(toolPrompt)
-         │                               │
-         │                               ├─► CONTEXT_OVERFLOW:
-         │                               │     notify user -> defer to Pi auto-compaction
-         │                               │
-         │                               ├─► BILLING_HARD_LIMIT:
-         │                               │     notify user -> stop immediately (fail fast)
-         │                               │
-         │                               └─► NONE: no-op
-         │
-         └─── agent_settled ────────► if recovered: notify success and retryManager.reset()
+  session_start             -> loadConfig(), resetRecovery(), attach TUI input listener
+  before_agent_start        -> preserve own continuation budget or reset for fresh input; add guidance
+  turn_start                -> observe the assistant turn and attach ctx.signal abort listener
+  before_provider_request   -> clear previous request's HTTP metadata
+  after_provider_response   -> associate status/headers with this assistant request, not summaries
+  message_end               -> record latest assistant + HTTP response only; never wait or send
+  session_before_compact    -> leave recovery to Pi, clear stale request metadata
+  session_compact[_failed]  -> resume observation or stop recovery on failure/cancellation
+  agent_settled             -> classify latest unprocessed assistant after native recovery finishes
+    RATE_LIMIT              -> evaluateRetry() and schedule one timer
+    TOKEN_LIMIT / TOOL      -> evaluateContinuation() and schedule one timer
+    CONTEXT_OVERFLOW        -> report; Pi owns compaction, no continuation
+    BILLING_HARD_LIMIT      -> report; no continuation
+    healthy stop            -> report recovery and reset budget
+  timer due                 -> recheck generation, session/model, idle/queues, and deadline
+                            -> send one tagged follow-up; start 30s submission watchdog
+  own input                 -> validate transport token, strip it, preserve retry budget
+  own user message_start    -> clear watchdog; continuation is acknowledged
+  external input / cancel   -> invalidate timer and submission; fresh input gets a new budget
 ```
+
+Pending waits use chunked timers, not sleeps inside lifecycle hooks. Automatic
+follow-ups are never enqueued while Pi is busy. Manual schedules wait for idle
+via settlement events and polling. Duplicate settlement of the same assistant
+does not consume another attempt.
+
+Cancellation: active-turn abort signals, aborted assistant messages, new input,
+session/model changes, compaction failure, successful done-tools, and
+`/auto-continue off|reset` stop extension recovery. In TUI mode, Escape/Ctrl+C
+listeners also stop recovery without consuming the key; detach them on restart
+and shutdown.
+
+**Pi 0.85.1 limitation:** SDK/RPC aborts during native retry waits or extension
+timer waits are not observable by extensions. `ctx.signal` exists only while
+streaming; native `auto_retry_end` is an SDK event, not an extension event.
+Do not claim bare SDK/RPC abort is safe. Callers must complete
+`/auto-continue off` (or `reset`) before aborting Pi. Runtime tests characterize
+this limitation and separately verify TUI cancellation and the command workaround.
+
+`sendUserMessage` is fire-and-forget. If an input hook intercepts a submission
+or preflight fails asynchronously, a 30s watchdog pauses recovery without
+resending. A submission already past the input hook can still start late;
+avoid promises of retracting every submitted prompt.
 
 ---
 
@@ -127,17 +144,17 @@ pi-auto-continue/
 
 ### 1. Interruption Classifier (`src/classifier.ts`)
 
-Precedence: when `rateLimit.fatalFirst` is enabled (fork addition, default false)
-the classifier first rejects terminal signals that would otherwise be masked by a
-retryable HTTP status code — 401/403 by status, then quota-exhaustion/billing text
-that carries **no** reset signal, then context overflow. Otherwise it proceeds
-exactly as upstream. Remaining order: HTTP status 429/503/529 → context overflow →
-billing hard limit → rate limit → incomplete tool call → token limit.
+Completed, tool-use, deferred, and aborted messages return `NONE` regardless
+of stale HTTP metadata. Actual `length` truncation selects text/tool continuation.
+For errors, precedence is cancellation -> context overflow -> hard billing/auth
+or HTTP 401/402/403 -> permanent status/request/refusal -> opt-in ambiguous
+quota exhaustion (`fatalFirst`, only without reset signal) -> retryable status
+or rate-limit text -> transient transport text (only `stopReason: "error"`).
 
 Classifies assistant messages into one of:
-- `RATE_LIMIT`: HTTP 429, 503, 529, Anthropic `overloaded_error`/`rate_limit_error`, Google Gemini `RESOURCE_EXHAUSTED`, OpenAI/Copilot quota limits.
-- `TOKEN_LIMIT`: Truncated outputs where `stopReason === "length"`.
-- `INCOMPLETE_TOOL_CALL`: Messages ending with a `toolCall` that has empty or missing arguments while `stopReason !== "stop"`.
+- `RATE_LIMIT`: HTTP 429, transient 408/5xx statuses, provider throttling/quota errors, and transient transport/gateway failures.
+- `TOKEN_LIMIT`: Truncated outputs where `stopReason === "length"` and the final block is not a tool call.
+- `INCOMPLETE_TOOL_CALL`: `length`-truncated responses ending in a `toolCall`, regardless of partially parsed arguments. A normal zero-argument call is not incomplete.
 - `CONTEXT_OVERFLOW`: Error messages matching context window exhaustion (e.g. `maximum context`, `context window`).
 - `BILLING_HARD_LIMIT`: Non-retryable errors (e.g., `payment required`, `insufficient funds`, `account suspended`, `invalid api key`).
 - `NONE`: Regular message completion.
@@ -146,23 +163,27 @@ Classifies assistant messages into one of:
 Extracts delays from:
 - `Retry-After` header (integer/decimal seconds or HTTP date string).
 - `retry-after-ms` header (explicit milliseconds).
-- `x-ratelimit-reset` / `x-ratelimit-reset-requests` (delta seconds or Unix epoch timestamp).
-- Inline error text patterns (e.g., `try again in 25s`, `retry after 1.5m`, `resets at 2026-09-01T14:30:00Z`).
-- **Rolling quota windows** (fork addition): `within|per|every|limit of|max(imum) of <N> <unit>`, e.g. `Maximum 8 requests within 1 minutes`. The window start is unknown, so the full width is assumed and scaled by `rateLimit.windowRetryMargin` (default 1.15); the result sets `isWindowEstimate`.
+- `x-ratelimit-reset`, `x-ratelimit-reset-requests`, and `x-ratelimit-reset-tokens` (delta seconds, epoch seconds/milliseconds, or compound durations such as `6m0s`).
+- Inline error hints, including compound durations (`try again in 2h 36m`), ISO timestamps, and local clock times.
+- **Rolling quota windows**: request/token quotas such as `Maximum 8 requests within 1 minutes`, only without an explicit reset hint. Scale the full window width by `rateLimit.windowRetryMargin` (default 1.15); set `isWindowEstimate`. Do not infer windows from unrelated latency or pricing text.
+- Reject malformed/overflowing durations instead of reading numeric prefixes. Choose the latest request/token/inline reset; `retry-after-ms` takes precedence over `Retry-After` when both exist.
+- Associate hints with the provider request time and subtract elapsed time at settlement. Never expire request metadata using an arbitrary 30-second TTL.
 
 ### 3. Retry Manager (`src/retry-manager.ts`)
 - **Consolidated `RetryState`**: Manages a single unified retry state tracking `attempt`, rate limit attempts, elapsed duration, backoff delay, and last interruption type across both rate limit retries and token continuations.
 - **Quota Reset & Backoff Formula**:
   - **Base Delay Selection**: Rate limits default to 1 minute (60,000 ms) via `rateLimit.baseDelayMs` and do not fall back to global `baseDelayMs`. Token/tool continuations use global `baseDelayMs` (default: 5 seconds).
-  - **First Rate Limit Attempt**: Delay respects expected quota reset times when present: $\text{delayMs} = \text{baseDelayMs} + \text{expectedResetTimeMs}$. Exception (fork addition): when `isWindowEstimate` is set, the estimate *is* the delay (it already spans the window plus margin), so $\text{delayMs} = \min(\text{resetDelayMs}, \text{maxDelayMs})$ with no base delay added.
-  - **Subsequent Attempts & Continuations**: Follows exponential backoff: $\text{rawDelay} = \text{baseDelayMs} \times (\text{backoffMultiplier})^{\text{attempt} - 1}$.
+  - **First Rate Limit Attempt**: Delay is `baseDelayMs + remainingResetDelayMs`. A rolling-window estimate already includes the window plus margin, so its delay is `min(remainingResetDelayMs, maxDelayMs)` without adding the base delay.
+  - **Subsequent Attempts & Continuations**: Exponential backoff uses the rate-limit attempt count for provider errors and the shared attempt count for text/tool continuations.
 - **Jitter**: Applies $\pm 15\%$ random variation ($0.85$ to $1.15$) on rate limits during exponential backoff to prevent synchronized retry stampedes.
 - **Clamping**: $\text{delayMs} = \min(\text{maxDelayMs}, \max(\text{baseDelayMs}, \text{calculatedDelay}))$. Rate limits default to 10 minutes (600,000 ms) via `rateLimit.maxDelayMs`. First attempts with explicit quota reset time are not clamped to `maxDelayMs` to respect the full quota reset window.
 - **Limit Enforcement**: Stops retries when attempt count exceeds numeric `maxRetries` or elapsed time exceeds duration-based `maxRetries`. Rate limits default to a 5-hour duration deadline (`"5h"`) via `rateLimit.maxRetries`, independent of global `maxRetries`. Rate limit errors can specify their own `baseDelayMs`, `maxDelayMs`, `maxRetries`, `jitter`, and `retryPrompt`.
+- **Extension budget only**: Native retries do not consume extension attempts. The extension deadline begins at its first recovery evaluation, persists across its own follow-ups, and is rechecked at dispatch. Fresh user/third-party input starts a new budget.
 
 ### 4. Configuration & Retry Parser (`src/config.ts`)
 - Parses human-readable durations (`"15m"`, `"30s"`, `"500ms"`, `"5h"`) and `maxRetries` values (`3`, `"5"`, `"15m"`).
-- Reads `~/.pi/agent/settings.json` from the `autoContinue` block with global retry settings (`baseDelayMs`, `maxDelayMs`, `maxRetries`, `backoffMultiplier`).
+- Reads the `autoContinue` block from an explicit settings path, otherwise `$PI_CODING_AGENT_DIR/settings.json`, otherwise `~/.pi/agent/settings.json`. Validates finite delays/limits, normalizes nested settings, and replaces blank recovery prompts with defaults.
+- **Subagent guards**: `PI_SUBAGENT_SESSION`/`PI_SUBAGENT_ID` disables automatic recovery unless `subagent: true`. A successful `subagent_done` blocks automatic and manual recovery and cancels waits; failed done-tools do not. Fresh interactive/RPC input re-arms even while disabled; third-party extension input does not re-arm a completed subagent.
 - Safe fallbacks ensure zero crash behavior on malformed JSON or missing configuration files.
 
 ---
@@ -186,15 +207,15 @@ Extracts delays from:
 
 5. **Testing Strategy**:
    - Test files live in `tests/` and end in `.test.ts`.
-   - Use `MockExtensionAPI` and `MockContext` to test event flow without spinning up the full Pi daemon.
-   - Keep unit tests deterministic: avoid relying on real wall-clock sleeps in unit tests when testing state transitions.
+   - Mock the Pi API only in lifecycle unit tests. Loader/runtime regressions must use `discoverAndLoadExtensions` and a real `AgentSession` with a local fake provider; never mock the extension loader.
+   - Keep tests deterministic: use `node:test` timers for waits and drain I/O with `setImmediate`, not wall-clock sleeps. Snapshot/restore subagent env vars so tests work inside supervised sessions.
 
 ---
 
 ## 8. Agent Checklist Before Submitting Code Changes
 
 - [ ] All TypeScript types compile without errors (`npm run typecheck`).
-- [ ] All 75+ unit and integration tests pass (`npm test`).
+- [ ] All package unit and runtime integration tests pass (`npm test`), including under subagent env vars.
 - [ ] Any new regex patterns are covered by test cases in `tests/classifier.test.ts`.
 - [ ] New configuration options have defaults declared in `src/constants.ts` and types in `src/types.ts`.
 - [ ] README.md is updated if command signatures or configuration options change.

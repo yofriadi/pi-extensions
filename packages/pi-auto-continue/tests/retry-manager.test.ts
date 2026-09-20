@@ -138,6 +138,27 @@ describe("RetryManager", () => {
     assert.equal(resExplicit.delayMs, 10000);
   });
 
+  it("clamps the final jittered backoff to the configured maximum", (t) => {
+    t.mock.method(Math, "random", () => 0.9);
+    const manager = new RetryManager();
+    const config = {
+      ...DEFAULT_CONFIG,
+      rateLimit: { ...DEFAULT_CONFIG.rateLimit, baseDelayMs: 5000, maxDelayMs: 10000, maxRetries: 10, jitter: true },
+    };
+    assert.equal(manager.evaluateRetry(config, "Rate limited", null, 1000000).delayMs, 5600);
+    assert.equal(manager.evaluateRetry(config, "Rate limited", null, 1005600).delayMs, 10000);
+    assert.equal(manager.evaluateRetry(config, "Rate limited", null, 1015600).delayMs, 10000);
+  });
+
+  it("honours a maximum below the base delay during backoff", () => {
+    const manager = new RetryManager();
+    const config = {
+      ...DEFAULT_CONFIG,
+      rateLimit: { ...DEFAULT_CONFIG.rateLimit, baseDelayMs: 5000, maxDelayMs: 1000, jitter: false },
+    };
+    assert.equal(manager.evaluateRetry(config, "Rate limited", null, 1000000).delayMs, 1000);
+  });
+
   it("enforces attempt-based retry limit (numeric maxRetries)", () => {
     const manager = new RetryManager();
     const config = {

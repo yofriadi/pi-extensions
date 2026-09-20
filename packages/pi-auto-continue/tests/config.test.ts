@@ -307,3 +307,80 @@ describe("config", () => {
     });
   });
 });
+
+describe("configuration safety regressions", () => {
+  it("rejects non-finite and overflowing durations and retry limits", () => {
+    for (const value of [NaN, Infinity, -Infinity, Number.MAX_VALUE, "9".repeat(400), `${"9".repeat(400)}h`]) {
+      assert.equal(parseDuration(value, 123), 123);
+      assert.deepEqual(parseMaxRetries(value), { type: "attempts", count: 3 });
+    }
+    for (const value of [
+      { type: "attempts", count: NaN },
+      { type: "attempts", count: -1 },
+      { type: "attempts", count: 1.5 },
+      { type: "duration", durationMs: Infinity },
+      { type: "duration", durationMs: -1 },
+    ]) {
+      assert.deepEqual(parseMaxRetries(value), { type: "attempts", count: 3 });
+    }
+  });
+
+  it("rejects invalid 12-hour clock hours", () => {
+    for (const value of ["00:30am", "13:30pm", "23:45 AM"]) assert.equal(parseTargetTime(value), null);
+  });
+
+  it("normalizes malformed settings and returns independent nested defaults", (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-auto-continue-config-"));
+    t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+    const file = path.join(dir, "settings.json");
+    for (const raw of [
+      "{broken", "null", "[]", "true",
+      '{"autoContinue":null}',
+      '{"autoContinue":{"rateLimit":null,"tokenLimit":[],"incompleteToolCall":7}}',
+    ]) {
+      fs.writeFileSync(file, raw);
+      const first = loadConfig(file);
+      assert.deepEqual(first, DEFAULT_CONFIG);
+      first.rateLimit.enabled = false;
+      first.tokenLimit.continuePrompt = "changed";
+      first.incompleteToolCall.enabled = false;
+      assert.deepEqual(loadConfig(file), DEFAULT_CONFIG);
+      assert.equal(DEFAULT_CONFIG.rateLimit.enabled, true);
+    }
+    fs.rmSync(file);
+    const missing = loadConfig(file);
+    missing.rateLimit.enabled = false;
+    assert.equal(loadConfig(file).rateLimit.enabled, true);
+  });
+
+  it("uses defaults for blank recovery prompts instead of silently submitting nothing", (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-auto-continue-config-"));
+    t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+    const file = path.join(dir, "settings.json");
+    fs.writeFileSync(file, JSON.stringify({ autoContinue: {
+      rateLimit: { retryPrompt: "  \n " },
+      tokenLimit: { continuePrompt: "" },
+      incompleteToolCall: { continuePrompt: "\t" },
+    } }));
+    const config = loadConfig(file);
+    assert.equal(config.rateLimit.retryPrompt, DEFAULT_CONFIG.rateLimit.retryPrompt);
+    assert.equal(config.tokenLimit.continuePrompt, DEFAULT_CONFIG.tokenLimit.continuePrompt);
+    assert.equal(config.incompleteToolCall.continuePrompt, DEFAULT_CONFIG.incompleteToolCall.continuePrompt);
+  });
+
+  it("resolves settings from PI_CODING_AGENT_DIR without ignoring an explicit path", (t) => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-auto-continue-config-"));
+    t.after(() => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    process.env.PI_CODING_AGENT_DIR = dir;
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ autoContinue: { baseDelayMs: 1234 } }));
+    const explicit = path.join(dir, "custom.json");
+    fs.writeFileSync(explicit, JSON.stringify({ autoContinue: { baseDelayMs: 4567 } }));
+    assert.equal(loadConfig().baseDelayMs, 1234);
+    assert.equal(loadConfig(explicit).baseDelayMs, 4567);
+  });
+});

@@ -202,7 +202,7 @@ export class RetryManager {
         calculated = Math.round(calculated * jitterFactor);
       }
 
-      delayMs = Math.max(baseDelayMs, calculated);
+      delayMs = Math.min(maxDelayMs, Math.max(baseDelayMs, calculated));
     }
 
     const remainingMs =

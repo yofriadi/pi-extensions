@@ -2,9 +2,12 @@ import {
   BILLING_HARD_LIMIT_PATTERNS,
   CONTEXT_OVERFLOW_PATTERNS,
   DEFAULT_WINDOW_RETRY_MARGIN,
+  PERMANENT_REQUEST_ERROR_PATTERNS,
   QUOTA_EXHAUSTION_PATTERNS,
   RATE_LIMIT_PATTERNS,
   RESET_SIGNAL_PATTERNS,
+  TRANSIENT_ERROR_PATTERNS,
+  USER_ABORT_PATTERNS,
 } from "./constants.ts";
 import { parseTargetTime } from "./config.ts";
 import type { ClassificationResult } from "./types.ts";
@@ -32,189 +35,124 @@ export function extractRetryAfterInfo(
   now = Date.now(),
   windowRetryMargin = DEFAULT_WINDOW_RETRY_MARGIN
 ): RetryAfterInfo {
-  // 1. Check HTTP response headers
+  let info: RetryAfterInfo = { delayMs: null, expectedResetTime: null, hasHeader: false };
+  const considerDelay = (delayMs: number | null, hasHeader: boolean, expectedResetTime?: number) => {
+    if (delayMs !== null && delayMs >= 0 && Number.isSafeInteger(now + delayMs) &&
+        (info.delayMs === null || delayMs > info.delayMs)) {
+      info = { delayMs, expectedResetTime: expectedResetTime ?? now + delayMs, hasHeader };
+    }
+  };
+
   if (headers) {
     const normalizedHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(headers)) {
       normalizedHeaders[k.toLowerCase()] = v;
     }
 
-    // Standard Retry-After header (seconds or HTTP date)
-    const retryAfter = normalizedHeaders["retry-after"];
-    if (retryAfter) {
-      const parsedSeconds = parseFloat(retryAfter);
-      if (!isNaN(parsedSeconds) && parsedSeconds >= 0) {
-        const delayMs = Math.round(parsedSeconds * 1000);
-        return {
-          delayMs,
-          expectedResetTime: now + delayMs,
-          hasHeader: true,
-        };
-      }
-      const parsedDate = Date.parse(retryAfter);
-      if (!isNaN(parsedDate)) {
-        const diffMs = parsedDate - now;
-        return {
-          delayMs: diffMs > 0 ? diffMs : 0,
-          expectedResetTime: parsedDate,
-          hasHeader: true,
-        };
-      }
-    }
-
-    // Direct ms header used by some gateways
+    // Prefer the explicit millisecond header when a gateway supplies both.
     const retryAfterMs = normalizedHeaders["retry-after-ms"];
-    if (retryAfterMs) {
-      const parsedMs = parseFloat(retryAfterMs);
-      if (!isNaN(parsedMs) && parsedMs >= 0) {
-        const delayMs = Math.round(parsedMs);
-        return {
-          delayMs,
-          expectedResetTime: now + delayMs,
-          hasHeader: true,
-        };
-      }
+    if (retryAfterMs && /^\d+(?:\.\d+)?$/.test(retryAfterMs.trim())) {
+      considerDelay(Math.round(Number(retryAfterMs)), true);
     }
 
-    // UNIX timestamp reset header (e.g. OpenAI / Cloudflare)
-    const resetTime =
-      normalizedHeaders["x-ratelimit-reset"] ||
-      normalizedHeaders["x-ratelimit-reset-requests"] ||
-      normalizedHeaders["x-ratelimit-reset-tokens"];
-    if (resetTime) {
-      const parsed = parseFloat(resetTime);
-      if (!isNaN(parsed) && parsed > 0) {
-        // Could be epoch seconds (> 1e9) or delta seconds
-        if (parsed > 1e9) {
-          const expectedResetTime = Math.round(parsed * 1000);
-          const diffMs = expectedResetTime - now;
-          return {
-            delayMs: diffMs > 0 ? diffMs : 0,
-            expectedResetTime,
-            hasHeader: true,
-          };
-        } else {
-          const delayMs = Math.round(parsed * 1000);
-          return {
-            delayMs,
-            expectedResetTime: now + delayMs,
-            hasHeader: true,
-          };
-        }
-      }
+    // Standard Retry-After is seconds or an HTTP date, never a numeric prefix.
+    const retryAfter = normalizedHeaders["retry-after"];
+    if (info.delayMs === null && retryAfter) {
+      const seconds = /^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter) : NaN;
+      const duration = parseRetryDuration(retryAfter);
+      const parsedDate = /[a-z]/i.test(retryAfter) ? Date.parse(retryAfter) : NaN;
+      const delayMs = Number.isFinite(seconds)
+        ? Math.round(seconds * 1000)
+        : duration ?? (Number.isFinite(parsedDate) ? Math.max(0, parsedDate - now) : NaN);
+      considerDelay(delayMs, true);
+    }
+
+    // Request and token limits can reset independently. Conservatively wait for
+    // the latest reset rather than choosing whichever header happened to be first.
+    for (const name of ["x-ratelimit-reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]) {
+      const resetTime = normalizedHeaders[name];
+      if (!resetTime) continue;
+      const parsed = /^\d+(?:\.\d+)?$/.test(resetTime.trim()) ? Number(resetTime) : NaN;
+      const delayMs = Number.isFinite(parsed)
+        ? parsed > 1e12 ? Math.max(0, Math.round(parsed) - now)
+          : parsed > 1e9 ? Math.max(0, Math.round(parsed * 1000) - now)
+          : Math.round(parsed * 1000)
+        : parseRetryDuration(resetTime);
+      considerDelay(delayMs, true);
     }
   }
 
-  // 2. Check error message text for inline retry hints
   if (errorMessage) {
-    // "retry after 30s", "try again in 12.5 seconds", "wait 45 seconds", "try again in ~42 min."
-    const secMatch = errorMessage.match(
-      /(?:retry.?after|try.?again.?(?:in|after)|wait|slow.?down.?for|resets?.?(?:in|after))\s*(?:~|approx(?:\.|imately)?|about|around)?\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?)?\b/i
+    // Read every complete duration, including adjacent components ("6m0s").
+    const durationMatches = errorMessage.matchAll(
+      /(?:retry.?after|try.?again.?(?:in|after)|wait|slow.?down.?for|resets?.?(?:in|after))\s*(?:~|approx(?:\.|imately)?|about|around)?\s*((?:\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)(?![a-z])[\s,]*)+(?!\w)|\d+(?:\.\d+)?(?![\w:.\d-]))/gi
     );
-    if (secMatch && secMatch[1]) {
-      const num = parseFloat(secMatch[1]);
-      const rawUnit =
-        secMatch[2] ||
-        secMatch[0].match(
-          /(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|ms)$/i
-        )?.[1] ||
-        "s";
-      const unit = rawUnit.toLowerCase();
-      if (!isNaN(num) && num > 0) {
-        let delayMs: number;
-        if (unit.startsWith("m") && !unit.startsWith("ms")) {
-          delayMs = Math.round(num * 60 * 1000);
-        } else if (unit.startsWith("h")) {
-          delayMs = Math.round(num * 3600 * 1000);
-        } else if (unit === "ms") {
-          delayMs = Math.round(num);
-        } else {
-          delayMs = Math.round(num * 1000);
-        }
-        return {
-          delayMs,
-          expectedResetTime: now + delayMs,
-          hasHeader: false,
-        };
-      }
+    for (const match of durationMatches) {
+      const raw = match[1].trim().replace(/,$/, "");
+      const delayMs = parseRetryDuration(raw) ?? (/^\d+(?:\.\d+)?$/.test(raw) ? Math.round(Number(raw) * 1000) : null);
+      considerDelay(delayMs, false);
     }
 
     // ISO timestamp in error: "resets at 2026-09-01T14:30:00Z"
-    const dateMatch = errorMessage.match(
-      /(?:resets?.?at|retry.?at)\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)/i
+    const dateMatches = errorMessage.matchAll(
+      /(?:resets?.?at|retry.?(?:at|after)|try.?again.?at)\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)/gi
     );
-    if (dateMatch && dateMatch[1]) {
-      const parsed = Date.parse(dateMatch[1]);
-      if (!isNaN(parsed)) {
-        const diffMs = parsed - now;
-        return {
-          delayMs: diffMs > 0 ? diffMs : 0,
-          expectedResetTime: parsed,
-          hasHeader: false,
-        };
-      }
+    for (const match of dateMatches) {
+      const parsed = Date.parse(match[1]);
+      considerDelay(Math.max(0, parsed - now), false, parsed);
     }
 
     // Target clock time in error: "try again at 3:45 PM", "resets at 14:30"
-    const clockMatch = errorMessage.match(
-      /(?:resets?.?at|retry.?at|try.?again.?at)\s*([01]?\d|2[0-3]:[0-5]\d(?::[0-5]\d)?\s*(?:am|pm)?)\b/i
+    const clockMatches = errorMessage.matchAll(
+      /(?:resets?.?at|retry.?at|try.?again.?at)\s*((?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\s*(?:am|pm)?)\b/gi
     );
-    if (clockMatch && clockMatch[1]) {
-      const parsed = parseTargetTime(clockMatch[1], new Date(now));
-      if (parsed) {
-        const diffMs = parsed.targetTimeMs - now;
-        return {
-          delayMs: diffMs > 0 ? diffMs : 0,
-          expectedResetTime: parsed.targetTimeMs,
-          hasHeader: false,
-        };
-      }
+    for (const match of clockMatches) {
+      const parsed = parseTargetTime(match[1], new Date(now));
+      if (parsed) considerDelay(Math.max(0, parsed.targetTimeMs - now), false, parsed.targetTimeMs);
     }
 
-    // Rolling quota window: "Maximum 8 requests within 1 minutes",
-    // "5 requests per 30 seconds", "limit of 10 req/1min". Unlike the hints
-    // above this states the window WIDTH, not a reset point, so the start is
-    // unknown. Best case it has just opened; worst case the rejected request
-    // landed at its very end and it closes after the full width, so we assume
-    // the full width and retry just past the boundary.
-    const windowMatch = errorMessage.match(
-      /(?:within|per|every|limit\s+of|max(?:imum)?\s+of)\s*(?:~|approx(?:\.|imately)?|about|around)?\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\b/i
-    );
-    if (windowMatch && windowMatch[1]) {
-      const widthMs = toMillis(
-        parseFloat(windowMatch[1]),
-        (windowMatch[2] || "s").toLowerCase()
+    // Only infer a rolling window when there is no explicit reset hint, and
+    // only from request/token quotas, not latency or pricing.
+    if (info.delayMs === null) {
+      const windowMatch = errorMessage.match(
+        /\b(?:requests?|tokens?|req)\s+(?:within|per|every|\/)\s*(\d+(?:\.\d+)?)\s*(ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i
       );
-      if (widthMs !== null && widthMs > 0) {
-        const delayMs = Math.round(widthMs * windowRetryMargin);
-        return {
-          delayMs,
-          expectedResetTime: now + delayMs,
-          hasHeader: false,
-          isWindowEstimate: true,
-        };
+      if (windowMatch?.[1]) {
+        const widthMs = toMillis(Number(windowMatch[1]), windowMatch[2].toLowerCase());
+        const margin = Number.isFinite(windowRetryMargin) && windowRetryMargin >= 1 ? windowRetryMargin : DEFAULT_WINDOW_RETRY_MARGIN;
+        const delayMs = widthMs === null ? NaN : Math.round(widthMs * margin);
+        if (Number.isSafeInteger(now + delayMs)) {
+          return { delayMs, expectedResetTime: now + delayMs, hasHeader: false, isWindowEstimate: true };
+        }
       }
     }
   }
 
-  return {
-    delayMs: null,
-    expectedResetTime: null,
-    hasHeader: false,
-  };
+  return info;
 }
 
-/**
- * Converts a magnitude plus a unit token to milliseconds, or null if unrecognised.
- */
+/** Parses complete, possibly compound durations such as "6m0s" or "2h 36m". */
+function parseRetryDuration(value: string): number | null {
+  const parts = value.trim().matchAll(/(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)/gi);
+  let delayMs = 0;
+  let end = 0;
+  for (const part of parts) {
+    if (!/^[\s,]*$/.test(value.trim().slice(end, part.index))) return null;
+    const ms = toMillis(Number(part[1]), part[2].toLowerCase());
+    if (ms === null) return null;
+    delayMs += ms;
+    end = part.index + part[0].length;
+  }
+  return end > 0 && value.trim().slice(end).trim() === "" && Number.isSafeInteger(delayMs) ? delayMs : null;
+}
+
 function toMillis(num: number, unit: string): number | null {
-  if (isNaN(num) || num <= 0) return null;
-  if (unit === "ms") return Math.round(num);
-  if (unit.startsWith("s")) return Math.round(num * 1000);
-  if (unit.startsWith("m")) return Math.round(num * 60 * 1000);
-  if (unit.startsWith("h")) return Math.round(num * 3600 * 1000);
-  if (unit.startsWith("d")) return Math.round(num * 86400 * 1000);
-  return null;
+  if (!Number.isFinite(num) || num < 0) return null;
+  const multiplier = unit === "ms" || unit.startsWith("millisecond") ? 1
+    : unit.startsWith("s") ? 1000 : unit.startsWith("m") ? 60000
+    : unit.startsWith("h") ? 3600000 : unit.startsWith("d") ? 86400000 : NaN;
+  const result = Math.round(num * multiplier);
+  return Number.isSafeInteger(result) ? result : null;
 }
 
 /**
@@ -233,7 +171,7 @@ export function extractRetryAfterDelay(
 export interface ClassifyInput {
   stopReason?: string;
   errorMessage?: string;
-  content?: any[];
+  content?: readonly unknown[];
   httpStatus?: number;
   httpHeaders?: Record<string, string>;
   now?: number;
@@ -251,161 +189,61 @@ export function classifyInterruption(
   now?: number
 ): ClassificationResult {
   const { stopReason, errorMessage, content, httpStatus, httpHeaders } = input;
-  const currentTime = now ?? input.now ?? Date.now();
-  const retryInfo = extractRetryAfterInfo(
-    httpHeaders,
-    errorMessage,
-    currentTime,
-    input.windowRetryMargin ?? DEFAULT_WINDOW_RETRY_MARGIN
-  );
+  const none: ClassificationResult = { type: "NONE", reason: "No recoverable interruption", errorMessage, rawStopReason: stopReason };
 
-  // 0. Opt-in (`rateLimit.fatalFirst`): let terminal signals outrank a
-  //    retryable HTTP status code. A quota-exhausted or billing-blocked request
-  //    routinely arrives as HTTP 429, and waiting out the retry budget on an
-  //    account with no credit stalls the run for hours.
-  //
-  //    Off by default so behaviour matches upstream: every quota/usage-limit
-  //    message is retried. When on, a message carrying a self-evident reset
-  //    signal ("try again in 20s", "within 1 minutes", "resets at 14:30") is
-  //    still retried, so only terminal-looking text stops the loop.
-  //
-  //    These checks read the status code only for 401/403, which pi reports for
-  //    the same request as the error text, so no cached-response staleness
-  //    applies here beyond what upstream already relies on.
-  const errorTextPre = errorMessage || "";
-  if (input.fatalFirst) {
-    // 401/403 are terminal whatever the body claims: the request was never
-    //    authorized, so no amount of waiting changes the outcome.
-    if (httpStatus === 401 || httpStatus === 403) {
-      return {
-        type: "BILLING_HARD_LIMIT",
-        reason: `HTTP ${httpStatus} authentication or permission failure`,
-        errorMessage: errorTextPre || `HTTP ${httpStatus}`,
-        rawStopReason: stopReason,
-      };
-    }
-    const hasResetSignal = RESET_SIGNAL_PATTERNS.some((p) => p.test(errorTextPre));
-    if (!hasResetSignal && QUOTA_EXHAUSTION_PATTERNS.some((p) => p.test(errorTextPre))) {
-      return {
-        type: "BILLING_HARD_LIMIT",
-        reason: "Quota exhaustion or billing failure without a reset signal",
-        errorMessage: errorTextPre,
-        rawStopReason: stopReason,
-      };
-    }
-    // Context overflow is resolved by Pi's auto-compaction, never by waiting,
-    // so it must not be masked by a retryable status code.
-    if (CONTEXT_OVERFLOW_PATTERNS.some((p) => p.test(errorTextPre))) {
-      return {
-        type: "CONTEXT_OVERFLOW",
-        reason: "Context window overflow",
-        errorMessage: errorTextPre,
-        rawStopReason: stopReason,
-      };
-    }
-  }
-
-  // 1. Direct HTTP 429 / 503 / 529 Rate Limit or Overload
-  if (httpStatus === 429) {
-    return {
-      type: "RATE_LIMIT",
-      reason: "HTTP 429 Too Many Requests (Rate Limited)",
-      errorMessage: errorMessage || "HTTP 429 Too Many Requests",
-      retryAfterMs: retryInfo.delayMs ?? undefined,
-      retryAfterHeaderReceived: retryInfo.hasHeader,
-      expectedResetTime: retryInfo.expectedResetTime ?? undefined,
-      isWindowEstimate: retryInfo.isWindowEstimate,
-      rawStopReason: stopReason,
-    };
-  }
-
-  if (httpStatus === 503 || httpStatus === 529) {
-    return {
-      type: "RATE_LIMIT",
-      reason: `HTTP ${httpStatus} Provider Overloaded`,
-      errorMessage: errorMessage || `HTTP ${httpStatus} Service Unavailable / Overloaded`,
-      retryAfterMs: retryInfo.delayMs ?? undefined,
-      retryAfterHeaderReceived: retryInfo.hasHeader,
-      expectedResetTime: retryInfo.expectedResetTime ?? undefined,
-      isWindowEstimate: retryInfo.isWindowEstimate,
-      rawStopReason: stopReason,
-    };
-  }
-
-  // 2. Provider Error Messages
-  if (stopReason === "error" || (errorMessage && errorMessage.trim().length > 0)) {
-    const errorText = errorMessage || "";
-
-    // Check Context Overflow first (should defer to auto-compaction, not retry in a loop)
-    if (CONTEXT_OVERFLOW_PATTERNS.some((p) => p.test(errorText))) {
-      return {
-        type: "CONTEXT_OVERFLOW",
-        reason: "Context window overflow",
-        errorMessage: errorText,
-        rawStopReason: stopReason,
-      };
-    }
-
-    // Check non-retryable fatal billing / account limits
-    if (BILLING_HARD_LIMIT_PATTERNS.some((p) => p.test(errorText))) {
-      return {
-        type: "BILLING_HARD_LIMIT",
-        reason: "Billing hard limit or authentication failure (non-retryable)",
-        errorMessage: errorText,
-        rawStopReason: stopReason,
-      };
-    }
-
-    // Check transient rate limits and quota resets
-    if (RATE_LIMIT_PATTERNS.some((p) => p.test(errorText))) {
-      return {
-        type: "RATE_LIMIT",
-        reason: "Provider rate limit or quota exceeded",
-        errorMessage: errorText,
-        retryAfterMs: retryInfo.delayMs ?? undefined,
-        retryAfterHeaderReceived: retryInfo.hasHeader,
-        expectedResetTime: retryInfo.expectedResetTime ?? undefined,
-        isWindowEstimate: retryInfo.isWindowEstimate,
-        rawStopReason: stopReason,
-      };
-    }
-  }
-
-  // 3. Incomplete Tool Call Check
-  // Check if output ended mid-tool-call (e.g. truncated arguments or empty JSON object)
-  if (Array.isArray(content) && content.length > 0) {
-    const lastContent = content[content.length - 1];
-    if (lastContent?.type === "toolCall") {
-      const args = lastContent.arguments;
-      const isEmptyArgs =
-        args === undefined ||
-        args === null ||
-        (typeof args === "object" && Object.keys(args).length === 0);
-      if (isEmptyArgs && stopReason !== "stop") {
-        return {
-          type: "INCOMPLETE_TOOL_CALL",
-          reason: "Tool call cut off with missing or incomplete arguments",
-          errorMessage,
-          rawStopReason: stopReason,
-        };
-      }
-    }
-  }
-
-  // 4. Token Limit Truncation (stopReason === "length")
+  // A successful or cancelled message can never be resurrected by cached HTTP
+  // metadata, an error string, or a perfectly valid zero-argument tool call.
+  if (stopReason !== undefined && stopReason !== "error" && stopReason !== "length") return none;
   if (stopReason === "length") {
+    const lastContent = content?.[content.length - 1];
+    const endsInTool = typeof lastContent === "object" && lastContent !== null && "type" in lastContent && lastContent.type === "toolCall";
     return {
-      type: "TOKEN_LIMIT",
-      reason: "Response reached maximum output tokens (max_tokens)",
+      type: endsInTool ? "INCOMPLETE_TOOL_CALL" : "TOKEN_LIMIT",
+      reason: endsInTool ? "Response truncated while emitting a tool call" : "Response reached maximum output tokens (max_tokens)",
       errorMessage,
       rawStopReason: stopReason,
     };
   }
 
+  const errorText = errorMessage || "";
+  if (USER_ABORT_PATTERNS.some((pattern) => pattern.test(errorText))) return none;
+
+  // These are never fixed by waiting, regardless of a gateway's HTTP status.
+  if (CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(errorText))) {
+    return { type: "CONTEXT_OVERFLOW", reason: "Context window overflow", errorMessage, rawStopReason: stopReason };
+  }
+  if (httpStatus === 401 || httpStatus === 402 || httpStatus === 403 || BILLING_HARD_LIMIT_PATTERNS.some((pattern) => pattern.test(errorText))) {
+    return { type: "BILLING_HARD_LIMIT", reason: "Billing, authentication or permission failure (non-retryable)", errorMessage: errorMessage || `HTTP ${httpStatus}`, rawStopReason: stopReason };
+  }
+  if (httpStatus !== undefined && [404, 405, 422, 501, 505].includes(httpStatus)) return none;
+  if (PERMANENT_REQUEST_ERROR_PATTERNS.some((pattern) => pattern.test(errorText))) return none;
+
+  const retryInfo = extractRetryAfterInfo(httpHeaders, errorMessage, now ?? input.now ?? Date.now(), input.windowRetryMargin);
+  // Preserve the opt-in policy for ambiguous quota exhaustion, but a bare
+  // "retry after topping up" is not evidence of a timed reset.
+  const hasResetSignal = retryInfo.delayMs !== null || RESET_SIGNAL_PATTERNS.some((pattern) => pattern.test(errorText));
+  if (input.fatalFirst && !hasResetSignal && QUOTA_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(errorText))) {
+    return { type: "BILLING_HARD_LIMIT", reason: "Quota exhaustion or billing failure without a reset signal", errorMessage, rawStopReason: stopReason };
+  }
+
+  let reason: string | undefined;
+  if (httpStatus === 429) reason = "HTTP 429 Too Many Requests (Rate Limited)";
+  else if (httpStatus !== undefined && [408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 529, 530].includes(httpStatus)) {
+    reason = `HTTP ${httpStatus} transient provider failure`;
+  } else if (RATE_LIMIT_PATTERNS.some((pattern) => pattern.test(errorText))) {
+    reason = "Provider rate limit or quota exceeded";
+  } else if (stopReason === "error" && TRANSIENT_ERROR_PATTERNS.some((pattern) => pattern.test(errorText))) {
+    reason = "Transient transport or gateway failure";
+  }
+  if (!reason) return none;
   return {
-    type: "NONE",
-    reason: "Normal message completion",
-    errorMessage,
+    type: "RATE_LIMIT",
+    reason,
+    errorMessage: errorMessage || (httpStatus ? `HTTP ${httpStatus}` : undefined),
+    retryAfterMs: retryInfo.delayMs ?? undefined,
+    retryAfterHeaderReceived: retryInfo.hasHeader,
+    expectedResetTime: retryInfo.expectedResetTime ?? undefined,
+    isWindowEstimate: retryInfo.isWindowEstimate,
     rawStopReason: stopReason,
   };
 }

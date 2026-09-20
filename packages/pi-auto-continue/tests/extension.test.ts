@@ -1,812 +1,711 @@
-import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { after, before, describe, it, type TestContext } from "node:test";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  MessageEndEvent,
+  TerminalInputHandler,
+} from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.ts";
 
-type EventHandler = (event: any, ctx: any) => Promise<any> | any;
+type AssistantMessage = Extract<MessageEndEvent["message"], { role: "assistant" }>;
+type EventHandler = (event: object, ctx: ExtensionContext) => unknown;
+type Command = Parameters<ExtensionAPI["registerCommand"]>[1];
+const NOW = new Date(2026, 8, 2, 12, 0, 0).getTime();
+
+function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+  return {
+    role: "assistant",
+    api: "openai-completions",
+    provider: "test",
+    model: "test-model",
+    content: [],
+    stopReason: "error",
+    errorMessage: "fetch failed",
+    timestamp: Date.now(),
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    ...overrides,
+  };
+}
 
 class MockExtensionAPI {
-  public handlers: Map<string, EventHandler[]> = new Map();
-  public commands: Map<string, any> = new Map();
-  public sentUserMessages: Array<{ content: any; options?: any }> = [];
+  handlers = new Map<string, EventHandler[]>();
+  commands = new Map<string, Command>();
+  sentUserMessages: Array<{
+    content: Parameters<ExtensionAPI["sendUserMessage"]>[0];
+    options: Parameters<ExtensionAPI["sendUserMessage"]>[1];
+  }> = [];
+  sendError?: Error;
 
   on(event: string, handler: EventHandler): void {
-    const list = this.handlers.get(event) || [];
+    const list = this.handlers.get(event) ?? [];
     list.push(handler);
     this.handlers.set(event, list);
   }
 
-  registerCommand(name: string, command: any): void {
+  registerCommand(name: string, command: Command): void {
     this.commands.set(name, command);
   }
 
-  sendUserMessage(content: any, options?: any): void {
+  sendUserMessage(...[content, options]: Parameters<ExtensionAPI["sendUserMessage"]>): void {
+    if (this.sendError) throw this.sendError;
     this.sentUserMessages.push({ content, options });
   }
-
-  async emit(event: string, payload: any, ctx: any): Promise<any> {
-    const list = this.handlers.get(event) || [];
-    let lastResult: any;
-    for (const h of list) {
-      lastResult = await h(payload, ctx);
-    }
-    return lastResult;
-  }
 }
 
-class MockContext {
-  public notifications: Array<{ message: string; type?: string }> = [];
-  public hasUI = true;
-  public ui = {
-    notify: (message: string, type?: string) => {
-      this.notifications.push({ message, type });
+function harness(t: TestContext, config: Record<string, unknown> = {}, tui = false) {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-auto-continue-test-"));
+  const settingsPath = path.join(dir, "settings.json");
+  fs.writeFileSync(settingsPath, JSON.stringify({
+    autoContinue: {
+      baseDelayMs: 1000,
+      maxDelayMs: 10000,
+      rateLimit: { baseDelayMs: 1000, maxDelayMs: 10000, jitter: false },
+      ...config,
     },
+  }));
+  const api = new MockExtensionAPI();
+  const state = { idle: true, queued: false, sessionId: "session-a" };
+  const notifications: Array<{ message: string; type?: string }> = [];
+  const terminalHandlers = new Set<TerminalInputHandler>();
+  const abortController = new AbortController();
+  // Only the context methods used by the extension are needed for these unit tests.
+  // Loader/session integration tests exercise the complete, real context separately.
+  const ctx = {
+    mode: tui ? "tui" : "rpc",
+    hasUI: true,
+    model: { provider: "test", id: "test-model" },
+    sessionManager: { getSessionId: () => state.sessionId },
+    signal: abortController.signal,
+    isIdle: () => state.idle,
+    hasPendingMessages: () => state.queued,
+    ui: {
+      notify: (message: string, type?: string) => { notifications.push({ message, type }); },
+      onTerminalInput: (handler: TerminalInputHandler) => {
+        terminalHandlers.add(handler);
+        return () => { terminalHandlers.delete(handler); };
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+  extension(api as unknown as ExtensionAPI, settingsPath);
+
+  const emit = async (type: string, payload: object = {}) => {
+    let result: unknown;
+    for (const handler of api.handlers.get(type) ?? []) result = await handler({ type, ...payload }, ctx);
+    return result;
   };
-  isIdle() {
-    return true;
-  }
+  const command = async (args: string) => {
+    const registered = api.commands.get("auto-continue");
+    assert.ok(registered);
+    await registered.handler(args, ctx);
+  };
+  const settle = async (message: AssistantMessage = assistant()) => {
+    await emit("message_end", { message });
+    state.idle = true;
+    await emit("agent_settled");
+  };
+  const start = async (text: string, source = "interactive") => {
+    const result = await emit("input", { source, text });
+    if (source === "extension" && text.startsWith("<!-- auto-continue:")) {
+      const prompt = text.slice(text.indexOf("\n") + 1);
+      assert.deepEqual(result, { action: "transform", text: prompt });
+      text = prompt;
+    } else {
+      assert.deepEqual(result, { action: "continue" });
+    }
+    await emit("before_agent_start", { prompt: text, systemPrompt: "Base." });
+    state.idle = false;
+    await emit("agent_start");
+    await emit("turn_start");
+    await emit("message_start", { message: { role: "user", content: [{ type: "text", text }] } });
+  };
+  const acceptRetry = async () => {
+    const sent = api.sentUserMessages.at(-1);
+    assert.ok(sent);
+    assert.equal(typeof sent.content, "string");
+    await start(sent.content as string, "extension");
+  };
+  t.after(async () => {
+    await emit("session_shutdown");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return { api, state, ctx, notifications, terminalHandlers, abortController, emit, command, settle, start, acceptRetry };
 }
 
-describe("pi-auto-continue extension", () => {
-  let tmpDir: string;
-  let testSettingsPath: string;
+const savedEnv = new Map<string, string | undefined>();
+before(() => {
+  for (const key of ["PI_SUBAGENT_SESSION", "PI_SUBAGENT_ID"]) {
+    savedEnv.set(key, process.env[key]);
+    delete process.env[key];
+  }
+});
+after(() => {
+  for (const [key, value] of savedEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
-  before(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-test-"));
-    testSettingsPath = path.join(tmpDir, "settings.json");
-    fs.writeFileSync(
-      testSettingsPath,
-      JSON.stringify({
-        autoContinue: {
-          enabled: true,
-          baseDelayMs: 20,
-          rateLimit: {
-            baseDelayMs: 20,
-          },
-        },
-      })
-    );
-  });
-
-  after(() => {
-    if (tmpDir) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+describe("native-aware recovery", () => {
+  it("registers lifecycle hooks and only the documented command", (t) => {
+    const { api } = harness(t);
+    for (const name of ["session_start", "before_provider_request", "after_provider_response", "input", "message_end", "agent_settled", "session_compact_failed"]) {
+      assert.ok(api.handlers.has(name), name);
     }
+    assert.deepEqual([...api.commands.keys()], ["auto-continue"]);
   });
 
-  it("registers event listeners and slash commands", () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
 
-    assert.ok(pi.handlers.has("session_start"));
-    assert.ok(pi.handlers.has("after_provider_response"));
-    assert.ok(pi.handlers.has("input"));
-    assert.ok(pi.handlers.has("before_agent_start"));
-    assert.ok(pi.handlers.has("message_end"));
-    assert.ok(pi.handlers.has("agent_settled"));
-
-    assert.ok(pi.commands.has("auto-continue"));
-    assert.equal(pi.commands.has("auto-resume"), false);
-  });
-
-  it("adds guidance to system prompt in before_agent_start", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const result = await pi.emit(
-      "before_agent_start",
-      { systemPrompt: "Base prompt." },
-      ctx
-    );
-
-    assert.ok(result?.systemPrompt?.includes("Auto-Continue Behavior"));
-    assert.ok(result?.systemPrompt?.includes("Base prompt."));
-  });
-
-  it("handles token limit truncation with auto-continuation message", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Trigger message_end with stopReason: length
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "length",
-          content: [{ type: "text", text: "Partially completed code..." }],
-          timestamp: 1000,
-        },
-      },
-      ctx
-    );
-
-    assert.equal(pi.sentUserMessages.length, 1);
-    assert.ok(
-      typeof pi.sentUserMessages[0].content === "string" &&
-        pi.sentUserMessages[0].content.includes("Continue from where you left off")
-    );
-    assert.equal(pi.sentUserMessages[0].options?.deliverAs, "followUp");
-    assert.equal(pi.sentUserMessages[0].options?.streamingBehavior, "followUp");
-
-    assert.ok(ctx.notifications.some((n) => n.message.includes("Response truncated")));
-  });
-
-  it("handles rate limit errors with warning notification and retry message", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "Rate limit reached (429): Please try again in 0.05 seconds.",
-          timestamp: 2000,
-        },
-      },
-      ctx
-    );
-
-    assert.equal(pi.sentUserMessages.length, 1);
-    assert.equal(pi.sentUserMessages[0].options?.deliverAs, "followUp");
-    assert.equal(pi.sentUserMessages[0].options?.streamingBehavior, "followUp");
-    assert.ok(
-      typeof pi.sentUserMessages[0].content === "string" &&
-        pi.sentUserMessages[0].content.includes("rate/quota limit")
-    );
-
-    // Verify informational messages in UI
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("Rate limit / quota error detected") && n.type === "warning"
-      )
-    );
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("Retrying request") && n.type === "info"
-      )
-    );
-
-    // Settling after recovery triggers success notification
-    await pi.emit("agent_settled", {}, ctx);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("Successfully recovered from rate limit") && n.type === "info"
-      )
-    );
-  });
-
-  it("drops third-party extension messages and notifies UI when in retrying state", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Trigger a rate limit to enter retrying state
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "HTTP 429: Too Many Requests",
-          timestamp: 3000,
-        },
-      },
-      ctx
-    );
-
-    // External extension attempts to send a message during retrying
-    const extInputResult = await pi.emit(
-      "input",
-      {
-        type: "input",
-        source: "extension",
-        text: "Plan mode requires a TODO list before finishing the turn.",
-      },
-      ctx
-    );
-
-    // Message should be cleanly handled (suppressed)
-    assert.deepEqual(extInputResult, { action: "handled" });
-
-    // Warning notification should be visible in UI
-    assert.ok(
-      ctx.notifications.some(
-        (n) =>
-          n.type === "warning" &&
-          n.message.includes("Dropped extension message while waiting for retry/continuation") &&
-          n.message.includes("Plan mode requires a TODO list")
-      )
-    );
-
-    // Auto-continue's own retry message should pass through
-    const ownInputResult = await pi.emit(
-      "input",
-      {
-        type: "input",
-        source: "extension",
-        text: "The previous request encountered a rate/quota limit. Please continue with your task.",
-      },
-      ctx
-    );
-    assert.deepEqual(ownInputResult, { action: "continue" });
-  });
-
-  it("allows interactive user input to cancel active retry loop", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Trigger rate limit
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "Rate limit exceeded (429)",
-          timestamp: 4000,
-        },
-      },
-      ctx
-    );
-
-    // User types interactive message
-    const userInputResult = await pi.emit(
-      "input",
-      {
-        type: "input",
-        source: "interactive",
-        text: "Forget that, help me with a new task instead",
-      },
-      ctx
-    );
-
-    assert.deepEqual(userInputResult, { action: "continue" });
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("User input received: cancelling active retry/continuation loop")
-      )
-    );
-
-    // Subsequent extension message now passes because retry loop was cancelled
-    const extResult = await pi.emit(
-      "input",
-      {
-        type: "input",
-        source: "extension",
-        text: "Normal extension message",
-      },
-      ctx
-    );
-    assert.deepEqual(extResult, { action: "continue" });
-  });
-
-  it("handles /auto-continue status command", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-    assert.ok(cmd);
-
-    await cmd.handler("status", ctx);
-
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("Auto-Continue Status:") && n.message.includes("Max retries:")
-      )
-    );
-  });
-
-  it("includes timestamp [HH:MM:SS] in all UI notifications", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-    await cmd.handler("enable", ctx);
-    await cmd.handler("disable", ctx);
-    await cmd.handler("reset", ctx);
-
-    assert.equal(ctx.notifications.length, 3);
-    const timeRegex = /^\[auto-continue\] \[\d{2}:\d{2}:\d{2}\]/;
-    for (const notif of ctx.notifications) {
-      assert.ok(
-        timeRegex.test(notif.message),
-        `Notification "${notif.message}" should match [auto-continue] [HH:MM:SS]`
-      );
+  it("never sleeps, counts retries, or sends from message_end/agent_end", async (t) => {
+    const h = harness(t);
+    h.state.idle = false;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await h.emit("message_end", { message: assistant() });
+      await h.emit("agent_end");
+      t.mock.timers.tick(60000);
     }
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.equal(h.notifications.length, 0);
+    h.state.idle = true;
+    await h.emit("agent_settled");
+    assert.match(h.notifications[0].message, /attempt #1/);
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 
-  it("formats /auto-continue status response with global retry parameters and removes token limit section", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-    await cmd.handler("status", ctx);
-
-    assert.equal(ctx.notifications.length, 1);
-    const msg = ctx.notifications[0].message;
-
-    assert.ok(msg.includes("Auto-Continue Status:"));
-    assert.ok(msg.includes("Global:"));
-    assert.ok(msg.includes("Base delay / Max delay:"));
-    assert.ok(msg.includes("Max retries:"));
-    assert.ok(msg.includes("Backoff multiplier:"));
-    assert.ok(msg.includes("Rate Limit Settings & Status:"));
-    assert.ok(msg.includes("Base delay: 20ms"));
-    assert.ok(msg.includes("Max delay: 10m"));
-    assert.ok(msg.includes("Max retries: 5h"));
-    assert.equal(msg.includes("20ms (uses global)"), false);
-    assert.equal(msg.includes("Token Limit Settings & Status:"), false);
-    // When idle and no Retry-After header received, expected token reset time is omitted
-    assert.equal(msg.includes("Expected token reset time:"), false);
+  it("does nothing if native retries recover before settlement", async (t) => {
+    const h = harness(t);
+    await h.emit("message_end", { message: assistant() });
+    await h.emit("agent_start");
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.equal(h.notifications.length, 0);
   });
 
-  it("displays custom rateLimit.baseDelayMs in /auto-continue status", async () => {
-    const customTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-custom-"));
-    const customSettings = path.join(customTmp, "settings.json");
-    fs.writeFileSync(
-      customSettings,
-      JSON.stringify({
-        autoContinue: {
-          enabled: true,
-          baseDelayMs: "5s",
-          rateLimit: {
-            baseDelayMs: "15s",
-          },
-        },
-      })
-    );
+  it("schedules exactly one fallback after native retry exhaustion", async (t) => {
+    const h = harness(t);
+    const message = assistant();
+    await h.settle(message);
+    await h.emit("agent_settled");
+    await h.emit("message_end", { message });
+    await h.emit("agent_settled");
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(999);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(1);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    assert.deepEqual(h.api.sentUserMessages[0].options, { deliverAs: "followUp" });
+    await h.emit("agent_settled");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    assert.equal(h.notifications.some((n) => /Response completed/.test(n.message)), false);
+  });
 
-    try {
-      const pi = new MockExtensionAPI();
-      extension(pi as any, customSettings);
+  it("defers even a zero-delay continuation outside the settlement hook", async (t) => {
+    const h = harness(t, { baseDelayMs: 0 });
+    await h.settle(assistant({ stopReason: "length" }));
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(1);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
 
-      const ctx = new MockContext();
-      const cmd = pi.commands.get("auto-continue");
-      await cmd.handler("status", ctx);
+  for (const type of ["text", "toolCall"] as const) {
+    it(`continues actual truncation ending in ${type}`, async (t) => {
+      const h = harness(t);
+      const content: AssistantMessage["content"] = type === "text"
+        ? [{ type: "text", text: "partial" }]
+        : [{ type: "toolCall", id: "call-1", name: "edit", arguments: { path: "file.ts" } }];
+      await h.settle(assistant({ stopReason: "length", errorMessage: undefined, content }));
+      t.mock.timers.tick(1000);
+      assert.equal(h.api.sentUserMessages.length, 1);
+      assert.match(String(h.api.sentUserMessages[0].content), type === "text" ? /Continue from where you left off/ : /Check existing tool results/);
+    });
+  }
 
-      assert.equal(ctx.notifications.length, 1);
-      const msg = ctx.notifications[0].message;
-      assert.ok(msg.includes("Base delay: 15s"));
-      assert.equal(msg.includes("15s (uses global)"), false);
-    } finally {
-      fs.rmSync(customTmp, { recursive: true, force: true });
+  it("does not continue a normal zero-argument tool call or unknown error", async (t) => {
+    const h = harness(t);
+    await h.settle(assistant({ stopReason: "toolUse", content: [{ type: "toolCall", id: "c", name: "status", arguments: {} }] }));
+    await h.settle(assistant({ errorMessage: "Unrecognized request failure" }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("preserves the budget across continuations and only reports a healthy completion", async (t) => {
+    const h = harness(t);
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    await h.acceptRetry();
+    await h.settle(assistant());
+    t.mock.timers.tick(1000);
+    await h.acceptRetry();
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    assert.equal(h.api.sentUserMessages.length, 2);
+    assert.ok(h.notifications.some((n) => /Response completed after 2 retry/.test(n.message)));
+    await h.command("status");
+    assert.match(h.notifications.at(-1)?.message ?? "", /Current retry status: Idle/);
+  });
+
+  it("enforces retry counts without resetting at each settlement", async (t) => {
+    const h = harness(t, { maxRetries: 2 });
+    for (const delay of [1000, 2000]) {
+      await h.settle(assistant({ stopReason: "length" }));
+      t.mock.timers.tick(delay);
+      await h.acceptRetry();
     }
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 2);
+    assert.ok(h.notifications.some((n) => /Maximum retries limit of 2/.test(n.message)));
   });
 
-  it("displays default 1m rateLimit.baseDelayMs in /auto-continue status when unspecified", async () => {
-    const defaultTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-default-"));
-    const defaultSettings = path.join(defaultTmp, "settings.json");
-    fs.writeFileSync(
-      defaultSettings,
-      JSON.stringify({
-        autoContinue: {
-          enabled: true,
-          baseDelayMs: "5s",
-        },
-      })
-    );
+  it("rechecks the duration deadline when a wait becomes due", async (t) => {
+    const h = harness(t, { maxRetries: "500ms" });
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(500);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.ok(h.notifications.some((n) => /Retry deadline/.test(n.message)));
+  });
 
-    try {
-      const pi = new MockExtensionAPI();
-      extension(pi as any, defaultSettings);
+  it("chunks waits beyond Node's timeout range instead of sending immediately", async (t) => {
+    const h = harness(t, { rateLimit: { baseDelayMs: 0, maxRetries: "40d", jitter: false } });
+    await h.settle(assistant({ errorMessage: "Rate limited. Try again in 30 days." }));
+    t.mock.timers.tick(2_147_483_647);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(30 * 86400000 - 2_147_483_647);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
 
-      const ctx = new MockContext();
-      const cmd = pi.commands.get("auto-continue");
-      await cmd.handler("status", ctx);
+  for (const queued of [false, true]) {
+    it(`does not enqueue if Pi ${queued ? "has pending messages" : "is busy"} at dispatch`, async (t) => {
+      const h = harness(t);
+      await h.settle();
+      h.state.idle = queued;
+      h.state.queued = queued;
+      t.mock.timers.tick(1000);
+      h.state.idle = true;
+      h.state.queued = false;
+      await h.emit("agent_settled");
+      t.mock.timers.tick(60000);
+      assert.equal(h.api.sentUserMessages.length, 0);
+    });
+  }
 
-      assert.equal(ctx.notifications.length, 1);
-      const msg = ctx.notifications[0].message;
-      assert.ok(msg.includes("Base delay: 1m"));
-      assert.ok(msg.includes("Max delay: 10m"));
-      assert.ok(msg.includes("Max retries: 5h"));
-      assert.equal(msg.includes("1m (uses global)"), false);
-    } finally {
-      fs.rmSync(defaultTmp, { recursive: true, force: true });
+  it("stops cleanly when a synchronous send fails", async (t) => {
+    const h = harness(t);
+    h.api.sendError = new Error("send failed");
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.ok(h.notifications.some((n) => n.type === "error" && /Failed to send continuation: send failed/.test(n.message)));
+    await h.command("status");
+    assert.match(h.notifications.at(-1)?.message ?? "", /Current retry status: Idle/);
+  });
+
+  it("pauses an unacknowledged submission instead of silently sticking or resending", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    t.mock.timers.tick(1000);
+    const text = h.api.sentUserMessages[0].content;
+    t.mock.timers.tick(30000);
+    await h.emit("agent_settled");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    assert.ok(h.notifications.some((n) => n.type === "warning" && /Continuation did not start within 30s/.test(n.message)));
+    await h.command("status");
+    assert.match(h.notifications.at(-1)?.message ?? "", /Current retry status: Idle/);
+    assert.deepEqual(await h.emit("input", { source: "extension", text }), { action: "handled" });
+    await h.start("Try a new task", "rpc");
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 2);
+  });
+
+  it("also times out input accepted by this extension but not started by Pi", async (t) => {
+    const h = harness(t, { tokenLimit: { continuePrompt: "Continue" } });
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    const text = h.api.sentUserMessages[0].content;
+    assert.deepEqual(await h.emit("input", { source: "extension", text }), { action: "transform", text: "Continue" });
+    t.mock.timers.tick(30000);
+    assert.ok(h.notifications.some((n) => /Continuation did not start within 30s/.test(n.message)));
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("clears the submission watchdog once its user message starts", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    t.mock.timers.tick(1000);
+    await h.acceptRetry();
+    t.mock.timers.tick(60000);
+    assert.equal(h.notifications.some((n) => /did not start/.test(n.message)), false);
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    assert.ok(h.notifications.some((n) => /Response completed after 1 retry/.test(n.message)));
+  });
+});
+
+describe("input and cancellation", () => {
+  for (const source of ["interactive", "rpc", "extension"]) {
+    it(`passes ${source} input through and cancels the pending continuation`, async (t) => {
+      const h = harness(t);
+      await h.settle();
+      assert.deepEqual(await h.emit("input", { source, text: "Do something else" }), { action: "continue" });
+      await h.emit("agent_settled");
+      t.mock.timers.tick(60000);
+      assert.equal(h.api.sentUserMessages.length, 0);
+    });
+  }
+
+  it("does not treat a third party's matching prompt as its own while waiting", async (t) => {
+    const h = harness(t, { tokenLimit: { continuePrompt: "Continue" } });
+    await h.settle(assistant({ stopReason: "length" }));
+    assert.deepEqual(await h.emit("input", { source: "extension", text: "Continue" }), { action: "continue" });
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("rejects only its own stale in-flight submission after cancellation", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    t.mock.timers.tick(1000);
+    await h.command("off");
+    const text = h.api.sentUserMessages[0].content;
+    assert.deepEqual(await h.emit("input", { source: "extension", text }), { action: "handled" });
+    assert.deepEqual(await h.emit("input", { source: "extension", text: "External follow-up" }), { action: "continue" });
+  });
+
+  it("never claims a third party's identical prompt while its own submission is in flight", async (t) => {
+    const h = harness(t, { tokenLimit: { continuePrompt: "Continue" } });
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    const ownText = h.api.sentUserMessages[0].content;
+    assert.deepEqual(await h.emit("input", { source: "extension", text: "Continue" }), { action: "continue" });
+    assert.deepEqual(await h.emit("input", { source: "extension", text: ownText }), { action: "handled" });
+    assert.deepEqual(await h.emit("input", { source: "extension", text: "Continue" }), { action: "continue" });
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("allows fresh input to start a new independent recovery budget", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    await h.start("New task", "rpc");
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    assert.match(h.notifications.at(-1)?.message ?? "", /attempt #1/);
+  });
+
+  for (const event of ["session_before_switch", "session_before_fork", "session_before_tree", "session_tree", "session_shutdown", "model_select"]) {
+    it(`cancels waits on ${event}`, async (t) => {
+      const h = harness(t);
+      await h.settle();
+      await h.emit(event);
+      t.mock.timers.tick(60000);
+      await h.emit("agent_settled");
+      assert.equal(h.api.sentUserMessages.length, 0);
+    });
+  }
+
+  for (const args of ["off", "reset"]) {
+    it(`cancels waits on /auto-continue ${args}`, async (t) => {
+      const h = harness(t);
+      await h.settle();
+      await h.command(args);
+      t.mock.timers.tick(60000);
+      assert.equal(h.api.sentUserMessages.length, 0);
+    });
+  }
+
+  it("validates session and model identity again at dispatch", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    h.state.sessionId = "different-session";
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    await h.start("new task");
+    await h.settle();
+    assert.ok(h.ctx.model);
+    h.ctx.model = { ...h.ctx.model, id: "different-model" };
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("keeps abort monitoring when Pi starts the turn before emitting the user message", async (t) => {
+    const h = harness(t);
+    await h.start("Start a task");
+    await h.emit("message_end", { message: assistant() });
+    h.abortController.abort();
+    h.state.idle = true;
+    await h.emit("agent_settled");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("never resurrects an aborted assistant message even with cached 429", async (t) => {
+    const h = harness(t);
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 429, headers: {} });
+    await h.settle(assistant({ stopReason: "aborted", errorMessage: "Request timed out." }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  for (const key of ["\x1b", "\x03", "\x1b[27u", "\x1b[99;5u"]) {
+    it(`cancels a TUI wait with ${JSON.stringify(key)} without consuming the key`, async (t) => {
+      const h = harness(t, {}, true);
+      await h.emit("session_start");
+      await h.settle();
+      for (const handler of h.terminalHandlers) assert.equal(handler(key), undefined);
+      t.mock.timers.tick(60000);
+      assert.equal(h.api.sentUserMessages.length, 0);
+      await h.emit("session_shutdown");
+      assert.equal(h.terminalHandlers.size, 0);
+    });
+  }
+
+  it("detaches old terminal listeners on session restart and ignores ordinary keys", async (t) => {
+    const h = harness(t, {}, true);
+    await h.emit("session_start");
+    await h.emit("session_start");
+    assert.equal(h.terminalHandlers.size, 1);
+    await h.settle();
+    for (const handler of h.terminalHandlers) handler("a");
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+});
+
+describe("HTTP correlation and compaction", () => {
+  it("does not apply an old HTTP failure to a successful reply", async (t) => {
+    const h = harness(t);
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 429, headers: { "retry-after": "30" } });
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("clears HTTP metadata before another provider request and after a message", async (t) => {
+    const h = harness(t);
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 429, headers: {} });
+    await h.emit("before_provider_request");
+    await h.settle(assistant({ errorMessage: "Unknown failure" }));
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 429, headers: {} });
+    await h.emit("message_end", { message: assistant() });
+    await h.settle(assistant({ errorMessage: "Unknown failure" }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("uses the latest response's remaining reset delay after native retries", async (t) => {
+    const h = harness(t);
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 429, headers: { "retry-after": "10" } });
+    await h.emit("message_end", { message: assistant() });
+    t.mock.timers.tick(3000);
+    await h.emit("agent_settled");
+    assert.ok(h.notifications.some((n) => /Waiting 8s/.test(n.message)));
+    t.mock.timers.tick(7999);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(1);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    await h.command("status");
+    assert.match(h.notifications.at(-1)?.message ?? "", /Expected token reset time: 2026-09-02 12:00:10/);
+  });
+
+  it("does not expire HTTP metadata just because tools or settlement took over 30s", async (t) => {
+    const h = harness(t);
+    await h.emit("turn_start");
+    await h.emit("after_provider_response", { status: 503, headers: {} });
+    t.mock.timers.tick(60000);
+    await h.settle(assistant({ errorMessage: "Opaque provider error" }));
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("ignores summarizer HTTP responses outside an assistant turn", async (t) => {
+    const h = harness(t);
+    await h.emit("after_provider_response", { status: 429, headers: { "retry-after": "10" } });
+    await h.settle(assistant({ errorMessage: "Opaque provider error" }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    await h.emit("turn_start");
+    await h.emit("message_end", { message: assistant({ errorMessage: "Opaque provider error" }) });
+    await h.emit("turn_end");
+    await h.emit("after_provider_response", { status: 503, headers: {} });
+    await h.emit("agent_settled");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("leaves overflow recovery entirely to Pi compaction", async (t) => {
+    const h = harness(t);
+    await h.emit("message_end", { message: assistant({ errorMessage: "maximum context length exceeded" }) });
+    await h.emit("session_before_compact", { reason: "overflow", willRetry: true });
+    await h.emit("after_provider_response", { status: 429, headers: {} });
+    await h.emit("session_compact", { reason: "overflow", willRetry: true });
+    await h.emit("agent_start");
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.equal(h.notifications.length, 0);
+  });
+
+  it("can continue truncation after successful threshold compaction", async (t) => {
+    const h = harness(t);
+    await h.emit("message_end", { message: assistant({ stopReason: "length" }) });
+    await h.emit("session_before_compact", { reason: "threshold", willRetry: false });
+    await h.emit("session_compact", { reason: "threshold", willRetry: false });
+    await h.emit("agent_settled");
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("stops rather than continuing when compaction fails or is cancelled", async (t) => {
+    const h = harness(t);
+    await h.emit("message_end", { message: assistant({ stopReason: "length" }) });
+    await h.emit("session_before_compact", { reason: "threshold", willRetry: false });
+    await h.emit("session_compact_failed", { aborted: true });
+    await h.emit("agent_settled");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+  });
+
+  it("reports unrecovered context and fatal failures without retrying", async (t) => {
+    const h = harness(t);
+    await h.settle(assistant({ errorMessage: "maximum context length exceeded" }));
+    await h.settle(assistant({ errorMessage: "payment required", stopReason: "error" }));
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.ok(h.notifications.some((n) => /Pi owns compaction/.test(n.message)));
+    assert.ok(h.notifications.some((n) => n.type === "error" && /Non-retryable/.test(n.message)));
+  });
+});
+
+describe("commands and subagent guards", () => {
+  it("keeps status timestamped and reports actual configured delays", async (t) => {
+    const h = harness(t);
+    for (const command of ["on", "off", "reset", "status"]) await h.command(command);
+    for (const notification of h.notifications) {
+      assert.match(notification.message, /^\[auto-continue\] \[\d{2}:\d{2}:\d{2}\]/);
     }
+    const status = h.notifications.at(-1)?.message ?? "";
+    assert.match(status, /Base delay: 1s/);
+    assert.match(status, /Max delay: 10s/);
+    assert.match(status, /Max retries: 5h/);
+    assert.match(status, /Current retry status: Idle/);
   });
 
-  it("displays custom rateLimit.maxDelayMs and rateLimit.maxRetries in /auto-continue status", async () => {
-    const customTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-custom-limits-"));
-    const customSettings = path.join(customTmp, "settings.json");
-    fs.writeFileSync(
-      customSettings,
-      JSON.stringify({
-        autoContinue: {
-          enabled: true,
-          rateLimit: {
-            maxDelayMs: "2m",
-            maxRetries: 10,
-          },
-        },
-      })
-    );
-
-    try {
-      const pi = new MockExtensionAPI();
-      extension(pi as any, customSettings);
-
-      const ctx = new MockContext();
-      const cmd = pi.commands.get("auto-continue");
-      await cmd.handler("status", ctx);
-
-      assert.equal(ctx.notifications.length, 1);
-      const msg = ctx.notifications[0].message;
-      assert.ok(msg.includes("Max delay: 2m"));
-      assert.ok(msg.includes("Max retries: 10"));
-    } finally {
-      fs.rmSync(customTmp, { recursive: true, force: true });
-    }
+  it("validates scheduled retry commands without starting work", async (t) => {
+    const h = harness(t);
+    await h.command("at");
+    await h.command("at 25:99");
+    await h.command("unknown");
+    assert.match(h.notifications[0].message, /Please specify a time/);
+    assert.match(h.notifications[1].message, /Invalid time format/);
+    assert.match(h.notifications[2].message, /Usage:/);
+    assert.equal(h.api.sentUserMessages.length, 0);
   });
 
-  it("prints expected token reset time in YYYY-MM-DD HH:MM:SS format when Retry-After header is received", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Provider sends 429 with retry-after header (20ms delay for fast test execution)
-    await pi.emit(
-      "after_provider_response",
-      {
-        status: 429,
-        headers: { "retry-after": "0.02" },
-      },
-      ctx
-    );
-
-    // Message ends with rate limit error
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "HTTP 429 Too Many Requests",
-          timestamp: 5000,
-        },
-      },
-      ctx
-    );
-
-    // 1. Notification should contain Expected token reset time in YYYY-MM-DD HH:MM:SS format
-    const warningNotif = ctx.notifications.find((n) =>
-      n.message.includes("Rate limit / quota error detected")
-    );
-    assert.ok(warningNotif, "Warning notification should be emitted");
-    assert.ok(
-      warningNotif.message.includes("Expected token reset time:"),
-      "Should include expected token reset time label"
-    );
-    const dateRegex = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
-    assert.ok(
-      dateRegex.test(warningNotif.message),
-      `Expected date format YYYY-MM-DD HH:MM:SS in notification: ${warningNotif.message}`
-    );
-
-    // 2. Status command should also display the expected token reset time in YYYY-MM-DD HH:MM:SS format
-    const cmd = pi.commands.get("auto-continue");
-    await cmd.handler("status", ctx);
-
-    const statusNotif = ctx.notifications.find((n) =>
-      n.message.includes("Auto-Continue Status:")
-    );
-    assert.ok(statusNotif, "Status notification should be emitted");
-    assert.ok(
-      statusNotif.message.includes("Expected token reset time:"),
-      "Status should print expected token reset time"
-    );
-    assert.ok(
-      dateRegex.test(statusNotif.message),
-      `Expected date format YYYY-MM-DD HH:MM:SS in status: ${statusNotif.message}`
-    );
+  it("schedules a single manual retry and postpones dispatch while Pi is busy", async (t) => {
+    const h = harness(t);
+    await h.command("at 12:00:05");
+    h.state.idle = false;
+    t.mock.timers.tick(5000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    h.state.idle = true;
+    await h.emit("agent_settled");
+    assert.equal(h.api.sentUserMessages.length, 1);
+    await h.emit("agent_settled");
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 
-  it("handles consecutive token continuations and notifies completion on settle", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Continuation 1: attempt #1
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "length",
-          content: [{ type: "text", text: "Part 1..." }],
-          timestamp: 10000,
-        },
-      },
-      ctx
-    );
-
-    assert.equal(pi.sentUserMessages.length, 1);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("attempt #1") && n.message.includes("Response truncated")
-      )
-    );
-
-    // Continuation 2: attempt #2
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "length",
-          content: [{ type: "text", text: "Part 2..." }],
-          timestamp: 10001,
-        },
-      },
-      ctx
-    );
-
-    assert.equal(pi.sentUserMessages.length, 2);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("attempt #2") && n.message.includes("Response truncated")
-      )
-    );
-
-    // Settle -> completion notice with attempt count 2
-    await pi.emit("agent_settled", {}, ctx);
-    assert.ok(
-      ctx.notifications.some(
-        (n) =>
-          n.message.includes("Successfully completed response after 2 continuation attempt(s)") &&
-          n.type === "info"
-      )
-    );
+  it("polls a due manual schedule while busy even without another settlement event", async (t) => {
+    const h = harness(t);
+    await h.command("at 12:00:05");
+    h.state.idle = false;
+    t.mock.timers.tick(5000);
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    h.state.idle = true;
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 
-  it("consolidates attempt counter across token truncation followed by rate limit retry", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-
-    // Attempt 1: Token limit truncation
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "length",
-          content: [{ type: "text", text: "Partially emitted code..." }],
-          timestamp: 20000,
-        },
-      },
-      ctx
-    );
-    assert.equal(pi.sentUserMessages.length, 1);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("attempt #1") && n.message.includes("Response truncated")
-      )
-    );
-
-    // Attempt 2: Rate limit error when agent continues
-    await pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "Rate limit reached (429)",
-          timestamp: 20001,
-        },
-      },
-      ctx
-    );
-    assert.equal(pi.sentUserMessages.length, 2);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("attempt #2") && n.message.includes("Rate limit / quota error")
-      )
-    );
-
-    // Settle -> recovery notice with attempt count 2
-    await pi.emit("agent_settled", {}, ctx);
-    assert.ok(
-      ctx.notifications.some(
-        (n) =>
-          n.message.includes("Successfully recovered from rate limit after 2 retry attempt(s)") &&
-          n.type === "info"
-      )
-    );
+  it("replaces a manual schedule and cancels it for fresh input", async (t) => {
+    const h = harness(t);
+    await h.command("at 12:00:05");
+    await h.command("at 12:00:10");
+    t.mock.timers.tick(5000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    await h.emit("input", { source: "rpc", text: "cancel" });
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
   });
 
-  it("handles /auto-continue at <HH:MM> command and prints retry notice", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
+  for (const key of ["PI_SUBAGENT_SESSION", "PI_SUBAGENT_ID"]) {
+    it(`is inactive by default when ${key} is set`, async (t) => {
+      process.env[key] = "child";
+      t.after(() => { delete process.env[key]; });
+      const h = harness(t);
+      await h.settle();
+      t.mock.timers.tick(60000);
+      assert.equal(h.api.sentUserMessages.length, 0);
+      assert.equal(await h.emit("before_agent_start", { systemPrompt: "Base." }), undefined);
+    });
+  }
 
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-    assert.ok(cmd, "auto-continue command should be registered");
-
-    // Target 1 hour in the future
-    const d = new Date(Date.now() + 3600000);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const timeStr = `${hh}:${mm}`;
-
-    await cmd.handler(`at ${timeStr}`, ctx);
-
-    // Should emit retry notice: "Waiting XXs before retry (attempt #1, elapsed: 0s / max: 5h)..."
-    const retryNotif = ctx.notifications.find((n) =>
-      n.message.includes("before retry (attempt #1, elapsed: 0s / max: 5h")
-    );
-    assert.ok(retryNotif, "Retry notification should be emitted");
-    assert.ok(retryNotif.message.includes("Waiting"), "Notification should include 'Waiting'");
-    assert.ok(
-      retryNotif.message.includes("attempt #1, elapsed: 0s / max: 5h"),
-      `Notification should format attempt and elapsed: ${retryNotif.message}`
-    );
-    assert.ok(
-      retryNotif.message.includes("Expected token reset time:"),
-      "Notification should include expected token reset time"
-    );
-    assert.equal(retryNotif.type, "warning");
-
-    // Status command should reflect active retry loop and expected token reset time
-    await cmd.handler("status", ctx);
-    const statusNotif = ctx.notifications.find((n) =>
-      n.message.includes("Auto-Continue Status:")
-    );
-    assert.ok(statusNotif, "Status notification should be emitted");
-    assert.ok(
-      statusNotif.message.includes("Active (attempt #1"),
-      "Status should report active attempt #1"
-    );
-    assert.ok(
-      statusNotif.message.includes("Expected token reset time:"),
-      "Status should report expected reset time"
-    );
-
-    // Clean up timer
-    await cmd.handler("reset", ctx);
+  it("supports an explicit subagent opt-in", async (t) => {
+    process.env.PI_SUBAGENT_ID = "child";
+    t.after(() => { delete process.env.PI_SUBAGENT_ID; });
+    const h = harness(t, { subagent: true });
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 
-  it("validates arguments for /auto-continue at command", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-
-    // Missing time argument
-    await cmd.handler("at", ctx);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes("Please specify a time in HH:MM format") && n.type === "warning"
-      )
-    );
-
-    // Invalid time argument
-    await cmd.handler("at 25:99", ctx);
-    assert.ok(
-      ctx.notifications.some(
-        (n) => n.message.includes('Invalid time format "25:99"') && n.type === "warning"
-      )
-    );
+  it("blocks all recovery after a successful done-tool and re-arms on fresh user input", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    await h.emit("tool_execution_end", { toolName: "subagent_done", isError: false });
+    await h.settle(assistant({ stopReason: "length" }));
+    await h.command("at 12:00:05");
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    await h.command("off");
+    await h.start("Keep going", "rpc");
+    await h.command("on");
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 
-  it("cancels scheduled retry when interactive user input is received", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const cmd = pi.commands.get("auto-continue");
-
-    const d = new Date(Date.now() + 3600000);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-
-    // Schedule retry
-    await cmd.handler(`at ${hh}:${mm}`, ctx);
-
-    // Interactive user input arrives
-    await pi.emit("input", { source: "interactive", text: "cancel task" }, ctx);
-
-    assert.ok(
-      ctx.notifications.some(
-        (n) =>
-          n.message.includes("🛑 User input received: cancelling active retry/continuation loop.") &&
-          n.type === "info"
-      )
-    );
-
-    // Status should be Idle
-    ctx.notifications = [];
-    await cmd.handler("status", ctx);
-    const statusNotif = ctx.notifications.find((n) =>
-      n.message.includes("Auto-Continue Status:")
-    );
-    assert.ok(
-      statusNotif?.message.includes("Current retry status: Idle"),
-      "Retry state should be reset to Idle"
-    );
+  it("does not re-arm a done session for third-party extension input", async (t) => {
+    const h = harness(t);
+    await h.emit("tool_execution_end", { toolName: "subagent_done", isError: false });
+    await h.start("External prompt", "extension");
+    await h.settle();
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 0);
   });
 
-  it("correctly parses ChatGPT usage limit error, extracts estimated token reset time, and notifies UI", async () => {
-    const pi = new MockExtensionAPI();
-    extension(pi as any, testSettingsPath);
-
-    const ctx = new MockContext();
-    const chatGptError = '"You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min.';
-
-    // Emit message_end with ChatGPT error (starts retry wait asynchronously)
-    const messagePromise = pi.emit(
-      "message_end",
-      {
-        message: {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: chatGptError,
-          timestamp: 5000,
-        },
-      },
-      ctx
-    );
-
-    // Yield to allow message_end handler to process up to sleep
-    await new Promise((resolve) => setImmediate(resolve));
-
-    // 1. Warning notification emitted with expected reset time
-    const warningNotif = ctx.notifications.find((n) =>
-      n.message.includes("Rate limit / quota error detected")
-    );
-    assert.ok(warningNotif, "Warning notification should be emitted");
-    assert.ok(
-      warningNotif.message.includes("Expected token reset time:"),
-      "Warning notification should include Expected token reset time label"
-    );
-    const dateRegex = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
-    assert.ok(
-      dateRegex.test(warningNotif.message),
-      `Expected date format YYYY-MM-DD HH:MM:SS in notification: ${warningNotif.message}`
-    );
-
-    // 2. Status command should also display expected token reset time
-    const cmd = pi.commands.get("auto-continue");
-    await cmd.handler("status", ctx);
-
-    const statusNotif = ctx.notifications.find((n) =>
-      n.message.includes("Auto-Continue Status:")
-    );
-    assert.ok(statusNotif, "Status notification should be emitted");
-    assert.ok(
-      statusNotif.message.includes("Expected token reset time:"),
-      "Status should print expected token reset time"
-    );
-    assert.ok(
-      dateRegex.test(statusNotif.message),
-      `Expected date format YYYY-MM-DD HH:MM:SS in status: ${statusNotif.message}`
-    );
-
-    // Cancel retry wait via interactive input to cleanly terminate promise
-    await pi.emit(
-      "input",
-      { type: "input", source: "interactive", text: "cancel" },
-      ctx
-    );
-    await messagePromise;
+  it("does not block recovery if the done-tool failed", async (t) => {
+    const h = harness(t);
+    await h.emit("tool_execution_end", { toolName: "subagent_done", isError: true });
+    await h.settle();
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
   });
 });

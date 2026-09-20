@@ -12,12 +12,10 @@ export interface RateLimitConfig {
   /** Whether to add random jitter (±15%) to retry delays (default: true) */
   jitter: boolean;
   /**
-   * Let terminal signals outrank a retryable HTTP status code:
-   *   - HTTP 401/403 and quota-exhaustion / billing text stop the retry loop
-   *     instead of being retried for the whole rateLimit budget.
-   *   - Context-window overflow defers to Pi's auto-compaction as it always should.
-   * Messages that state their own reset window ("try again in 20s",
-   * "within 1 minutes") stay retryable. Default false = upstream behavior.
+   * Stop ambiguous quota-exhaustion errors unless a timed/recurring reset
+   * signal is present (default: false). Hard billing/authentication failures,
+   * cancellation, invalid requests, and context overflow take precedence over
+   * retryable HTTP status codes regardless of this option.
    */
   fatalFirst?: boolean;
   /**
@@ -61,6 +59,13 @@ export interface IncompleteToolCallConfig {
 export interface AutoContinueConfig {
   /** Master switch to enable/disable auto-continue (default: true) */
   enabled: boolean;
+  /**
+   * Allow auto-retry/continuation wiring inside subagent sessions (herdr et al.).
+   * A subagent must never resurrect itself after its done-tool ran: the parent
+   * owns settlement. Default false — running under PI_SUBAGENT_SESSION/PI_SUBAGENT_ID
+   * disables the retry wiring unless this is explicitly true.
+   */
+  subagent: boolean;
   /** Base delay in ms for exponential backoff (default: 5,000 ms = 5 seconds) */
   baseDelayMs: number;
   /** Maximum single delay in ms (default: 600,000 ms = 10 minutes) */
