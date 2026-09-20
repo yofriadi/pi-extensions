@@ -7,14 +7,14 @@ default_install_hook_types = ["pre-commit"]
 [[repos]]
 repo = "builtin"
 hooks = [
-    { id = "trailing-whitespace", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/''' },
-    { id = "end-of-file-fixer", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/''' },
+    { id = "trailing-whitespace", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/|packages/archived/''' },
+    { id = "end-of-file-fixer", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/|packages/pi-tilth/test/fixtures/|packages/archived/''' },
     { id = "check-added-large-files" },
 ]
 
 [[repos]]
 repo = "local"
 hooks = [
-    { id = "biome", name = "biome", entry = "pnpm exec biome check --write --files-ignore-unknown=true", language = "system", types_or = ["javascript", "jsx", "ts", "tsx", "json"], exclude = '''packages/(pi-auto-continue|pi-permission-system)/''' },
-    { id = "rumdl", name = "rumdl", entry = "pnpm exec rumdl fmt", language = "system", files = "\\.md$", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/''' },
+    { id = "biome", name = "biome", entry = "pnpm exec biome check --write --files-ignore-unknown=true", language = "system", types_or = ["javascript", "jsx", "ts", "tsx", "json"], exclude = '''packages/(pi-auto-continue|pi-permission-system|pi-condense|pi-cc-ui|pi-hashline-edit|pi-colgrep)/|packages/archived/''' },
+    { id = "rumdl", name = "rumdl", entry = "pnpm exec rumdl fmt", language = "system", files = "\\.md$", exclude = '''packages/(pi-accounts|pi-condense|pi-session-recap|pi-auto-continue|pi-permission-system)/|packages/pi-provider-antigravity/src/vendor/|packages/archived/''' },
 ]
