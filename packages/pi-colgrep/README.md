@@ -18,7 +18,10 @@ Upstream remains the source of truth for search behaviour; this fork exists to c
 1. `skills/colgrep/SKILL.md` sets `disable-model-invocation: true`.
    The skill guidance is documentation the model fetches on demand rather than an always-resident entry in `<available_skills>`; the `colgrep` tool itself is unaffected.
    Rationale: the tool-selection rule already lives in the system prompt, so the resident entry duplicated it at ~55 tokens per session.
-2. `typebox` moved from `devDependencies` to `dependencies` — it is imported at runtime by `src/tools/colgrep.ts`, which only worked upstream because the npm install tree happened to resolve it.
+2. `typebox` is declared in `peerDependencies` as `"*"`, not `dependencies`, plus an exact `devDependencies` pin that only `tsc` uses.
+   The extension imports it at runtime in `src/tools/colgrep.ts`, but pi's loader intercepts the bare `typebox` specifier and serves the copy pi bundles, so the host always supplies the module.
+   Current pi warns when a host-provided package is listed under `dependencies`, and an earlier fork revision moved it there to guarantee resolution — unnecessary, and it now trips that warning.
+   Keep the peer + dev-pin shape when syncing from upstream, and keep the pin on the `typebox` version the current pi host bundles.
 
 ## Updating from upstream
 

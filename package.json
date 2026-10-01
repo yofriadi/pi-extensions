@@ -8,7 +8,7 @@
 		"update:pi-accounts": "bash scripts/update-pi-accounts-subtree.sh",
 		"update:pi-condense": "bash scripts/update-pi-condense-subtree.sh",
 		"update:session-recap": "bash scripts/update-session-recap-subtree.sh",
-		"check": "biome check . && pnpm --filter @yofriadi/pi-condense run typecheck && pnpm --filter @yofriadi/pi-tilth run check && pnpm --filter @yofriadi/pi-colgrep run typecheck && tsc --noEmit -p packages/pi-event-sounds/tsconfig.json && tsc --noEmit -p packages/pi-permission-system/tsconfig.json && tsc --noEmit -p packages/pi-thinking-preview/tsconfig.json",
+		"check": "node scripts/check-host-provided-deps.mjs && biome check . && pnpm --filter @yofriadi/pi-condense run typecheck && pnpm --filter @yofriadi/pi-tilth run check && pnpm --filter @yofriadi/pi-colgrep run typecheck && tsc --noEmit -p packages/pi-event-sounds/tsconfig.json && tsc --noEmit -p packages/pi-permission-system/tsconfig.json && tsc --noEmit -p packages/pi-thinking-preview/tsconfig.json && tsc --noEmit -p packages/pi-provider-cline/tsconfig.json",
 		"check:fix": "biome check --write .",
 		"prepare": "prek install",
 		"fallow": "fallow",

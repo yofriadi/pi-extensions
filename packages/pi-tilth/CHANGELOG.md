@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Packaging: `typebox` moved out of `dependencies` into `peerDependencies` as `"*"`, with an exact `devDependencies` pin (`1.3.27`) matching the copy the pi 0.99.2 host bundles. pi's resource loader warns when a host-provided package is declared under `dependencies`. Runtime behaviour is unchanged: the loader intercepts the bare `typebox` specifier — jiti alias in built mode, virtual module in compiled and TS-source modes — and serves pi's own copy ahead of node resolution, so no duplicate instance was ever observable. `pi install` never resolves peers, so a managed tree no longer carries a second copy either.
+- Test host bumped to `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` `0.99.2` as devDependencies (the `>=0.75.0` peers are unchanged), so `discoverAndLoadExtensions` exercises the loader production runs instead of 0.84.3. That also closes a version split: the 0.84.3 alias served `typebox` 1.3.7 to loader-path tests while direct source imports resolved the pinned 1.3.27, and `tsc` loaded both declaration trees in one program. Both paths now see 1.3.27. New `test/host-deps.test.ts` locks the invariants: `typebox` stays a `"*"` peer and never a runtime dependency, and the devDependency pin must equal the `typebox` the resolved host bundles.
+- Repo guard `scripts/check-host-provided-deps.mjs`, wired into the root `pnpm run check`, fails when any `packages/*/package.json` declares a host-provided package (`typebox`, `@sinclair/typebox`, `@earendil-works/pi-*`, `@mariozechner/pi-*`) under `dependencies` or `optionalDependencies`; the rule is recorded in the root `AGENTS.md`.
+
 ### Fixed (post-review)
 
 - Mis-scoped keep-alive calls: the server resolves an *omitted* `scope` to its own process cwd (a keep-alive mcporter daemon spawns it in `~/.mcporter`) and ignores `root` for that purpose, so bare `tilth_search`/`tilth_list`/`tilth_grok`/`tilth_deps` calls silently searched the daemon directory. The extension now injects `scope: <resolved root>` on those tools when the caller supplies none; explicit `scope` is never overridden and `tilth_read`/`tilth_diff` (whose `scope` is an output filter) receive no injection.
