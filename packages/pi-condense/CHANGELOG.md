@@ -9,9 +9,87 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
-- **Upstream sync complete.** Rebased the local layer on upstream v2.9.0 through the `yofriadi/pi-condense` fork's `local/main`, retaining standalone TypeScript 7 checks, flush pacing, Antigravity host-registry summarizer dispatch, and the local OpenSpec/.pi scaffolding. `summarizer-fallback-model` remains unimplemented (0/21 tasks complete); implement it from this fork tip rather than the former v2.5.0 subtree base.
+- **Synced to upstream v2.11.2.** Rebased the local layer (19 commits) from the v2.9.0 base onto upstream `04a64d2` in the `yofriadi/pi-condense` fork; the local package becomes `2.11.3` under the version policy. Adopted: the orphan-sweep barrier for foreign messages (#11), the session-wide live turn index that un-breaks mid-run auto-flush triggers after a human reply (#16), fail-closed `saveConfig` (#15), 255-byte spill sidecar basenames (#14), protected-path supersession, `gauntlet-overrides.md` protected by default, custom-message chain anchors with the opt-in `frontierGapThresholdTokens` trigger, the per-request `maxImagesPerRequest` cap, image-honest frontier-gap pricing, image-aware summaries with original image blocks from `context_tree_query`, and the footer and startup-widget declutter.
+- **Local layer retained, and monorepo-only work moved into the fork.** Flush pacing, Antigravity host-registry summarizer dispatch, standalone TypeScript 7 checks, the OpenSpec/`.pi` scaffolding, and the scoped release identity survive the rebase. Upstream's new `#16` and supersede-floor cases in `src/reload-rearm.integration.test.ts` and its image-marker prompt case in `src/summarizer.test.ts` run on the host-registry harness instead of a `pi-ai/compat` mock. The `<context-prune-summary>` wrapper feature and the `proactive-budget-tiers` change were committed directly in the monorepo against the layered-fork model; both are now fork commits, and the fork tree is the only source of package content again.
+- **Release helper adopts upstream's CHANGELOG promotion.** `release.sh` promotes `## [Unreleased]` to `## [X.Y.Z] - <date>` inside the single `Release X.Y.Z` commit and stops before any mutation when that section is missing or empty. The fork's hardening is unchanged: plain-version assertion, nearest-SemVer tag selection that ignores baseline tags, local and remote tag collision checks, atomic branch-plus-tag push, typecheck-before-test pre-flight, and scoped/legacy pin migration. `scripts/test-release-helper.sh` now covers the CHANGELOG gate.
+- **Local CHANGELOG section renumbered.** Upstream shipped its own `## [2.9.1] - 2026-08-18` (#11); the local `## [2.9.1] - 2026-08-12` (flush pacing, published as `@yofriadi/pi-condense@2.9.1`) becomes `## [2.9.1+local] - 2026-08-12`.
+- **Version note.** `@yofriadi/pi-condense@3.9.1` was published to npm on 2026-08-19 from the monorepo, outside the fork's release path. This sync uses the policy version `2.11.3`; publishing it moves the `latest` dist-tag below `3.9.1`, so deprecating `3.9.1` or amending the version policy is an explicit release decision and not part of the sync.
+- **Active local changes.** `add-summary-context-wrapper` is implemented (14/14 tasks) and stays active pending its own archive. `proactive-budget-tiers` is spec-only (0/25) and its integration suite is `describe.skip`-guarded because 19 cases assert behavior that does not exist yet; implementing it now has to account for upstream's trigger precedence (budget, then delta, then frontier-gap). `summarizer-fallback-model` is spec-only (0/21). This fork tip is the implementation base for all three. The authenticated real-session Antigravity smoke remains pending.
 
-## [2.9.1] - 2026-08-12
+## [2.11.2] - 2026-09-29
+
+### Fixed
+
+- Summaries of image-bearing tool results now say an image was returned instead of reporting the read as empty; the summarizer is told never to describe an image it cannot see.
+- `context_tree_query` returns the original image blocks of a pruned image result instead of only its text.
+- Pre-flush dedup no longer aliases different screenshots whose tool text is identical; image data is part of the dedup key.
+- The live reclaim figure prices image blocks at the flat 1,600-token estimate instead of counting base64 as text.
+
+## [2.11.1] - 2026-09-29
+
+### Fixed
+
+- The frontier-gap metric prices image blocks at a flat estimate instead of counting base64 as text, so screenshot reads no longer trigger a premature frontier-gap flush that prunes images before the model sees them.
+
+## [2.11.0] - 2026-09-24
+
+### Added
+
+- **Per-request image cap (`maxImagesPerRequest`).** Every image a model has seen stays in the transcript, so a session that reads many images eventually sends more than a provider accepts in one request - one gateway answers `Too many images in request: 31 > 30` - and then fails on every request, including after a resume. When set, the `context` handler replaces the oldest `image` blocks with a text note once a request carries more than N, in steps of half of N so the prompt prefix - and with it the provider's prompt cache - changes only once per step; the session file is untouched. It runs even with `enabled: false`, since it guards request validity rather than context size. Default `null` applies the built-in limit of the model's wire API - `100` for `anthropic-messages`, the documented Anthropic maximum; no cap for other APIs - and a number overrides it for every API. Config-file-only.
+
+## [2.10.6] - 2026-09-19
+
+### Fixed
+
+- `showPruneStatusLine: false` now also suppresses the transient `pruner loaded` startup widget on new and restored sessions.
+
+## [2.10.5] - 2026-09-15
+
+### Fixed
+
+- Mid-run auto-flush triggers (budget, delta, frontier-gap) stayed dead after every human reply until the new run's per-run turn index caught up with the session-wide persisted frontier: live `turn_end` batches carried Pi's run-local `event.turnIndex` while the frontier counts assistant messages session-wide. Live capture now derives the session-wide index from the session branch. Flush metrics entries gain a `stubCount` field. (#16)
+
+## [2.10.4] - 2026-09-15
+
+### Fixed
+
+- `saveConfig` no longer overwrites a `settings.json` it could not read as a JSON object (unreadable, truncated, or non-object); only a missing file starts from empty. A failed `/pruner` save now shows an error notification naming the file instead of an unhandled promise rejection; the change still applies to the current session. (#15)
+
+### Changed
+
+- `release.sh <level>` promotes the CHANGELOG `## [Unreleased]` section to the versioned heading and commits it with `package.json` in the single `Release X.Y.Z` commit; a missing or empty section fails the run. New CONFIG field `CHANGELOG_HEADING`.
+- Release skill: a user instruction naming the level is the approval - no proposal step or re-confirmation; bundled follow-ups run after `verify`.
+- AGENTS.md rewritten to always-on essentials plus routing; shared core bumped to v3. Session entry types table moved to `PRUNING.md`.
+- `.pi/gauntlet-overrides.md` gains `tracker: github`, the release path, and a write-gate carve-out for user-named writes; the Tickets section is superseded by the core Ticket convention.
+
+## [2.10.3] - 2026-09-07
+
+- **Protected-path supersession.** Only the newest read of a protected path (`protectedPaths` / `protectedTools` calls with a string `path`) stays verbatim; earlier reads of the same path become a one-line `[Superseded: ...]` stub. Applied at render time (`pruneMessages` phase 1b, `src/supersede.ts`) and only when the pruner is already rewriting at or before that position, or on a cold-cache event (`session_start`, `session_tree`, `model_select`, `session_compact`, `thinking_level_select`) - never as the sole mid-prefix change. No new session entry, index record, or config key; supersession stops exactly when no protected call remains (`protectedPaths: []` with the default `protectedTools: []`); a read protected by tool name alone still participates. Spec: `doc/specs/2026-09-07-protected-path-supersede.md` (partially supersedes the 2026-06-11 protected-paths spec's "verbatim forever" edge case).
+
+## [2.10.2] - 2026-09-06
+
+- Protect `gauntlet-overrides.md` reads by default alongside skill files, including `.pi/` and `doc/` paths, so per-repo harness contracts survive context pruning. User-supplied `protectedPaths` still replaces the defaults; path matching remains limited to `args.path`.
+
+## [2.10.1] - 2026-09-02
+
+- **Spill sidecar basenames capped at 255 bytes ([#14](https://github.com/jjuraszek/pi-condense/issues/14)).** Providers emitting 300+ char tool-call ids drove `blobPathFor` past the filesystem basename limit: eager spill failed silently (`ENAMETOOLONG` caught, oversized result stayed inline and bloated context) and the deterministic backfill aborted fail-closed. Fitting names stay byte-identical; over-limit names become `<234-byte sanitized prefix>.<16-hex sha1 of the unsanitized occurrence key>.txt` (exactly 255 bytes). The `.` separator is unreachable by `sanitizeId`, so capped names are namespace-disjoint from short-key names by construction - no probe, no migration, persisted `spillPath` read-back unchanged. Spec: `doc/specs/2026-09-02-gh-14-spill-filename-cap.md` (partially supersedes the 2026-06-02 spill spec's filename derivation).
+
+## [2.10.0] - 2026-09-01
+
+- **Custom-message chain anchors ([#13](https://github.com/jjuraszek/pi-condense/issues/13)).** A non-pruner `role: "custom"` message (`customType` not prefixed `context-prune-`) can now open a chain, but only while the chain detector is idle - a non-pruner custom seen mid-chain stays passthrough, not a new anchor. `resolveRange` accepts these as start anchors fail-closed; persisted `custom_message` steers reach chain detection through a shared projection (`src/batch-capture.ts` `projectBranchMessages`); in `agent-message` batching, eligible customs also bound summary groups.
+- **Opt-in `frontierGapThresholdTokens` flush trigger.** New absolute-token flush trigger (default `null`, disabled), ORed with `autoBudgetThreshold`/`budgetTurnDelta` (precedence: budget, then delta, then frontier-gap) - fires at `turn_end` once the un-pruned tail past the prune frontier (`frontierGapTokens`) reaches the configured token count, independent of window size. Config-file-only, no `/pruner settings` row; self-throttling via frontier advance on processed flush outcomes (empty attempts advance nothing and rewrite nothing) - after a mid-flush summarizer failure the next gated turn may re-fire while consuming the remaining backlog, so the cadence bound is amortized per new tail growth rather than per-turn-exact. New `"frontier-gap"` value on `context-prune-flush-metrics` entries.
+
+## [2.9.2] - 2026-08-31
+
+- **Context metrics removed from the footer status line.** The ` · think Nk · gap Nk · chain P%` suffix rendered on nearly every non-idle session and crowded the footer for no actionable signal. The metrics stay on `/pruner status` (`--- context ---`) and in the `context-prune-flush-metrics` session entries; the footer is back to prune state, reclaim, and `diag`. The snapshot cache that existed only to feed the widget is gone - both remaining consumers compute on demand.
+
+## [2.9.1] - 2026-08-18
+
+- **Orphan sweep: any foreign message is now a barrier ([#11](https://github.com/jjuraszek/pi-condense/issues/11)).** `sweepOrphanToolResults` only reset its open-call set on `assistant` messages, while pi-ai flushes synthetic tool results at both `assistant` and `user` boundaries (`convertToLlm` maps `custom`/`branchSummary`/`compactionSummary`/`bashExecution` to `user`). A foreign message spliced between a toolCall and its toolResult (observed: a pi-cohort control notice) let the real result through alongside pi-ai's synthetic - a duplicate `tool_use_id` the provider rejects permanently (Anthropic 400, branch bricked). Now any message that is neither `assistant` nor `toolResult` clears the open set, so the interleaved result is swept and pi-ai's repairable synthetic stands alone; already-broken branches un-brick on the next render. Deliberate conservative over-sweep (unknown roles, `excludeFromContext` bashExecution) - no role allowlist. Test helper `expectNoOrphanToolResults` carries the identical rule. Spec: `doc/specs/2026-08-18-gh-11-orphan-sweep-barrier.md` (partially supersedes the 2026-08-12 spec's section C).
+
+## [2.9.1+local] - 2026-08-12
+
+- **Upstream sync complete.** Rebased the local layer on upstream v2.9.0 through the `yofriadi/pi-condense` fork's `local/main`, retaining standalone TypeScript 7 checks, flush pacing, Antigravity host-registry summarizer dispatch, and the local OpenSpec/.pi scaffolding. `summarizer-fallback-model` remains unimplemented (0/21 tasks complete); implement it from this fork tip rather than the former v2.5.0 subtree base.
 
 - **Summarizer flush pacing (behavioral default change: fan-out width `N` → `4`).** A budget auto-flush drains the whole pending backlog in one fan-out, and `summarizeBatches` previously fired every batch's LLM call at once through an unbounded `Promise.all` - an observed 34-batch flush tripped provider rate limiting (`Cloud Code Assist API error (429): Resource has been exhausted`), and the resulting transients flipped the configured `summarizerModel` into sticky session-model fallback for the rest of the flush. The fan-out now runs a bounded worker pool of `contextPrune.summarizerConcurrency` workers (default `4`; **`0` restores the previous unbounded behavior**), with results still index-aligned and per-batch progress semantics unchanged. Rate-limit-shaped failures (HTTP 429, `resource has been exhausted`, quota/rate-limit/overloaded wording, server retry-delay phrases) are additionally retried **in place on the same model** with bounded backoff (2 extra attempts, 2s exponential base, 30s per-wait cap - internal constants, not user config; an over-cap server delay short-circuits straight to the existing transient/fallback path), and a per-fan-out rate-limit gate coordinates a shared backoff window across the pool. Pacing is silent (no new notifications) and sits below the fallback controller, whose behavior and wording are untouched. New `/pruner` settings overlay row (`1` / `2` / `4 (default)` / `8` / `0 (unbounded)`); documented in README, `doc/configuration.md`, and PRUNING.md.
 

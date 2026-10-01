@@ -372,7 +372,8 @@ export interface ContextPruneConfig {
   /**
    * Glob patterns matched against a tool call's `args.path`. Matching calls are
    * protected with identical semantics to protectedTools. Default protects
-   * skill files and their sibling reference docs under any `skills/` dir.
+   * skill files and their sibling reference docs under any `skills/` dir,
+   * plus per-repo `gauntlet-overrides.md` files.
    * Kill switch: set to [] in settings.json (`contextPrune.protectedPaths`).
    */
   protectedPaths: string[];
@@ -434,6 +435,21 @@ export interface ContextPruneConfig {
    * null (default) = disabled. Out-of-range (<= 0 or > 1) normalizes to null.
    */
   budgetTurnDelta: number | null;
+  /**
+   * Opt-in flush trigger: when the un-pruned tail past the frontier
+   * (frontierGapTokens) reaches this many tokens, flush at turn_end.
+   * null (default) disables. Config-file-only — no settings overlay row.
+   */
+  frontierGapThresholdTokens: number | null;
+  /**
+   * Request-validity guard: keep only the newest N image blocks in each
+   * outgoing request and replace older ones with a text note, so a long
+   * session never exceeds a provider's per-request image limit. Applies even
+   * when `enabled` is false. null (default) uses the built-in limit for the
+   * model's API (`anthropic-messages`: 100; other APIs: no cap).
+   * Config-file-only.
+   */
+  maxImagesPerRequest: number | null;
 }
 
 /**
@@ -446,7 +462,10 @@ export interface ContextPruneConfig {
  * into a ChainCompressionEntry by adding blockId, toolRefs, and compressedAt.
  */
 export interface ChainRange {
-  /** Timestamp of the user message that opens the chain. */
+  /**
+   * Start anchor timestamp — a user message or an eligible (non-pruner)
+   * custom message. Field name kept for persisted-entry compatibility.
+   */
   startUserTimestamp: number;
   /**
    * All toolCallIds in the chain's middle (deduplicated). Collected from both
@@ -483,7 +502,11 @@ export interface ChainRange {
 export interface ChainCompressionEntry {
   /** Stable block ID, monotonic per session: "b1", "b2", ... */
   blockId: string;
-  /** Timestamp of the user message that opens the chain. Keep raw; synthetic inserted after. */
+  /**
+   * Start anchor timestamp — a user message or an eligible (non-pruner)
+   * custom message. Field name kept for persisted-entry compatibility.
+   * Keep raw; synthetic inserted after.
+   */
   startUserTimestamp: number;
   /**
    * All toolCallIds in the chain's middle. **Diagnostic only** since the
@@ -570,7 +593,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   summarizerMaxTimeoutMs: 180000,
   summarizerConcurrency: 4,
   protectedTools: [],
-  protectedPaths: ["**/skills/**/*.md"],
+  protectedPaths: ["**/skills/**/*.md", "**/gauntlet-overrides.md"],
   chainCompression: {
     enabled: true,
     rollingWindow: 3,
@@ -587,6 +610,8 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   spillThreshold: 65536,
   spillPreviewBytes: 2048,
   budgetTurnDelta: null,
+  frontierGapThresholdTokens: null,
+  maxImagesPerRequest: null,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────
@@ -729,7 +754,7 @@ export interface ContextMetricsSnapshot {
   frontierGapTokens: number;
 }
 
-export type FlushTrigger = "budget" | "delta" | "message-end" | "manual" | "rearmed";
+export type FlushTrigger = "budget" | "delta" | "frontier-gap" | "message-end" | "manual" | "rearmed";
 
 /** Payload of CUSTOM_TYPE_FLUSH_METRICS. */
 export interface FlushMetricsEntry {
@@ -738,6 +763,8 @@ export interface FlushMetricsEntry {
   /** Batches after rescan+trim, before processing. */
   capturedBatches: number;
   processedBatches: number;
+  /** Tool calls this flush newly made stub-eligible: dedup aliases on processed batches plus calls of batches actually indexed. 0 when nothing was indexed or aliased (all-trivial/oversized, or failure before any batch was processed). */
+  stubCount: number;
   outcome: "summarized" | "skipped-oversized" | "skipped-deduped" | "skipped-trivial" | "empty" | "error";
   /** Computed at flush ENTRY (pre-flush pressure). */
   metrics: ContextMetricsSnapshot;

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { pruneMessages, sizeMessages } from "./pruner.js";
+import { charsOf } from "./context-metrics.js";
 import { ToolCallIndexer } from "./indexer.js";
 import { CUSTOM_TYPE_INDEX } from "./types.js";
 import type { ChainCompressionConfig, ChainCompressionEntry } from "./types.js";
 import { DiagnosticSink } from "./diagnostics.js";
-import { pruneWithZeroSweepAssertion } from "./test-support.js";
+import { pruneWithZeroSweepAssertion, expectNoOrphanToolResults } from "./test-support.js";
+import { createSupersedeState, supersededStub } from "./supersede.js";
+import { isProtected } from "./protected.js";
 
 // Minimal mock exposing only the ToolCallIndexer surface that pruneMessages calls.
 // `hasLegacyBareRecord` defaults to the bare `summarized` set: most of the fixture
@@ -77,6 +80,27 @@ describe("pruneMessages", () => {
     expect(pruned).toBe(true);
     expect(out[1].content[0].text).toContain("`t1`");
     expect(out[1].content[0].text).toContain("context_tree_query");
+  });
+
+  it("two renders of unchanged history are byte-identical (AC6 cache-prefix guard)", () => {
+    const indexer = makeMockIndexer({
+      summarized: new Set(["tc1"]),
+      shortRefs: new Map([["tc1", "t1"]]),
+    });
+    const build = () => [
+      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", input: {} }], timestamp: 0 },
+      {
+        role: "toolResult",
+        toolCallId: "tc1",
+        toolName: "bash",
+        content: [{ type: "text", text: "big output" }],
+        isError: false,
+        timestamp: 1,
+      },
+    ];
+    const first = pruneMessages(build(), indexer);
+    const second = pruneMessages(build(), indexer);
+    expect(JSON.stringify(second.messages)).toBe(JSON.stringify(first.messages));
   });
 
   it("returns original array reference when nothing is summarized or compressed", () => {
@@ -881,6 +905,19 @@ describe("occurrence-keyed coverage via mock indexer (spill / protection / grace
 });
 
 describe("sizeMessages", () => {
+  it("prices an image block with the flat charsOf estimate, not its base64 length", () => {
+    const msg = {
+      role: "toolResult",
+      toolCallId: "r1",
+      toolName: "read",
+      content: [{ type: "text", text: "Read image file [image/png]" }, { type: "image", data: "A".repeat(137000), mimeType: "image/png" }],
+      isError: false,
+      timestamp: 1,
+    };
+    expect(sizeMessages([msg])).toBe(charsOf(msg));
+    expect(sizeMessages([msg])).toBeLessThan(JSON.stringify(msg).length / 10);
+  });
+
   it("counts hidden fields (thinking blocks), not just visible text", () => {
     // Two messages with identical visible .text but different hidden content.
     // sizeMessages must count the full serialized weight so all reclaim
@@ -1057,4 +1094,75 @@ describe("G4/C3: orphan-sweep zero-fire proof across pruner fixtures", () => {
   for (const [name, run] of fixtures) {
     it(`zero orphan sweeps: ${name}`, run);
   }
+});
+
+describe("pruneMessages phase 1b (supersede)", () => {
+  const protection = { protectedTools: [], protectedPaths: ["**/skills/**/*.md"] };
+  const isProt = (n: string, a: unknown) => isProtected(n, a, protection);
+  const SKILL = "/h/skills/x/SKILL.md";
+
+  function twoReads(): any[] {
+    return [
+      { role: "user", timestamp: 1, content: [{ type: "text", text: "go" }] },
+      { role: "assistant", timestamp: 2, content: [{ type: "toolCall", id: "r1", name: "read", input: { path: SKILL } }] },
+      { role: "toolResult", toolCallId: "r1", toolName: "read", content: [{ type: "text", text: "FIRST" }], isError: false, timestamp: 3 },
+      { role: "assistant", timestamp: 4, content: [{ type: "text", text: "ok" }] },
+      { role: "user", timestamp: 5, content: [{ type: "text", text: "again" }] },
+      { role: "assistant", timestamp: 6, content: [{ type: "toolCall", id: "r2", name: "read", input: { path: SKILL } }] },
+      { role: "toolResult", toolCallId: "r2", toolName: "read", content: [{ type: "text", text: "SECOND" }], isError: false, timestamp: 7 },
+      { role: "assistant", timestamp: 8, content: [{ type: "text", text: "done" }] },
+    ];
+  }
+
+  it("supersede param absent -> output identical to today", () => {
+    const msgs = twoReads();
+    const { messages: out, pruned } = pruneMessages(msgs, makeMockIndexer(), undefined, undefined, protection);
+    expect(pruned).toBe(false);
+    expect(out).toBe(msgs);
+  });
+
+  it("nothing activated -> input reference, pruned false", () => {
+    const msgs = twoReads();
+    const state = createSupersedeState();
+    const { messages: out, pruned } = pruneMessages(msgs, makeMockIndexer(), undefined, undefined, protection, 0, undefined, { state, isProtected: isProt });
+    expect(pruned).toBe(false);
+    expect(out).toBe(msgs);
+  });
+
+  it("one activation -> fresh array, pruned true, input untouched, newest verbatim, metadata kept", () => {
+    const msgs = twoReads();
+    const before = JSON.stringify(msgs);
+    const state = createSupersedeState();
+    state.floor = 0;
+    const { messages: out, pruned } = pruneMessages(msgs, makeMockIndexer(), undefined, undefined, protection, 0, undefined, { state, isProtected: isProt });
+    expect(pruned).toBe(true);
+    expect(out).not.toBe(msgs);
+    expect(JSON.stringify(msgs)).toBe(before);
+    expect(out[2]).toEqual({ ...msgs[2], content: [{ type: "text", text: supersededStub(SKILL) }] });
+    expect(out[6]).toBe(msgs[6]);
+    expectNoOrphanToolResults(out);
+  });
+
+  it("superseded read inside a compressed chain relocates as the stub", () => {
+    const msgs = twoReads();
+    const entry = {
+      blockId: "b1",
+      startUserTimestamp: 1,
+      droppedToolCallIds: ["r1"],
+      protectedToolCallIds: ["r1"],
+      finalAssistantTimestamp: 4,
+      toolRefs: [],
+      compressedAt: 100,
+    } as any;
+    const indexer = makeMockIndexer({ chainEntries: [entry], summaryBodyMap: new Map([["r1", "SUMMARY"]]) });
+    const state = createSupersedeState();
+    state.floor = 0;
+    const { messages: out } = pruneMessages(msgs, indexer, enabledCC, undefined, protection, 0, undefined, { state, isProtected: isProt });
+    const synthetic = out.find((m: any) => typeof m.content?.[0]?.text === "string" && m.content[0].text.startsWith("<compressed-chain"));
+    expect(synthetic.content[0].text).toContain('<protected-output tool="read">');
+    expect(synthetic.content[0].text).toContain(supersededStub(SKILL));
+    expect(synthetic.content[0].text).not.toContain("FIRST");
+    expect(out.find((m: any) => m.role === "toolResult" && m.toolCallId === "r2").content[0].text).toBe("SECOND");
+    expectNoOrphanToolResults(out);
+  });
 });

@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { supersededStub } from "./supersede.js";
 
 // This must run before any module that transitively reads PI_CODING_AGENT_DIR
 // (src/config.ts's getAgentDir()) is imported/executed.
@@ -44,6 +45,18 @@ function okStream() {
     async *[Symbol.asyncIterator]() {},
     async result() {
       return { stopReason: "stop", content: [{ type: "text", text: "[[1:read]] summary" }], usage: USAGE };
+    },
+  };
+}
+
+// Classified "transient" by runOnce (src/summarizer.ts) — with
+// summarizerModel: "default" (no distinct fallback model) this yields a
+// null SummarizeResult after exactly one stream() call, no retries.
+function errStream(message: string) {
+  return {
+    async *[Symbol.asyncIterator]() {},
+    async result() {
+      return { stopReason: "error", errorMessage: message, content: [], usage: USAGE };
     },
   };
 }
@@ -111,6 +124,64 @@ function closedChainBranch(count: number): any[] {
   return msgs;
 }
 
+// Builds one independent pending batch: user -> assistant toolCall -> toolResult,
+// with no closing text-only assistant (chain stays open, matching defaultBranch's
+// shape). Used by the frontier-gap tests below to grow/shrink the branch's
+// un-pruned tail across turns by direct array mutation (bootExtension returns
+// the live `branch` array reference, so pushing onto it after boot is visible
+// to every later getBranch() call).
+function pendingBatchEntries(toolCallId: string, text: string, timestamp: number): any[] {
+  return [
+    { type: "message", message: { role: "user", content: [{ type: "text", text: `do ${toolCallId}` }], timestamp } },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: {} }], timestamp: timestamp + 500 },
+    },
+    {
+      type: "message",
+      message: { role: "toolResult", toolCallId, toolName: "read", content: [{ type: "text", text }], timestamp: timestamp + 1000 },
+    },
+  ];
+}
+
+function textOnlyTurns(count: number, startTs: number): any[] {
+  const msgs: any[] = [];
+  let t = startTs;
+  for (let i = 0; i < count; i++) {
+    msgs.push({ type: "message", message: { role: "user", content: [{ type: "text", text: `turn ${i}` }], timestamp: (t += 1000) } });
+    msgs.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }], timestamp: (t += 1000) } });
+  }
+  return msgs;
+}
+
+function frontierEntry(turnIndex: number, toolCallId: string): any {
+  return {
+    type: "custom",
+    customType: "context-prune-frontier",
+    data: {
+      lastAttemptedToolCallId: toolCallId,
+      lastAttemptedToolName: "read",
+      lastAttemptedTurnIndex: turnIndex,
+      lastAttemptedTimestamp: Date.now(),
+      attemptedBatchCount: 1,
+      attemptedToolCallCount: 1,
+      rawCharCount: 1000,
+      summaryCharCount: 100,
+      outcome: "summarized",
+    },
+  };
+}
+
+async function fireTurn(handlers: Map<string, any>, ctx: any, branch: any[], toolCallId: string, text: string, runLocalIndex: number) {
+  const t = Date.now();
+  const [, assistant, result] = pendingBatchEntries(toolCallId, text, t);
+  branch.push(assistant, result);
+  await handlers.get("turn_end")!(
+    { message: assistant.message, toolResults: [result.message], turnIndex: runLocalIndex },
+    ctx,
+  );
+}
+
 // Boots a fresh index.ts extension instance against an isolated agent dir +
 // session, mirroring the fixtures shared across the three scenarios below.
 //
@@ -131,35 +202,48 @@ function closedChainBranch(count: number): any[] {
 function bootExtension(
   options: {
     chainCompressionEnabled?: boolean;
+    rollingWindow?: number;
     separatePiAppended?: boolean;
     piAppendEntry?: (push: (type: string, data?: unknown) => void) => (type: string, data?: unknown) => void;
     sessionAppendCustomEntry?: (push: (type: string, data?: unknown) => void) => (type: string, data?: unknown) => string;
     branch?: any[];
     protectedTools?: string[];
+    protectedPaths?: string[];
+    autoBudgetThreshold?: number | null;
+    budgetTurnDelta?: number | null;
+    frontierGapThresholdTokens?: number | null;
+    showPruneStatusLine?: boolean;
   } = {},
 ) {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-condense-rearm-"));
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  const contextPruneSettings: any = {
+    enabled: true,
+    pruneOn: "agent-message",
+    batchingMode: "agent-message",
+    autoBudgetThreshold: options.autoBudgetThreshold === undefined ? 0.5 : options.autoBudgetThreshold,
+    summarizerModel: "default",
+    minBatchChars: 1,
+    showPruneStatusLine: options.showPruneStatusLine ?? true,
+    protectedTools: options.protectedTools ?? [],
+    chainCompression: {
+      enabled: options.chainCompressionEnabled ?? false,
+      rollingWindow: options.rollingWindow ?? 3,
+      stripFinalAssistantThinking: true,
+      fuseRangeSummary: true,
+    },
+  };
+  // Omitted unless the test explicitly passes them, so the "default-null
+  // inert" scenario can assert behavior with no key present at all (not an
+  // explicit null), matching config.ts's own default.
+  if (options.protectedPaths !== undefined) contextPruneSettings.protectedPaths = options.protectedPaths;
+  if (options.budgetTurnDelta !== undefined) contextPruneSettings.budgetTurnDelta = options.budgetTurnDelta;
+  if (options.frontierGapThresholdTokens !== undefined) {
+    contextPruneSettings.frontierGapThresholdTokens = options.frontierGapThresholdTokens;
+  }
   writeFileSync(
     join(agentDir, "settings.json"),
-    JSON.stringify({
-      contextPrune: {
-        enabled: true,
-        pruneOn: "agent-message",
-        batchingMode: "agent-message",
-        autoBudgetThreshold: 0.5,
-        summarizerModel: "default",
-        minBatchChars: 1,
-        showPruneStatusLine: true,
-        protectedTools: options.protectedTools ?? [],
-        chainCompression: {
-          enabled: options.chainCompressionEnabled ?? false,
-          rollingWindow: 3,
-          stripFinalAssistantThinking: true,
-          fuseRangeSummary: true,
-        },
-      },
-    }),
+    JSON.stringify({ contextPrune: contextPruneSettings }),
   );
 
   const sessionDir = mkdtempSync(join(tmpdir(), "pi-condense-rearm-session-"));
@@ -167,6 +251,9 @@ function bootExtension(
   const piAppended: AppendedEntry[] = options.separatePiAppended ? [] : appended;
   const sessionAppended: AppendedEntry[] = appended;
   const handlers = new Map<string, (event: any, ctx: any) => any>();
+  const commands = new Map<string, (args: string, ctx: any) => Promise<void>>();
+  const notifications: string[] = [];
+  const widgets: Array<{ id: string; content: unknown }> = [];
 
   const pushPi = (type: string, data?: unknown) => {
     piAppended.push({ type, data });
@@ -181,7 +268,9 @@ function bootExtension(
     },
     appendEntry: options.piAppendEntry ? options.piAppendEntry(pushPi) : pushPi,
     sendMessage() {},
-    registerCommand() {},
+    registerCommand(name: string, spec: { handler: (args: string, ctx: any) => Promise<void> }) {
+      commands.set(name, spec.handler);
+    },
     registerTool() {},
     registerMessageRenderer() {},
     events: { emit() {} },
@@ -217,13 +306,17 @@ function bootExtension(
     },
     ui: {
       setStatus() {},
-      setWidget() {},
-      notify() {},
+      setWidget(id: string, content: unknown) {
+        widgets.push({ id, content });
+      },
+      notify(message: string) {
+        notifications.push(message);
+      },
       select: async () => undefined,
     },
   };
 
-  return { handlers, ctx, pi, piAppended, sessionAppended, appended, branch };
+  return { handlers, commands, notifications, widgets, ctx, pi, piAppended, sessionAppended, appended, branch };
 }
 
 async function boot(options?: Parameters<typeof bootExtension>[0]) {
@@ -234,6 +327,118 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
 }
 
 describe("reload rearm (issue #6)", () => {
+  it("hides the startup widget when the prune status line is disabled", async () => {
+    const { handlers, ctx, widgets } = await boot({ showPruneStatusLine: false });
+
+    await handlers.get("session_start")!({}, ctx);
+
+    expect(widgets.some(({ id }) => id === "pruner-boot")).toBe(false);
+  });
+
+  it("falls back to the run-local index at capture when getBranch throws, and the flush-time rescan re-derives the session-wide index", async () => {
+    const { handlers, ctx, notifications, appended } = await boot();
+
+    await handlers.get("session_start")!({}, ctx);
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+    const healthyGetBranch = ctx.sessionManager.getBranch;
+    ctx.sessionManager.getBranch = () => {
+      throw new Error("boom");
+    };
+
+    await expect(
+      handlers.get("turn_end")!(
+        {
+          message: { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "read", arguments: {} }] },
+          toolResults: [
+            { role: "toolResult", toolCallId: "tc2", toolName: "read", content: [{ type: "text", text: "result" }], timestamp: Date.now() },
+          ],
+          turnIndex: 7,
+        },
+        ctx,
+      ),
+    ).resolves.toBeUndefined();
+    expect(notifications.filter((message) => message.includes("pruner: 1 turn queued"))).toHaveLength(1);
+
+    ctx.sessionManager.getBranch = healthyGetBranch;
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const flushMetrics = appended.find((entry) => entry.type === "context-prune-flush-metrics");
+    expect(flushMetrics).toBeDefined();
+    expect((flushMetrics!.data as any).outcome).not.toBe("error");
+
+    const frontier = appended.find((entry) => entry.type === "context-prune-frontier");
+    expect(frontier).toBeDefined();
+    // The flush-time rescan re-derives the session-wide index; the run-local fallback value never persists.
+    expect((frontier!.data as any).lastAttemptedTurnIndex).toBe(0);
+  });
+
+  it("persists the queued batch's run-local index when the flush itself runs on the getBranch fallback", async () => {
+    const { handlers, ctx, appended } = await boot();
+
+    await handlers.get("session_start")!({}, ctx);
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+    ctx.sessionManager.getBranch = () => {
+      throw new Error("boom");
+    };
+
+    // Long result text so the queued batch clears the oversized-summary guard
+    // and reaches indexer.addBatch (a 6-char result would be skipped-oversized
+    // and leave no index entry to assert against).
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc2", toolName: "read", content: [{ type: "text", text: "x".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 7,
+      },
+      ctx,
+    );
+
+    // getBranch is still down at flush time: capturePendingBatches' catch
+    // branch serves pendingBatches.slice() (index.ts), so the queued batch's
+    // captured run-local index (7) is what reaches persistence.
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const flushMetrics = appended.find((entry) => entry.type === "context-prune-flush-metrics");
+    expect(flushMetrics).toBeDefined();
+    expect((flushMetrics!.data as any).outcome).toBe("summarized");
+
+    const indexEntry = appended.find((entry) => entry.type === "context-prune-index");
+    expect(indexEntry).toBeDefined();
+    expect((indexEntry!.data as any).toolCalls[0].turnIndex).toBe(7);
+
+    const frontier = appended.find((entry) => entry.type === "context-prune-frontier");
+    expect(frontier).toBeDefined();
+    expect((frontier!.data as any).lastAttemptedTurnIndex).toBe(7);
+  });
+
+  it("propagates turn-index derivation errors at turn_end", async () => {
+    const { handlers, ctx, branch } = await boot();
+
+    await handlers.get("session_start")!({}, ctx);
+    branch.push(null);
+
+    await expect(
+      handlers.get("turn_end")!(
+        {
+          message: { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "read", arguments: {} }] },
+          toolResults: [
+            { role: "toolResult", toolCallId: "tc2", toolName: "read", content: [{ type: "text", text: "result" }], timestamp: Date.now() },
+          ],
+          turnIndex: 0,
+        },
+        ctx,
+      ),
+    ).rejects.toThrow();
+  });
+
   it("rearms the turn_end budget gate after a reload so recovered pending work still flushes", async () => {
     const { handlers, ctx, appended } = await boot();
 
@@ -523,75 +728,6 @@ describe("reload rearm (issue #6)", () => {
     expect(piAppended.some((e) => e.type === "context-prune-flush-metrics")).toBe(false);
   });
 
-  it("recomputes the cached metrics snapshot on a turn_end whose toolResults produce no pushed batch (G3)", async () => {
-    // Component 4 (spec): the snapshot cache recomputes at every enabled
-    // turn_end carrying toolResults, unconditional on whether trim yields a
-    // batch to push. Observed via the footer widget suffix (commands.ts's
-    // pruneStatusText), which is rendered from the cache, not recomputed
-    // itself — the honest seam here since the harness's pi.registerCommand
-    // is a no-op stub and the registerCommands getCachedMetrics callback is
-    // therefore unreachable from a test.
-    const { handlers, ctx, branch } = await boot({ protectedTools: ["secret_tool"] });
-
-    // Neutralize the budget/delta gate so this test only observes the
-    // recompute, not a side-effect flush (harness default usage is 0.6,
-    // above the fixture's 0.5 autoBudgetThreshold).
-    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
-
-    await handlers.get("session_start")!({}, ctx);
-
-    const statusCalls: unknown[] = [];
-    ctx.ui.setStatus = (_id: string, text?: string) => statusCalls.push(text);
-
-    // Force a render of the current (session_start-computed) cache.
-    const rawBefore = ctx.sessionManager.getBranch().filter((e: any) => e.type === "message").map((e: any) => e.message);
-    await handlers.get("context")!({ messages: rawBefore }, ctx);
-    const textBefore = statusCalls[statusCalls.length - 1];
-
-    // Grow the branch as Pi would before firing turn_end: a new assistant
-    // turn with a large thinking block and a protected tool call, plus its
-    // toolResult. Protected content is excluded from frontierGapTokens by
-    // design, but NOT from openCycleThinkingTokens or largestChainSharePct —
-    // so this turn still moves the cache if recomputed.
-    const newAssistant = {
-      type: "message",
-      message: {
-        role: "assistant",
-        content: [
-          { type: "thinking", text: "t".repeat(4000) },
-          { type: "toolCall", id: "tc2", name: "secret_tool", arguments: {} },
-        ],
-      },
-    };
-    const newToolResult = {
-      type: "message",
-      message: {
-        role: "toolResult",
-        toolCallId: "tc2",
-        toolName: "secret_tool",
-        content: [{ type: "text", text: "s".repeat(400) }],
-        timestamp: Date.now(),
-      },
-    };
-    branch.push(newAssistant, newToolResult);
-
-    // This turn's toolResults are entirely protected, so trimBatchToPendingRange
-    // returns null and no batch is pushed — the case this fix targets.
-    await handlers.get("turn_end")!(
-      { message: newAssistant.message, toolResults: [newToolResult.message], turnIndex: 3 },
-      ctx,
-    );
-
-    const rawAfter = ctx.sessionManager.getBranch().filter((e: any) => e.type === "message").map((e: any) => e.message);
-    await handlers.get("context")!({ messages: rawAfter }, ctx);
-    const textAfter = statusCalls[statusCalls.length - 1];
-
-    // Pre-fix, the cache is stale (computed once at session_start, on the
-    // pre-growth branch) — the widget text does not move. Post-fix, the
-    // turn_end recompute picks up the larger open segment/thinking.
-    expect(textAfter).not.toBe(textBefore);
-  });
-
   it("includes a persisted summary custom_message entry in the largest-chain-share denominator (G1)", async () => {
     // Component 1 (spec): denominator = per-message chars over the entire
     // branch projection, INCLUDING retained custom_message summary entries.
@@ -617,17 +753,13 @@ describe("reload rearm (issue #6)", () => {
     };
     const branch = [...closedChain, summaryEntry, closer];
 
-    const { handlers, ctx } = await boot({ branch });
+    const { handlers, commands, notifications, ctx } = await boot({ branch });
     ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
-
-    const statusCalls: unknown[] = [];
-    ctx.ui.setStatus = (_id: string, text?: string) => statusCalls.push(text);
 
     await handlers.get("session_start")!({}, ctx);
 
-    const rawMessages = ctx.sessionManager.getBranch().filter((e: any) => e.type === "message").map((e: any) => e.message);
-    await handlers.get("context")!({ messages: rawMessages }, ctx);
-    const text = statusCalls[statusCalls.length - 1] as string;
+    await commands.get("pruner")!("status", ctx);
+    const text = notifications[notifications.length - 1] as string;
 
     const chainChars = closedChain.map((e: any) => JSON.stringify(e.message).length).reduce((a, b) => a + b, 0);
     const totalWithSummary = [...closedChain.map((e: any) => e.message), summaryEntry, closer.message]
@@ -638,7 +770,971 @@ describe("reload rearm (issue #6)", () => {
       (100 * chainChars) / closedChain.map((e: any) => JSON.stringify(e.message).length).reduce((a, b) => a + b, 0),
     );
 
-    expect(text).toContain(`chain ${expectedPct}%`);
+    expect(text).toContain(`chain share:  ${expectedPct}%`);
     expect(expectedPct).toBeLessThan(inflatedPct);
+  });
+
+  it("feeds persisted custom_message steers into chain detection via the shared projection (#13)", async () => {
+    // A production-feed regression: chain detection/compaction/metrics must
+    // all see custom_message entries projected as role "custom" (src/batch-
+    // capture.ts projectBranchMessages), not just plain "message" entries.
+    // A non-pruner customType (isChainAnchorCustom) opens a chain while idle
+    // and anchors resolveRange the same way a user message does; a pruner-
+    // namespaced customType (context-prune-*) must NOT anchor one.
+    const t0 = new Date().toISOString();
+    let t = new Date(t0).getTime();
+
+    const customAnchoredChain: any[] = [
+      {
+        type: "custom_message",
+        customType: "pi-gauntlet-transition-recovery",
+        content: [{ type: "text", text: "continue" }],
+        timestamp: t0,
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-custom", name: "read", arguments: {} }] },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "tc-custom",
+          toolName: "read",
+          content: [{ type: "text", text: "x".repeat(400) }],
+          timestamp: (t += 1000),
+        },
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "done custom" }], timestamp: (t += 1000) },
+      },
+    ];
+
+    // A second closed, user-anchored chain so the custom-anchored chain above
+    // is not the newest/frontier chain (rollingWindow: 0 makes every closed
+    // chain not already compressed eligible regardless, but this mirrors a
+    // realistic multi-turn session and rules out any "only chain" special case).
+    const trailingChain: any[] = [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "do more" }], timestamp: (t += 1000) } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-trail", name: "read", arguments: {} }] },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "tc-trail",
+          toolName: "read",
+          content: [{ type: "text", text: "y".repeat(400) }],
+          timestamp: (t += 1000),
+        },
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "done trailing" }], timestamp: (t += 1000) },
+      },
+    ];
+
+    const branch = [...customAnchoredChain, ...trailingChain];
+
+    const { handlers, ctx, appended } = await boot({ chainCompressionEnabled: true, rollingWindow: 0, branch });
+
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("turn_end")!(
+      { toolResults: [], message: { role: "assistant", content: [{ type: "text", text: "hi" }] }, turnIndex: 2 },
+      ctx,
+    );
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const chainEntries = appended.filter((e) => e.type === "context-prune-chain");
+    const anchoredAtCustom = chainEntries.find(
+      (e) => (e.data as any).startUserTimestamp === new Date(t0).getTime(),
+    );
+    expect(anchoredAtCustom).toBeDefined();
+  });
+
+  it("does not let a pruner-namespaced custom_message (context-prune-*) anchor a chain (#13)", async () => {
+    const t0 = new Date().toISOString();
+    let t = new Date(t0).getTime();
+
+    const pruneSummaryEntry: any[] = [
+      {
+        type: "custom_message",
+        customType: "context-prune-summary",
+        content: [{ type: "text", text: "prior summary" }],
+        timestamp: t0,
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-p", name: "read", arguments: {} }] },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "tc-p",
+          toolName: "read",
+          content: [{ type: "text", text: "x".repeat(400) }],
+          timestamp: (t += 1000),
+        },
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "done p" }], timestamp: (t += 1000) },
+      },
+    ];
+
+    const { handlers, ctx, appended } = await boot({ chainCompressionEnabled: true, rollingWindow: 0, branch: pruneSummaryEntry });
+
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("turn_end")!(
+      { toolResults: [], message: { role: "assistant", content: [{ type: "text", text: "hi" }] }, turnIndex: 2 },
+      ctx,
+    );
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const chainEntries = appended.filter((e) => e.type === "context-prune-chain");
+    const anchoredAtSummary = chainEntries.find(
+      (e) => (e.data as any).startUserTimestamp === new Date(t0).getTime(),
+    );
+    expect(anchoredAtSummary).toBeUndefined();
+  });
+
+  it("frontier-gap trigger fires at turn_end when the un-pruned tail exceeds the threshold (#13)", async () => {
+    const { handlers, ctx, notifications, appended } = await boot({
+      autoBudgetThreshold: null,
+      frontierGapThresholdTokens: 10,
+    });
+
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+
+    await handlers.get("session_start")!({}, ctx);
+
+    // defaultBranch() already carries an unsummarized ~400-char toolResult
+    // (~100 tokens), well past the threshold of 10.
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc1", toolName: "read", content: [{ type: "text", text: "x".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(flushMetricsEntries.length).toBe(1);
+    const fm = flushMetricsEntries[0].data as any;
+    expect(fm.trigger).toBe("frontier-gap");
+    // defaultBranch's single tc1 call is summarized+indexed by this flush.
+    expect(fm.stubCount).toBe(1);
+    expect(fm.metrics.frontierGapTokens).toBeGreaterThanOrEqual(10);
+
+    expect(notifications.some((n) => n.includes("un-pruned tail exceeded frontier gap threshold"))).toBe(true);
+  });
+
+  it("budget trigger takes precedence over frontier-gap when both conditions are met at turn_end (#13)", async () => {
+    const { handlers, ctx, appended } = await boot({
+      autoBudgetThreshold: 0.5,
+      frontierGapThresholdTokens: 10,
+    });
+
+    await handlers.get("session_start")!({}, ctx);
+
+    // Usage fraction 0.9 crosses the 0.5 budget threshold; defaultBranch()'s
+    // un-pruned tail also crosses the 10-token gap threshold. Budget must win.
+    ctx.getContextUsage = () => ({ tokens: 900000, contextWindow: 1000000 });
+
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc1", toolName: "read", content: [{ type: "text", text: "x".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(flushMetricsEntries.length).toBe(1);
+    expect((flushMetricsEntries[0].data as any).trigger).toBe("budget");
+  });
+
+  it("frontier-gap trigger stays inert when frontierGapThresholdTokens is unset (default null), even with a huge un-pruned tail (#13)", async () => {
+    const { handlers, ctx, appended } = await boot({
+      autoBudgetThreshold: null,
+    });
+
+    await handlers.get("session_start")!({}, ctx);
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc1", toolName: "read", content: [{ type: "text", text: "x".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-flush-metrics")).toBe(false);
+  });
+
+  it("frontier-gap cadence: a partial-failure flush persists the surviving prefix and advances the frontier; the next gap-triggered flush advances it further (#13)", async () => {
+    const { handlers, ctx, appended } = await boot({
+      autoBudgetThreshold: null,
+      frontierGapThresholdTokens: 10,
+      branch: [],
+    });
+
+    await handlers.get("session_start")!({}, ctx);
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+
+    // Turn 1: branch still empty -> frontierGapTokens is 0 -> no flush, even
+    // though this turn's own toolResults are pushed into pendingBatches.
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-warmup", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc-warmup", toolName: "read", content: [{ type: "text", text: "w".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+    expect(appended.some((e) => e.type === "context-prune-flush-metrics")).toBe(false);
+
+    // Grow the branch with two independent unindexed batches (tc-a, tc-b) —
+    // capturePendingBatches rescans the branch, not the in-memory queue, so
+    // this is what actually makes the upcoming flush see two batches.
+    let t = Date.now();
+    ctx.sessionManager.getBranch().push(...pendingBatchEntries("tc-a", "a".repeat(400), (t += 1000)));
+    ctx.sessionManager.getBranch().push(...pendingBatchEntries("tc-b", "b".repeat(400), (t += 1000)));
+
+    let callCount = 0;
+    streamImpl = () => {
+      callCount++;
+      summarizerCalls++;
+      if (callCount === 2) return errStream("simulated summarizer failure on second batch");
+      return okStream();
+    };
+
+    // Turn 2: gap now over threshold (tc-a + tc-b unsummarized) -> flush fires,
+    // processes tc-a successfully, tc-b's summarization call fails.
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-a", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc-a", toolName: "read", content: [{ type: "text", text: "a".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    let frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    expect(frontierEntries.length).toBe(1);
+    const firstFrontier = frontierEntries[0].data as any;
+    expect(firstFrontier.lastAttemptedToolCallId).toBe("tc-a");
+    // Turn 2's flush indexed tc-a (1 call) and aliased nothing else.
+    const firstMetrics = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect((firstMetrics[0].data as any).stubCount).toBe(1);
+
+    // Grow the branch again (tc-b is still unsummarized/pending after the
+    // restore; add tc-c as this turn's new work) — gap stays over threshold.
+    ctx.sessionManager.getBranch().push(...pendingBatchEntries("tc-c", "c".repeat(400), (t += 1000)));
+
+    // Turn 3: gap still over threshold -> flush fires again, this time both
+    // tc-b (restored) and tc-c succeed (streamImpl only fails on call #2).
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "tc-c", name: "read", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "tc-c", toolName: "read", content: [{ type: "text", text: "c".repeat(400) }], timestamp: Date.now() },
+        ],
+        turnIndex: 3,
+      },
+      ctx,
+    );
+
+    frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    expect(frontierEntries.length).toBe(2);
+    const secondFrontier = frontierEntries[1].data as any;
+    expect(secondFrontier.lastAttemptedTimestamp).toBeGreaterThan(firstFrontier.lastAttemptedTimestamp);
+  });
+});
+
+describe("supersede floor cadence (spec 2026-09-07)", () => {
+  const PROTECTED_PATH = "/x/skills/a/SKILL.md";
+  const PROTECTED_GLOB = "**/skills/**/*.md";
+
+  function protectedRead(id: string, ts: number, text = `content-${id}`): any[] {
+    return [
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: PROTECTED_PATH } }] },
+      },
+      {
+        type: "message",
+        message: { role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], timestamp: ts },
+      },
+    ];
+  }
+
+  function bashCall(id: string, ts: number, text = "x".repeat(400)): any[] {
+    return [
+      { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: {} }] } },
+      { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "bash", content: [{ type: "text", text }], timestamp: ts } },
+    ];
+  }
+
+  async function render(branch: any[], handlers: Map<string, any>, ctx: any): Promise<any[]> {
+    const rawMessages = branch.filter((e) => e.type === "message").map((e) => e.message);
+    const res = await handlers.get("context")!({ messages: rawMessages }, ctx);
+    return res?.messages ?? rawMessages;
+  }
+
+  function toolResultText(messages: any[], toolCallId: string): string | undefined {
+    const m = messages.find((m: any) => m.role === "toolResult" && m.toolCallId === toolCallId);
+    if (!m) return undefined;
+    return Array.isArray(m.content) ? m.content.map((c: any) => c.text).join("\n") : String(m.content);
+  }
+
+  it("no rewrite between two protected reads leaves both verbatim", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r1", 10));
+    await handlers.get("session_start")!({}, ctx);
+    // Prime: consumes the session_start floor=0 while only the first read
+    // exists (no candidate yet), so it cannot spuriously activate anything.
+    await render(branch, handlers, ctx);
+
+    branch.push(...protectedRead("r2", 30));
+    // No flush/compression/cold-cache event between the two reads.
+    const rendered = await render(branch, handlers, ctx);
+
+    expect(toolResultText(rendered, "r1")).toBe("content-r1");
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  it("an indexed flush whose unprotected result precedes the older read stubs it", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...bashCall("bash1", 10));
+    branch.push(...protectedRead("r1", 20));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime: consume floor=0, single occurrence so far
+
+    branch.push(...protectedRead("r2", 30));
+
+    // bootExtension's default ctx.getContextUsage() is 0.6, above the 0.5
+    // autoBudgetThreshold, so this turn_end flushes immediately.
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bash1", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bash1", toolName: "bash", content: [{ type: "text", text: "x".repeat(400) }], timestamp: 10 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(true);
+
+    const rendered = await render(branch, handlers, ctx);
+    expect(toolResultText(rendered, "r1")).toBe(supersededStub(PROTECTED_PATH));
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    // Phase 1 (unrelated to supersede) already stubs bash1's own result.
+    expect(toolResultText(rendered, "bash1")).not.toBe("x".repeat(400));
+  });
+
+  it("an indexed flush whose unprotected result follows the older read leaves it verbatim (floor is positional)", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r1", 10));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime
+
+    branch.push(...bashCall("bash1", 20));
+    branch.push(...protectedRead("r2", 30));
+
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bash1", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bash1", toolName: "bash", content: [{ type: "text", text: "x".repeat(400) }], timestamp: 20 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(true);
+
+    const rendered = await render(branch, handlers, ctx);
+    // Floor = 20 (bash1's resultTimestamp); r1's timestamp (10) is before it,
+    // so the floor never reaches it even though a real rewrite just happened.
+    expect(toolResultText(rendered, "r1")).toBe("content-r1");
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  it("a protected-only turn sets no floor", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r1", 10));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime
+
+    branch.push(...protectedRead("r2", 30));
+
+    await handlers.get("turn_end")!(
+      {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "r1", name: "read", arguments: { path: PROTECTED_PATH } },
+            { type: "toolCall", id: "r2", name: "read", arguments: { path: PROTECTED_PATH } },
+          ],
+        },
+        toolResults: [
+          { role: "toolResult", toolCallId: "r1", toolName: "read", content: [{ type: "text", text: "content-r1" }], timestamp: 10 },
+          { role: "toolResult", toolCallId: "r2", toolName: "read", content: [{ type: "text", text: "content-r2" }], timestamp: 30 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
+
+    const rendered = await render(branch, handlers, ctx);
+    expect(toolResultText(rendered, "r1")).toBe("content-r1");
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  const COLD_CACHE_EVENTS = ["session_start", "session_tree", "model_select", "session_compact", "thinking_level_select"];
+
+  for (const eventName of COLD_CACHE_EVENTS) {
+    it(`${eventName} activates every pending supersession (floor = 0)`, async () => {
+      const branch: any[] = [];
+      const { handlers, ctx } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+      branch.push(...protectedRead("r1", 10));
+      await handlers.get("session_start")!({}, ctx);
+      await render(branch, handlers, ctx); // prime
+
+      branch.push(...protectedRead("r2", 30));
+      const beforeEvent = await render(branch, handlers, ctx);
+      expect(toolResultText(beforeEvent, "r1")).toBe("content-r1");
+      expect(toolResultText(beforeEvent, "r2")).toBe("content-r2");
+
+      await handlers.get(eventName)!({}, ctx);
+
+      const afterEvent = await render(branch, handlers, ctx);
+      expect(toolResultText(afterEvent, "r1")).toBe(supersededStub(PROTECTED_PATH));
+      expect(toolResultText(afterEvent, "r2")).toBe("content-r2");
+    });
+  }
+
+  it("stays sticky after cold-cache activation: the older read stays stubbed on a later render with no new event", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r1", 10));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime
+
+    branch.push(...protectedRead("r2", 30));
+    await handlers.get("model_select")!({}, ctx);
+
+    const first = await render(branch, handlers, ctx);
+    expect(toolResultText(first, "r1")).toBe(supersededStub(PROTECTED_PATH));
+
+    const second = await render(branch, handlers, ctx);
+    expect(toolResultText(second, "r1")).toBe(supersededStub(PROTECTED_PATH));
+    expect(toolResultText(second, "r2")).toBe("content-r2");
+  });
+
+  it("chain compression lowers the floor: the older read stubs inside the compressed chain's <protected-output>, the newer read stays raw", async () => {
+    // Chain 0 mixes an unprotected bash call with the OLD protected read in the
+    // same turn, so the chain gets a real per-batch summary (a fully-protected
+    // chain is intentionally never compressed - chain-compressor.ts fullyProtected
+    // guard) while still carrying protectedToolCallIds for the read.
+    function closedChain(index: number, extraToolCalls: { id: string; name: string; args: any; text: string }[], startTs: number) {
+      const msgs: any[] = [];
+      let t = startTs;
+      msgs.push({ type: "message", message: { role: "user", content: [{ type: "text", text: `do task ${index}` }], timestamp: t } });
+      msgs.push({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: extraToolCalls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.args })),
+        },
+      });
+      for (const c of extraToolCalls) {
+        t += 100;
+        msgs.push({
+          type: "message",
+          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: c.text }], timestamp: t },
+        });
+      }
+      t += 1000;
+      msgs.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `done ${index}` }], timestamp: t } });
+      return { msgs, startUserTimestamp: startTs };
+    }
+
+    const chain0 = closedChain(
+      0,
+      [
+        { id: "c0-bash", name: "bash", args: {}, text: "x".repeat(400) },
+        { id: "c0-read", name: "read", args: { path: PROTECTED_PATH }, text: "content-r1" },
+      ],
+      1000,
+    );
+    const chain1 = closedChain(1, [{ id: "c1-bash", name: "bash", args: {}, text: "y".repeat(400) }], 5000);
+    const chain2 = closedChain(2, [{ id: "c2-bash", name: "bash", args: {}, text: "z".repeat(400) }], 9000);
+    const chain3 = closedChain(3, [{ id: "c3-bash", name: "bash", args: {}, text: "w".repeat(400) }], 13000);
+
+    const branch: any[] = [...chain0.msgs, ...chain1.msgs, ...chain2.msgs, ...chain3.msgs];
+    const { handlers, ctx, appended } = await boot({
+      protectedPaths: [PROTECTED_GLOB],
+      chainCompressionEnabled: true,
+      rollingWindow: 3,
+      branch,
+    });
+
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime: only one occurrence of the protected path exists so far
+
+    // message_end drives an unconditional agent-message flush: summarizes the
+    // four turns, then compresses whichever chains fall outside rollingWindow=3
+    // (chain0, the oldest of four).
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const chainEntries = appended.filter((e) => e.type === "context-prune-chain");
+    const chain0Entry = chainEntries.find((e) => (e.data as any).startUserTimestamp === chain0.startUserTimestamp);
+    if (!chain0Entry) {
+      throw new Error(`chain0 was not compressed - chainEntries: ${JSON.stringify(chainEntries.map((e) => e.data))}`);
+    }
+    expect(((chain0Entry.data as any).protectedToolCallIds ?? []).includes("c0-read")).toBe(true);
+
+    // The newer read of the same path, added after compression - never indexed,
+    // never compressed, must stay the winner.
+    branch.push(...protectedRead("r2", 20000));
+
+    const rendered = await render(branch, handlers, ctx);
+
+    const compressedChainMsg = rendered.find(
+      (m: any) => m.role === "user" && Array.isArray(m.content) && m.content[0]?.text?.includes(`id="${(chain0Entry.data as any).blockId}"`),
+    );
+    expect(compressedChainMsg).toBeDefined();
+    const chainText = compressedChainMsg.content[0].text as string;
+    expect(chainText).toContain('<protected-output tool="read">');
+    expect(chainText).toContain(supersededStub(PROTECTED_PATH));
+
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  it("a skipped-trivial batch (below minBatchChars) sets no floor", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    // minBatchChars is hardcoded to 1 in this harness's settings fixture, so an
+    // empty result (0 raw chars) is the only way to land below it and take the
+    // trivial path instead of an actual LLM call.
+    branch.push(...bashCall("bash1", 10, ""));
+    branch.push(...protectedRead("r1", 20));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime
+
+    branch.push(...protectedRead("r2", 30));
+
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bash1", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bash1", toolName: "bash", content: [{ type: "text", text: "" }], timestamp: 10 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
+    const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    expect(frontierEntries.length).toBe(1);
+    expect((frontierEntries[0].data as any).outcome).toBe("skipped-trivial");
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(flushMetricsEntries.length).toBe(1);
+    expect((flushMetricsEntries[0].data as any).outcome).toBe("skipped-trivial");
+    expect((flushMetricsEntries[0].data as any).stubCount).toBe(0);
+
+    const rendered = await render(branch, handlers, ctx);
+    expect(toolResultText(rendered, "r1")).toBe("content-r1");
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  it("a partially deduped skipped-trivial batch counts only its alias in stubCount", async () => {
+    const R = "R".repeat(400);
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    await handlers.get("session_start")!({}, ctx);
+    await fireTurn(handlers, ctx, branch, "bashOrig", R, 1);
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(true);
+
+    const assistant = {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "bashDup", name: "read", arguments: {} },
+        { type: "toolCall", id: "trivial", name: "read", arguments: {} },
+      ],
+    };
+    const toolResults = [
+      { role: "toolResult", toolCallId: "bashDup", toolName: "read", content: [{ type: "text", text: R }], timestamp: 90 },
+      { role: "toolResult", toolCallId: "trivial", toolName: "read", content: [{ type: "text", text: "" }], timestamp: 91 },
+    ];
+    branch.push({ type: "message", message: assistant }, ...toolResults.map((message) => ({ type: "message", message })));
+    await handlers.get("turn_end")!({ message: assistant, toolResults, turnIndex: 2 }, ctx);
+
+    const aliasEntries = appended.filter((e) => e.type === "context-prune-dedup-alias");
+    expect(aliasEntries.length).toBe(1);
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    const metrics = flushMetricsEntries[flushMetricsEntries.length - 1].data as any;
+    expect(metrics.outcome).toBe("skipped-trivial");
+    expect(metrics.stubCount).toBe(1);
+  });
+
+  it("a skipped-oversized batch (summary longer than raw) sets no floor", async () => {
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    // A 1-char raw result clears minBatchChars=1 (not trivial) but the mocked
+    // summarizer's decorated output is always longer than 1 char, so
+    // shouldSkipOversized (index.ts) fires and the batch never indexes.
+    branch.push(...bashCall("bash1", 10, "x"));
+    branch.push(...protectedRead("r1", 20));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime
+
+    branch.push(...protectedRead("r2", 30));
+
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bash1", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bash1", toolName: "bash", content: [{ type: "text", text: "x" }], timestamp: 10 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
+    const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    expect(frontierEntries.length).toBe(1);
+    expect((frontierEntries[0].data as any).outcome).toBe("skipped-oversized");
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(flushMetricsEntries.length).toBe(1);
+    expect((flushMetricsEntries[0].data as any).outcome).toBe("skipped-oversized");
+    expect((flushMetricsEntries[0].data as any).stubCount).toBe(0);
+
+    const rendered = await render(branch, handlers, ctx);
+    expect(toolResultText(rendered, "r1")).toBe("content-r1");
+    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+  });
+
+  it("a dedup alias registered in a fully-deduped (skipped-deduped) batch still lowers the floor", async () => {
+    // Batch 1 (turn 1): a real bash result R, flushed and indexed normally.
+    // Its own resultTimestamp (500) is deliberately AFTER the older protected
+    // read (100), so on its own it could never explain that read's
+    // activation. Batch 2 (turn 2) resends the identical bash content at an
+    // EARLIER timestamp (90, <= the older read's 100) — content-hash dedup
+    // (indexer.lookupByContent/registerDuplicate) turns it into a pure alias,
+    // no LLM call, batch outcome skipped-deduped — but the alias's own
+    // timestamp still feeds floorSources (index.ts, unconditionally, before
+    // the per-batch outcome switch), so it alone must be what activates the
+    // supersession, isolating G4's "alias counts regardless of outcome" claim
+    // from the ordinary indexed-flush floor path already covered above.
+    const R = "R".repeat(400);
+    const branch: any[] = [];
+    const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r_old", 100));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime: single occurrence so far
+
+    branch.push(...bashCall("bashOrig", 500, R));
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bashOrig", name: "bash", arguments: {} }] },
+        toolResults: [{ role: "toolResult", toolCallId: "bashOrig", toolName: "bash", content: [{ type: "text", text: R }], timestamp: 500 }],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+    expect(appended.some((e) => e.type === "context-prune-index")).toBe(true);
+
+    branch.push(...bashCall("bashDup", 90, R));
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bashDup", name: "bash", arguments: {} }] },
+        toolResults: [{ role: "toolResult", toolCallId: "bashDup", toolName: "bash", content: [{ type: "text", text: R }], timestamp: 90 }],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    const dedupAliasEntries = appended.filter((e) => e.type === "context-prune-dedup-alias");
+    expect(dedupAliasEntries.length).toBe(1);
+    const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    expect(frontierEntries[frontierEntries.length - 1].data && (frontierEntries[frontierEntries.length - 1].data as any).outcome).toBe(
+      "skipped-deduped",
+    );
+    const flushMetricsEntries = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    const dedupMetrics = flushMetricsEntries[flushMetricsEntries.length - 1].data as any;
+    expect(dedupMetrics.outcome).toBe("skipped-deduped");
+    expect(dedupMetrics.stubCount).toBe(1);
+    // The alias's own resultTimestamp (90) is <= the older read's (100) — the
+    // property that lets it, alone, explain the activation below.
+
+    branch.push(...protectedRead("r_new", 99999));
+    const rendered = await render(branch, handlers, ctx);
+
+    expect(toolResultText(rendered, "r_old")).toBe(supersededStub(PROTECTED_PATH));
+    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+  });
+
+  it("a chain-compression floor (anchor timestamp) is distinguishable from the indexed-result floor", async () => {
+    // Every unprotected indexed result across all four chains (5000/7000/8000)
+    // is timestamped AFTER the older protected read (100). Only chain0's
+    // startUserTimestamp (10, the compression anchor) is timestamped before
+    // it — so only compressEligible's separate lowerFloor(startUserTimestamp)
+    // call (index.ts, after the per-batch flush's own lowerFloor call) can
+    // explain the older read's activation, isolating the chain-anchor floor
+    // source from the ordinary indexed-batch floor source already covered
+    // above.
+    function closedChain(startTs: number, toolCalls: { id: string; name: string; args: any; text: string }[]) {
+      const msgs: any[] = [];
+      msgs.push({ type: "message", message: { role: "user", content: [{ type: "text", text: `task ${startTs}` }], timestamp: startTs } });
+      msgs.push({
+        type: "message",
+        message: { role: "assistant", content: toolCalls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.args })) },
+      });
+      for (const c of toolCalls) {
+        msgs.push({
+          type: "message",
+          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: c.text }], timestamp: (c as any).ts },
+        });
+      }
+      msgs.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `done ${startTs}` }], timestamp: startTs + 1 } });
+      return msgs;
+    }
+
+    const chain0 = closedChain(10, [{ id: "c0-bash", name: "bash", args: {}, text: "x".repeat(400), ts: 5000 } as any]);
+    const chain1 = closedChain(6000, [{ id: "c1-read", name: "read", args: { path: PROTECTED_PATH }, text: "content-r_old", ts: 100 } as any]);
+    const chain2 = closedChain(9000, [{ id: "c2-bash", name: "bash", args: {}, text: "y".repeat(400), ts: 7000 } as any]);
+    const chain3 = closedChain(13000, [{ id: "c3-bash", name: "bash", args: {}, text: "z".repeat(400), ts: 8000 } as any]);
+
+    const branch: any[] = [...chain0, ...chain1, ...chain2, ...chain3];
+    const { handlers, ctx, appended } = await boot({
+      protectedPaths: [PROTECTED_GLOB],
+      chainCompressionEnabled: true,
+      rollingWindow: 3,
+      branch,
+    });
+
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime: only c1-read exists so far, no second occurrence
+
+    await handlers.get("message_end")!(
+      { message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+      ctx,
+    );
+
+    const chainEntries = appended.filter((e) => e.type === "context-prune-chain");
+    const chain0Entry = chainEntries.find((e) => (e.data as any).startUserTimestamp === 10);
+    if (!chain0Entry) {
+      throw new Error(`chain0 was not compressed - chainEntries: ${JSON.stringify(chainEntries.map((e) => e.data))}`);
+    }
+    expect((chain0Entry.data as any).startUserTimestamp).toBeLessThanOrEqual(100);
+
+    branch.push(...protectedRead("r_new", 99999));
+    const rendered = await render(branch, handlers, ctx);
+
+    expect(toolResultText(rendered, "c1-read")).toBe(supersededStub(PROTECTED_PATH));
+    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+  });
+
+  it("combined lowering is monotonic: a later, higher-timestamp floor source cannot raise floor back up", async () => {
+    // The task's suggested shape (one indexed flush + one compression in the
+    // same turn) is exercised above by the chain-anchor test; this covers the
+    // explicitly-allowed alternative instead: two floor sources, in either
+    // order, across separate turns — the low value (10) is set first, the
+    // high value (1000) arrives after, and the floor must stay clamped at the
+    // min (10), not get overwritten by the later, higher call.
+    const branch: any[] = [];
+    const { handlers, ctx } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
+
+    branch.push(...protectedRead("r_mid", 500));
+    await handlers.get("session_start")!({}, ctx);
+    await render(branch, handlers, ctx); // prime: single occurrence so far
+
+    branch.push(...bashCall("bashLow", 10));
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bashLow", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bashLow", toolName: "bash", content: [{ type: "text", text: "x".repeat(400) }], timestamp: 10 },
+        ],
+        turnIndex: 1,
+      },
+      ctx,
+    );
+
+    branch.push(...bashCall("bashHigh", 1000));
+    await handlers.get("turn_end")!(
+      {
+        message: { role: "assistant", content: [{ type: "toolCall", id: "bashHigh", name: "bash", arguments: {} }] },
+        toolResults: [
+          { role: "toolResult", toolCallId: "bashHigh", toolName: "bash", content: [{ type: "text", text: "y".repeat(400) }], timestamp: 1000 },
+        ],
+        turnIndex: 2,
+      },
+      ctx,
+    );
+
+    branch.push(...protectedRead("r_new", 99999));
+    const rendered = await render(branch, handlers, ctx);
+
+    // r_mid (500) sits between the low floor source (10) and the high one
+    // (1000): only a floor still clamped at 10 explains its activation.
+    expect(toolResultText(rendered, "r_mid")).toBe(supersededStub(PROTECTED_PATH));
+    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+  });
+});
+
+describe("session-wide live turn index (#16)", () => {
+  it("AC8: pre-fix fixture with frontier 83 flushes one eligible live turn past the frontier", async () => {
+    const fixture = readFileSync(join(import.meta.dirname, "fixtures", "gh16-frontier-83.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const { handlers, ctx, appended } = await boot({
+      branch: fixture,
+      autoBudgetThreshold: null,
+      budgetTurnDelta: null,
+      frontierGapThresholdTokens: 100,
+    });
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-live", "x".repeat(800), 0);
+
+    const fm = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(fm.length).toBe(1);
+    expect((fm[0].data as any).trigger).toBe("frontier-gap");
+    expect((fm[0].data as any).outcome).toBe("summarized");
+    expect((fm[0].data as any).stubCount).toBeGreaterThan(0);
+
+    const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
+    const next = frontierEntries[frontierEntries.length - 1].data as any;
+    expect(next.lastAttemptedTurnIndex).toBeGreaterThanOrEqual(83);
+  });
+
+  it("AC1: a new run's first batch survives the frontier and reaches the budget gate", async () => {
+    const branch = [...textOnlyTurns(84, 1700000000000), frontierEntry(83, "tc-old")];
+    const { handlers, ctx, appended } = await boot({ branch, autoBudgetThreshold: 0.5 });
+    ctx.getContextUsage = () => ({ tokens: 900000, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-new", "x".repeat(400), 0);
+    const fm = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(fm.length).toBe(1);
+    expect((fm[0].data as any).trigger).toBe("budget");
+    expect((fm[0].data as any).trigger).not.toBe("rearmed");
+  });
+
+  it("AC2: an already-summarized live batch is still dropped (no re-summarization)", async () => {
+    const branch = [...textOnlyTurns(84, 1700000000000), frontierEntry(83, "tc-old")];
+    const { handlers, ctx, appended } = await boot({ branch, autoBudgetThreshold: 0.5 });
+    ctx.getContextUsage = () => ({ tokens: 900000, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-new", "x".repeat(400), 0);
+    const callsAfterFirst = summarizerCalls;
+    expect(appended.filter((e) => e.type === "context-prune-flush-metrics").length).toBe(1);
+    const [assistant, result] = ctx.sessionManager.getBranch().slice(-2);
+    await handlers.get("turn_end")!({ message: assistant.message, toolResults: [result.message], turnIndex: 1 }, ctx);
+    expect(summarizerCalls).toBe(callsAfterFirst);
+    expect(appended.filter((e) => e.type === "context-prune-flush-metrics").length).toBe(1);
+  });
+
+  it("AC3: above-frontier live batches in a continuing run keep flushing", async () => {
+    const branch = [...textOnlyTurns(84, 1700000000000), frontierEntry(83, "tc-old")];
+    const { handlers, ctx, appended } = await boot({ branch, autoBudgetThreshold: 0.5 });
+    ctx.getContextUsage = () => ({ tokens: 900000, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-a", "a".repeat(400), 0);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-b", "b".repeat(400), 1);
+    const fm = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(fm.length).toBe(2);
+    expect((fm[1].data as any).trigger).toBe("budget");
+  });
+
+  it("AC4: equal-index partial turn keeps only the suffix after the recorded call", async () => {
+    const branch = [...textOnlyTurns(2, 1700000000000), frontierEntry(2, "tc-2")];
+    const { handlers, ctx, appended } = await boot({ branch, autoBudgetThreshold: 0.5 });
+    ctx.getContextUsage = () => ({ tokens: 900000, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+    const t = Date.now();
+    const assistant = { type: "message", message: { role: "assistant", content: [
+      { type: "toolCall", id: "tc-1", name: "read", arguments: {} },
+      { type: "toolCall", id: "tc-2", name: "read", arguments: {} },
+      { type: "toolCall", id: "tc-3", name: "read", arguments: {} },
+    ] }, timestamp: t };
+    const results = ["tc-1", "tc-2", "tc-3"].map((id, i) => ({
+      type: "message", message: { role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text: "x".repeat(400) }], timestamp: t + 1 + i },
+    }));
+    ctx.sessionManager.getBranch().push(assistant, ...results);
+    await handlers.get("turn_end")!({ message: assistant.message, toolResults: results.map((r) => r.message), turnIndex: 0 }, ctx);
+    const fm = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(fm.length).toBe(1);
+    expect((fm[0].data as any).stubCount).toBe(1);
+    const indexEntries = appended.filter((e) => e.type === "context-prune-index");
+    const indexPayload = JSON.stringify(indexEntries.map((e) => e.data));
+    expect(indexPayload).toContain("tc-3");
+    expect(indexPayload).not.toContain("tc-1");
+  });
+
+  it("AC7: frontier-gap fires on the second post-reply turn, not before", async () => {
+    const branch = [...textOnlyTurns(51, 1700000000000), frontierEntry(50, "tc-old")];
+    const { handlers, ctx, appended } = await boot({ branch, autoBudgetThreshold: null, budgetTurnDelta: null, frontierGapThresholdTokens: 1000 });
+    ctx.getContextUsage = () => ({ tokens: 10, contextWindow: 1000000 });
+    await handlers.get("session_start")!({}, ctx);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-g1", "g".repeat(3500), 0);
+    expect(appended.some((e) => e.type === "context-prune-flush-metrics")).toBe(false);
+    await fireTurn(handlers, ctx, ctx.sessionManager.getBranch(), "tc-g2", "g".repeat(3500), 1);
+    const fm = appended.filter((e) => e.type === "context-prune-flush-metrics");
+    expect(fm.length).toBe(1);
+    expect((fm[0].data as any).trigger).toBe("frontier-gap");
   });
 });

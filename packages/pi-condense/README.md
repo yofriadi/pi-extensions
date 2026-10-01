@@ -69,6 +69,8 @@ pi install npm:@yofriadi/pi-condense
 | `agent-message` (default) | When the agent sends a final text-only reply | ~1 cache rewrite per task batch |
 | `on-demand` | Only when you run `/pruner now` | None until you ask |
 
+With the default `agent-message` trigger (and `autoBudgetThreshold`/`budgetTurnDelta` unset), a non-interactive (`pi -p`) session sees its first flush only at the final reply - set `autoBudgetThreshold` (e.g. `0.8`) so flushes also fire mid-run. This is a property of single-prompt sessions, not a defect in the default.
+
 Before any summarizer call, a pre-flush pipeline can drop or redirect a batch at zero LLM cost: protected tools/paths are never touched, content-hash duplicates are aliased to the original, batches too small to be worth summarizing are skipped outright, and oversized single results are spilled straight to a sidecar file. Closed tool-call chains older than a rolling window are additionally range-compressed. Full pipeline and each safeguard: [PRUNING.md § Pre-flush Pipeline & Safeguards](PRUNING.md#pre-flush-pipeline--safeguards), [§ Chain Compression](PRUNING.md#chain-compression).
 
 ### External cost channel
@@ -80,11 +82,11 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 | Term | Meaning |
 |---|---|
 | Stub | The short breadcrumb (`[Summarized in pruner summary, ref \`t1\`...]`) that replaces a pruned tool result in context |
-| `context_tree_query` | The tool the model calls to recover a stubbed original by ref (`tN`) or `toolCallId`. A reused id returns every matching occurrence, not just one, including any that were content-deduplicated to an earlier record - see [PRUNING.md § Occurrence Identity](PRUNING.md#occurrence-identity) |
+| `context_tree_query` | The tool the model calls to recover a stubbed original by ref (`tN`) or `toolCallId`. Image results come back with their original image blocks. A reused id returns every matching occurrence, not just one, including any that were content-deduplicated to an earlier record - see [PRUNING.md § Occurrence Identity](PRUNING.md#occurrence-identity) |
 | Batch vs chain | A batch is one flush's worth of tool calls; a chain is a longer closed sequence eligible for range compression |
 | Prune frontier | The last attempted prune boundary - advances even on a skip, so nothing is reconsidered twice |
 | Diagnostics (`diag u/m/o/b`) | A self-hiding status-line segment surfacing prune-time degradations: `u` = unresolved chain range, `m` = detection/render id mismatch (informational, does not change what's dropped), `o` = orphan tool-result sweep, `b` = a zero-coverage chain with nothing left to backfill (genuine span mismatch, see below). Each letter's count is omitted when zero; the whole segment disappears when all four are zero. Backing session entries are `context-prune-diagnostic` - see below |
-| Context metrics (`think`/`gap`/`chain`) | Open-cycle thinking tokens, largest-chain share, frontier gap - what the pruner cannot (yet) reclaim, notably in single-chain sessions. See below and [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) |
+| Context metrics (`thinking`/`chain share`/`frontier gap`) | Open-cycle thinking tokens, largest-chain share, frontier gap - what the pruner cannot (yet) reclaim, notably in single-chain sessions. Shown on `/pruner status`, never on the footer. See below and [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) |
 | Prompt-cache interaction | Why batching (not per-turn pruning) is the default - see [PRUNING.md](PRUNING.md#how-prefix-caching-works) |
 | `cost:external` | The shared cost-reporting channel pi-condense emits on (see above) |
 
@@ -100,10 +102,9 @@ The status-line `diag u<N>/m<N>/o<N>/b<N>` segment above is backed by `context-p
 
 ### Context metrics (`context-prune-flush-metrics`)
 
-Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in three places, all backed by `computeContextMetrics` (`src/context-metrics.ts`):
+Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in two places, both backed by `computeContextMetrics` (`src/context-metrics.ts`). They are deliberately kept off the footer status line, which stays limited to prune state, reclaim, and diagnostics:
 
 - `/pruner status` prints a `--- context ---` block: `thinking:`, `chain share:`, `frontier gap:`, plus a `rearmed: yes` line while a reload-rearm probe (below) has recoverable work armed.
-- The footer status line appends `· think Nk · gap Nk · chain P%` - only when the frontier gap is non-zero, so an idle session's footer is unchanged.
 - Each flush attempt (every outcome, including empty/error) writes one `context-prune-flush-metrics` session entry with the pre-flush snapshot - session-log-only, never added to what the model sees, and not reconstructed on reload.
 
 These are most informative for long single-chain sessions where Phase 3 (chain compression) never gets a closed chain to act on - see [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) for the limitation and config guidance, and [PRUNING.md § Reload rearm](PRUNING.md#reload-rearm) for how a reload with recoverable pending work re-arms the automatic flush trigger.
@@ -159,7 +160,7 @@ By default the extension is **off**. `/pruner on` enables it and it stays enable
 
 ## Configuration - the knobs most people touch
 
-Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_AGENT_DIR` if set, else `~/.pi/agent`). Each pi preset gets its own settings.
+Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_AGENT_DIR` if set, else `~/.pi/agent`). Each pi preset gets its own settings. A `settings.json` that cannot be read as a JSON object is never overwritten by a `/pruner` change: the change applies to the current session and an error notification names the file.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -167,9 +168,13 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 | `summarizerModel` | `"default"` | Pin a cheap model instead of reusing your active one - see the plan-by-plan table in [doc/configuration.md](doc/configuration.md#choosing-a-summarizer-model) |
 | `pruneOn` | `agent-message` | Trigger mode - see Architecture above |
 | `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn`; the trigger point is capped at 300k tokens |
+| `frontierGapThresholdTokens` | `null` | Opt-in absolute-token flush trigger: fires at `turn_end` once the un-pruned tail past the prune frontier reaches N tokens, regardless of window size; recommended starting value `80000` |
+| `maxImagesPerRequest` | `null` | Once a request carries more than N images, the oldest become a text note (in cache-friendly steps of half of N) so a long session stays under a provider's per-request image limit; applies even with pruning off. `null` = built-in limit for the model's API (Anthropic Messages: 100; others: no cap); a number overrides it for every API |
 | `summarizerConcurrency` | `4` | Max simultaneous summarizer calls during a flush fan-out. `0` = unbounded (previous behavior) |
-| `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md"]` | Tool names / path globs that are never pruned |
+| `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md", "**/gauntlet-overrides.md"]` | Tool names / path globs that are never summarized; only the newest read per protected path stays verbatim (older reads of the same path are stubbed once the prompt cache is cold anyway) |
 | `spillThreshold` | `65536` | Chars above which a single oversized result spills straight to a sidecar file |
+
+The default also protects reads of [pi-gauntlet](https://github.com/jjuraszek/pi-gauntlet)'s per-repo `gauntlet-overrides.md` so the repo's harness contract stays available for gate decisions after pruning.
 
 The full settings JSON, every key, the commands table, footer widget states, spilled-output details, and the summarizer-model-by-plan table live in **[doc/configuration.md](doc/configuration.md)**.
 
@@ -180,6 +185,10 @@ pi-condense is the context-economy layer: it has no code dependency on the other
 ## Roadmap
 
 No committed roadmap beyond what's already tracked in [CHANGELOG.md](CHANGELOG.md); proposals and in-progress work show up there and in repo issues first.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) - issues follow a Context / Problem / Idea / Acceptance Criteria template; PRs run the [pi-gauntlet](https://github.com/jjuraszek/pi-gauntlet) workflow (one-liners exempt from ceremony, never from keeping docs truthful).
 
 ## Support
 
