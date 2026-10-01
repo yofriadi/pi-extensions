@@ -15,9 +15,7 @@ export default defineConfig({
 			hooks: "list",
 		},
 		pool: "forks",
-		poolOptions: {
-			forks: { singleFork: true },
-		},
+		maxWorkers: 1,
 		isolate: false,
 		server: {
 			deps: {

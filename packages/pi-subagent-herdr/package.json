@@ -20,13 +20,22 @@
 		"package.json"
 	],
 	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
+	},
 	"scripts": {
-		"check": "biome check .",
+		"check": "biome check . && pnpm run typecheck",
 		"check:fix": "biome check --write .",
 		"test": "vitest run",
 		"test:coverage": "c8 --reporter=json --report-dir=coverage vitest run && node scripts/normalize-istanbul-coverage.mjs",
 		"test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts",
 		"typecheck": "tsc --noEmit",
+		"verify-pack": "node scripts/verify-pack.mjs",
+		"prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run test:integration && pnpm run verify-pack",
 		"fallow": "fallow",
 		"fallow:audit": "fallow audit",
 		"fallow:health": "fallow health --score --hotspots --targets",
