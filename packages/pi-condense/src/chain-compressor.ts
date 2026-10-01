@@ -6,6 +6,7 @@ import type { DiagnosticSink } from "./diagnostics.js";
 import { bareToolCallId, occKey, parseOccKey, resultTimestampOf } from "./occurrence-key.js";
 import { resolveRange } from "./chain-range-prune.js";
 import { extractToolResultText } from "./batch-capture.js";
+import { wrapSummaryForContext, unwrapSummaryForDisplay } from "./summary-refs.js";
 
 /**
  * Grace ids are keyed the same way `recovery-grace.ts` keys them: occurrence
@@ -255,7 +256,7 @@ export async function compressEligible(
         finalAssistantTimestamp: chain.finalAssistantTimestamp,
         toolRefs,
         compressedAt: deps.now(),
-        rangeSummaryText: buildDeterministicBody(allRecords, toolRefs),
+        rangeSummaryText: wrapSummaryForContext(buildDeterministicBody(allRecords, toolRefs)),
         bodySource: "deterministic",
         ...(chain.protectedToolCallIds?.length ? { protectedToolCallIds: chain.protectedToolCallIds } : {}),
         ...(chain.middleOccurrenceKeys?.length ? { droppedOccurrenceKeys: chain.middleOccurrenceKeys } : {}),
@@ -276,8 +277,18 @@ export async function compressEligible(
       const summaries = deps.indexer.getPerBatchSummariesForToolCallIds(lookupKeys);
       if (summaries.length >= 2) {
         try {
-          const fused = await deps.fuseRange(summaries.join("\n\n"));
-          if (fused && fused.trim()) rangeSummaryText = fused;
+          // Registry summaries are stored wrapped (summary-context wrapper);
+          // unwrap before joining so the fuser sees raw per-batch bodies.
+          const fused = await deps.fuseRange(
+            summaries.map((s) => unwrapSummaryForDisplay(s)).join("\n\n"),
+          );
+          // Strip any stray wrapper tags the fuser may echo (e.g. a hallucinated
+          // open tag with no close): the spec's "no tags in the chain block"
+          // requirement is unconditional, and the idempotence check in
+          // wrapSummaryForContext is prefix-only — a stray close tag at the
+          // end would survive it and later leak into <compressed-chain>.
+          const fusedClean = fused?.replace(/<\/?context-prune-summary>/g, "") ?? null;
+          if (fusedClean && fusedClean.trim()) rangeSummaryText = wrapSummaryForContext(fusedClean);
         } catch {
           // fall back to the per-batch concatenation at render time
         }

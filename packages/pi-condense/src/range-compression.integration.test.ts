@@ -51,12 +51,17 @@ describe("range compression integration", () => {
       backfill: testBackfill,
     });
 
-    // Fusion received the concatenated per-batch summaries and stored its result.
+    // Fusion received the concatenated per-batch summaries and stored its result,
+    // wrapped once by the summary-context wrapper.
     expect(fuseInputs).toEqual(["summary of batch 1\n\nsummary of batch 2"]);
     expect(compressedEntries).toHaveLength(1);
-    expect(compressedEntries[0].rangeSummaryText).toBe("FUSED COHESIVE SUMMARY");
-    // Entry is now in the real registry (what the renderer reads).
-    expect(indexer.getChainEntries()[0].rangeSummaryText).toBe("FUSED COHESIVE SUMMARY");
+    expect(compressedEntries[0].rangeSummaryText).toBe(
+      "<context-prune-summary>\nFUSED COHESIVE SUMMARY\n</context-prune-summary>",
+    );
+    // Entry is now in the real registry (what the renderer reads), wrapped.
+    expect(indexer.getChainEntries()[0].rangeSummaryText).toBe(
+      "<context-prune-summary>\nFUSED COHESIVE SUMMARY\n</context-prune-summary>",
+    );
 
     const messages: any[] = [
       { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
@@ -644,7 +649,111 @@ describe("range compression integration", () => {
     expect(synthetic).toBeDefined();
     expect(synthetic.content[0].text).toContain('<protected-output tool="todowrite">');
     expect(synthetic.content[0].text).toContain("PLAN-STATE-XYZ");
+    // Deterministic backfill render (task 3.4): the wrapped deterministic
+    // rangeSummaryText is unwrapped at the chainSummaryText boundary — no
+    // <context-prune-summary> tags inside the <compressed-chain> block.
+    expect(synthetic.content[0].text).not.toContain("<context-prune-summary>");
     expect(out.filter((m: any) => m.role === "toolResult")).toHaveLength(0);
     expectNoOrphanToolResults(out);
+  });
+
+  // Summary-context wrapper round-trip (tasks 3.1-3.4): registered per-batch
+  // bodies are wrapped (flush stores wrapped); the fuser must receive them
+  // unwrapped, the stored range summary must be wrapped exactly once, and the
+  // rendered <compressed-chain> block must contain no wrapper tags.
+  test("summary-context wrapper: fuser gets unwrapped bodies, stored range summary wrapped once, rendered chain block has no tags", async () => {
+    const indexer = new ToolCallIndexer();
+    const blockRefs = new BlockRefIssuer();
+    indexer.registerSummaryRefs([
+      { shortId: "t1", toolCallId: "tc1" },
+      { shortId: "t2", toolCallId: "tc2" },
+    ]);
+    // Bodies registered exactly as flushPending would store them: wrapped.
+    indexer.registerSummaryBody(["tc1"], "<context-prune-summary>\nbatch one body\n</context-prune-summary>");
+    indexer.registerSummaryBody(["tc2"], "<context-prune-summary>\nbatch two body\n</context-prune-summary>");
+
+    const chain: ChainRange = { startUserTimestamp: 100, middleToolCallIds: ["tc1", "tc2"], finalAssistantTimestamp: 400 };
+    const fuseInputs: string[] = [];
+    const { compressedEntries } = await compressEligible([chain], 0, {
+      indexer,
+      blockRefs,
+      appendEntry: () => {},
+      now: () => 1,
+      fuseRange: async (text) => {
+        fuseInputs.push(text);
+        return "FUSED COHESIVE SUMMARY";
+      },
+      messages: [],
+      diagnostics: noopDiagnostics,
+      backfill: testBackfill,
+    });
+
+    // Fuser received the raw bodies, not the wrapped form.
+    expect(fuseInputs).toEqual(["batch one body\n\nbatch two body"]);
+    // Stored range summary is wrapped exactly once.
+    const stored = compressedEntries[0].rangeSummaryText ?? "";
+    expect(stored).toBe("<context-prune-summary>\nFUSED COHESIVE SUMMARY\n</context-prune-summary>");
+    expect(stored.match(/<context-prune-summary>/g)?.length).toBe(1);
+
+    // Rendered <compressed-chain> block contains no wrapper tags.
+    const messages: any[] = [
+      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200, usage: {}, stopReason: "tool_use" },
+      { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "o1" }], isError: false, timestamp: 210 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "bash", arguments: {} }], timestamp: 300, usage: {}, stopReason: "tool_use" },
+      { role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "o2" }], isError: false, timestamp: 310 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400, usage: {}, stopReason: "end_turn" },
+    ];
+    const cc: ChainCompressionConfig = { enabled: true, rollingWindow: 0, stripFinalAssistantThinking: true, fuseRangeSummary: false };
+    const { messages: out } = pruneMessages(messages, indexer, cc);
+    const synthetic = out.find(
+      (m: any) => m.role === "user" && typeof m.content?.[0]?.text === "string" && m.content[0].text.startsWith("<compressed-chain"),
+    );
+    expect(synthetic).toBeDefined();
+    expect(synthetic.content[0].text).toContain("FUSED COHESIVE SUMMARY");
+    expect(synthetic.content[0].text).not.toContain("<context-prune-summary>");
+  });
+
+  test("summary-context wrapper: per-batch fallback at render time unwraps each body before joining", async () => {
+    const indexer = new ToolCallIndexer();
+    const blockRefs = new BlockRefIssuer();
+    indexer.registerSummaryRefs([
+      { shortId: "t1", toolCallId: "tc1" },
+      { shortId: "t2", toolCallId: "tc2" },
+    ]);
+    indexer.registerSummaryBody(["tc1"], "<context-prune-summary>\nbatch one body\n</context-prune-summary>");
+    indexer.registerSummaryBody(["tc2"], "<context-prune-summary>\nbatch two body\n</context-prune-summary>");
+
+    const chain: ChainRange = { startUserTimestamp: 100, middleToolCallIds: ["tc1", "tc2"], finalAssistantTimestamp: 400 };
+    await compressEligible([chain], 0, {
+      indexer,
+      blockRefs,
+      appendEntry: () => {},
+      now: () => 1,
+      messages: [],
+      diagnostics: noopDiagnostics,
+      backfill: testBackfill,
+    });
+
+    const messages: any[] = [
+      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200, usage: {}, stopReason: "tool_use" },
+      { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "o1" }], isError: false, timestamp: 210 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "bash", arguments: {} }], timestamp: 300, usage: {}, stopReason: "tool_use" },
+      { role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "o2" }], isError: false, timestamp: 310 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400, usage: {}, stopReason: "end_turn" },
+    ];
+    const cc: ChainCompressionConfig = { enabled: true, rollingWindow: 0, stripFinalAssistantThinking: true, fuseRangeSummary: false };
+    const { messages: out } = pruneMessages(messages, indexer, cc);
+    const synthetic = out.find(
+      (m: any) => m.role === "user" && typeof m.content?.[0]?.text === "string" && m.content[0].text.startsWith("<compressed-chain"),
+    );
+    expect(synthetic).toBeDefined();
+    expect(synthetic.content[0].text).toContain("batch one body");
+    expect(synthetic.content[0].text).toContain("batch two body");
+    // N wrapped bodies concatenated: a single outer unwrap would leave N-1
+    // embedded tag pairs; per-body unwrap leaves none.
+    expect(synthetic.content[0].text).not.toContain("<context-prune-summary>");
+    expect(synthetic.content[0].text).not.toContain("</context-prune-summary>");
   });
 });

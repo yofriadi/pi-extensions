@@ -138,7 +138,7 @@ describe("occurrence keying", () => {
 
     expect(indexer.hasPerBatchSummaryCoveringAny(["bash_23@1150"])).toBe(true);
     expect(indexer.hasPerBatchSummaryCoveringAny(["bash_23@3150"])).toBe(false);
-    expect(indexer.getPerBatchSummaryTextForToolCallIds(["bash_23@1150"])).toBe("summary of FIRST");
+    expect(indexer.getPerBatchSummariesForToolCallIds(["bash_23@1150"])).toEqual(["summary of FIRST"]);
   });
 });
 
@@ -301,7 +301,7 @@ describe("session rebuild", () => {
     expect(indexer.getRecord("t2")?.resultText).toBe("SECOND");
     expect(indexer.getRecord("bash_99@4150")?.resultText).toBe("FIRST");
     expect(indexer.getShortRefForToolCallId("bash_99@4150")).toBe("t1");
-    expect(indexer.getPerBatchSummaryTextForToolCallIds(["bash_23@2150"])).toBe("summary text");
+    expect(indexer.getPerBatchSummariesForToolCallIds(["bash_23@2150"])).toEqual(["summary text"]);
   });
 
   test("legacy entries without resultTimestamp keep bare-id keys", () => {

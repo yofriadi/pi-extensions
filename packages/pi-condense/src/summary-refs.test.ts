@@ -4,6 +4,11 @@ import {
   formatSummaryToolCallRefs,
   buildShortToolCallRefs,
   normalizeSummaryToolCallRefs,
+  wrapSummaryForContext,
+  unwrapSummaryForDisplay,
+  SUMMARY_CONTEXT_OPEN,
+  SUMMARY_CONTEXT_CLOSE,
+  LEGACY_SUMMARY_CONTEXT_NOTICE_LINES,
   type SummaryToolCallRef,
 } from "./summary-refs.js";
 
@@ -168,5 +173,72 @@ describe("occurrence-aware summary refs", () => {
     expect(normalizeSummaryToolCallRefs({ toolCallIds: ["bash_1"] })).toEqual([
       { shortId: "bash_1", toolCallId: "bash_1" },
     ]);
+  });
+});
+
+describe("wrapSummaryForContext", () => {
+  test("wraps plain text in the context tag pair", () => {
+    const out = wrapSummaryForContext("did stuff");
+    expect(out).toBe(`${SUMMARY_CONTEXT_OPEN}\ndid stuff\n${SUMMARY_CONTEXT_CLOSE}`);
+  });
+
+  test("idempotent: content already starting with the open tag is returned trimmed, not re-wrapped", () => {
+    const wrapped = `${SUMMARY_CONTEXT_OPEN}\nbody\n${SUMMARY_CONTEXT_CLOSE}`;
+    expect(wrapSummaryForContext(wrapped)).toBe(wrapped);
+    expect(wrapSummaryForContext(`  ${wrapped}  `)).toBe(wrapped);
+  });
+
+  test("wrap(unwrap(x)) round-trips", () => {
+    const body = "- `t1` ran bash\n\n---\nfooter";
+    const wrapped = wrapSummaryForContext(body);
+    expect(unwrapSummaryForDisplay(wrapped)).toBe(body);
+  });
+});
+
+describe("unwrapSummaryForDisplay", () => {
+  test("strips the wrapper from wrapped content", () => {
+    expect(unwrapSummaryForDisplay(`${SUMMARY_CONTEXT_OPEN}\nhello\n${SUMMARY_CONTEXT_CLOSE}`)).toBe("hello");
+  });
+
+  test("unwrapped legacy content passes through unchanged", () => {
+    expect(unwrapSummaryForDisplay("old bare summary")).toBe("old bare summary");
+  });
+
+  test("strips legacy notice lines inside the wrapper", () => {
+    const legacy = [
+      SUMMARY_CONTEXT_OPEN,
+      LEGACY_SUMMARY_CONTEXT_NOTICE_LINES.join("\n"),
+      "",
+      "actual body",
+      SUMMARY_CONTEXT_CLOSE,
+    ].join("\n");
+    expect(unwrapSummaryForDisplay(legacy)).toBe("actual body");
+  });
+
+  test("strips legacy notice lines without the blank separator", () => {
+    const legacy = [SUMMARY_CONTEXT_OPEN, LEGACY_SUMMARY_CONTEXT_NOTICE_LINES.join("\n"), "actual body", SUMMARY_CONTEXT_CLOSE].join("\n");
+    expect(unwrapSummaryForDisplay(legacy)).toBe("actual body");
+  });
+
+  test("malformed wrapper (open tag, no close) passes through unchanged", () => {
+    const malformed = `${SUMMARY_CONTEXT_OPEN}\nbody without close`;
+    expect(unwrapSummaryForDisplay(malformed)).toBe(malformed);
+  });
+
+  test("empty wrapper (open immediately followed by close) passes through unchanged", () => {
+    const empty = `${SUMMARY_CONTEXT_OPEN}${SUMMARY_CONTEXT_CLOSE}`;
+    expect(unwrapSummaryForDisplay(empty)).toBe(empty);
+  });
+
+  test("non-string content: text-part arrays are joined and unwrapped", () => {
+    const parts = [{ type: "text", text: `${SUMMARY_CONTEXT_OPEN}\nfrom parts\n${SUMMARY_CONTEXT_CLOSE}` }];
+    expect(unwrapSummaryForDisplay(parts)).toBe("from parts");
+  });
+
+  test("non-string content: null / undefined / object pass through as empty string", () => {
+    expect(unwrapSummaryForDisplay(null)).toBe("");
+    expect(unwrapSummaryForDisplay(undefined)).toBe("");
+    expect(unwrapSummaryForDisplay({})).toBe("");
+    expect(unwrapSummaryForDisplay(42)).toBe("");
   });
 });

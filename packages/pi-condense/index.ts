@@ -23,7 +23,7 @@ import { pruneMessages } from "./src/pruner.js";
 import { isProtected } from "./src/protected.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
-import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs } from "./src/summary-refs.js";
+import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs, wrapSummaryForContext } from "./src/summary-refs.js";
 import type {
   ContextPruneConfig,
   CapturedBatch,
@@ -406,6 +406,9 @@ export default function (pi: ExtensionAPI) {
       // "deduped" (pre-flush dedup ate every tool call in this batch).
       type ResultSlot = import("./src/types.js").SummarizeResult | null | "trivial" | "deduped";
       const results: ResultSlot[] = new Array(batches.length).fill(null);
+      // Wrapped summary length per batch (what the oversized-skip decision
+      // actually measured, per design D5), for honest skip notifications.
+      const wrappedSummaryLens: number[] = new Array(batches.length).fill(0);
 
       if (options.onProgress) {
         for (let i = 0; i < batches.length; i++) {
@@ -510,8 +513,9 @@ export default function (pi: ExtensionAPI) {
         const summaryRefs = indexer.allocateSummaryRefs(batch);
         const toolNames = batch.toolCalls.map((tc) => tc.toolName);
         const decorated = substituteInlineRefs(result.summaryText, summaryRefs, toolNames);
-        const summaryText = decorated + formatSummaryToolCallRefs(summaryRefs);
+        const summaryText = wrapSummaryForContext(decorated + formatSummaryToolCallRefs(summaryRefs));
         const shouldSkipOversized = summaryText.length > batchRawCharCount;
+        wrappedSummaryLens[i] = summaryText.length;
 
         statsAccum.add(result.usage);
         totalRawCharCount += batchRawCharCount + dedupRawChars;
@@ -703,8 +707,9 @@ export default function (pi: ExtensionAPI) {
       if (!currentConfig.value.quietOversizedSkips) {
         for (const batch of oversizedBatches) {
           const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          const slot = results[batches.indexOf(batch)];
-          const batchSummaryLen = slot && slot !== "trivial" && slot !== "deduped" ? slot.summaryText.length : 0;
+          // Report the wrapped length the skip decision actually measured
+          // (design D5), so the shown numbers never contradict the outcome.
+          const batchSummaryLen = wrappedSummaryLens[batches.indexOf(batch)];
           safeNotify(
             ctx,
             `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,

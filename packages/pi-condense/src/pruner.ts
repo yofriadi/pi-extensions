@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ToolCallIndexer } from "./indexer.js";
 import type { ChainCompressionConfig, ErrorPurgeConfig } from "./types.js";
+import { unwrapSummaryForDisplay } from "./summary-refs.js";
 import { isProtected, type ProtectionConfig } from "./protected.js";
 import { applyChainCompressions } from "./chain-range-prune.js";
 import { purgeErroredArgs } from "./error-purge.js";
@@ -150,9 +151,18 @@ export function pruneMessages(
     if (chainEntries.length > 0) {
       // Prefer the cohesive LLM range summary (B) when present; fall back to the
       // per-batch concatenation for spans compressed before fusion / on failure.
+      // Both paths unwrap the summary-context wrapper: stored range summaries
+      // and per-batch bodies are wrapped (D2/D3), and a single outer unwrap
+      // on a joined string would leave N-1 embedded tag pairs — so unwrap each
+      // body before joining. The <compressed-chain> block must not nest
+      // <context-prune-summary> tags.
       const chainSummaryText = (entry: typeof chainEntries[number]): string =>
-        entry.rangeSummaryText ??
-        indexer.getPerBatchSummaryTextForToolCallIds(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds);
+        entry.rangeSummaryText
+          ? unwrapSummaryForDisplay(entry.rangeSummaryText)
+          : indexer
+              .getPerBatchSummariesForToolCallIds(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds)
+              .map(unwrapSummaryForDisplay)
+              .join("\n\n");
       const blockSummaryLookup = (blockId: string): string | undefined => {
         const entry = indexer.findChainEntryByBlockId(blockId);
         if (!entry) return undefined;

@@ -34,12 +34,17 @@ function makeMockIndexer({
     getShortRefForToolCallId: (id: string) => shortRefs.get(id),
     getRecord: (id: string) => records.get(id),
     getChainEntries: () => chainEntries,
-    getPerBatchSummaryTextForToolCallIds: (ids: string[]) => {
+    getPerBatchSummariesForToolCallIds: (ids: string[]): string[] => {
+      const texts: string[] = [];
+      const seen = new Set<string>();
       for (const id of ids) {
         const text = summaryBodyMap.get(id);
-        if (text) return text;
+        if (text && !seen.has(text)) {
+          seen.add(text);
+          texts.push(text);
+        }
       }
-      return "";
+      return texts;
     },
   } as any;
 }
