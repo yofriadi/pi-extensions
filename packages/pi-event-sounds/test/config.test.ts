@@ -72,9 +72,19 @@ describe("defaults", () => {
 		expect(config.events.question).toEqual([]);
 		expect(config.events.error).toEqual([]);
 		expect(config.events.quota).toEqual([]);
-		expect(config.turns).toBeUndefined();
-		expect(config.elapsed).toBeUndefined();
+		expect(config.events.agentFailed).toEqual([]);
+		expect(config.events.agentAborted).toEqual([]);
+		expect(config.turns).toEqual([]);
+		expect(config.elapsed).toEqual([]);
 		expect(config.quotaPatterns).toEqual(DEFAULT_QUOTA_PATTERNS);
+	});
+
+	it("agentFailed and agentAborted stay [] when absent from a sounds object", () => {
+		writeProjectSettings('{"sounds": {"events": {"promptSubmit": ["p.wav"]}}}');
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.events.promptSubmit).toEqual([join(projectRoot, "p.wav")]);
+		expect(config.events.agentFailed).toEqual([]);
+		expect(config.events.agentAborted).toEqual([]);
 	});
 });
 
@@ -103,6 +113,13 @@ describe("normalization", () => {
 		expect(config.events.sessionStart).toEqual([join(agentDir, "sounds", "song.wav")]);
 	});
 
+	it("agentFailed and agentAborted resolve configured paths against the source base dir", () => {
+		writeProjectSettings('{"sounds": {"events": {"agentFailed": ["f.wav"], "agentAborted": ["a.wav"]}}}');
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.events.agentFailed).toEqual([join(projectRoot, "f.wav")]);
+		expect(config.events.agentAborted).toEqual([join(projectRoot, "a.wav")]);
+	});
+
 	it("clamps out-of-range volume into 0..1", () => {
 		writeProjectSettings('{"sounds": {"volume": 2.5}}');
 		expect(resolveConfig(projectRoot, agentDir).volume).toBe(1);
@@ -115,8 +132,50 @@ describe("normalization", () => {
 			'{"sounds": {"turns": {"every": 50, "files": ["t.wav"]}, "elapsed": {"seconds": 300, "repeat": true, "files": ["e.wav"]}}}',
 		);
 		const config = resolveConfig(projectRoot, agentDir);
-		expect(config.turns).toEqual({ every: 50, files: [join(projectRoot, "t.wav")] });
-		expect(config.elapsed).toEqual({ seconds: 300, repeat: true, files: [join(projectRoot, "e.wav")] });
+		expect(config.turns).toEqual([{ every: 50, files: [join(projectRoot, "t.wav")] }]);
+		expect(config.elapsed).toEqual([{ seconds: 300, repeat: true, files: [join(projectRoot, "e.wav")] }]);
+	});
+
+	it("accepts value lists for turns.at and elapsed.seconds", () => {
+		writeProjectSettings(
+			'{"sounds": {"turns": {"at": [100, 25, 50, 25], "files": ["t.wav"]}, "elapsed": {"seconds": [1000, 300], "repeat": false, "files": ["e.wav"]}}}',
+		);
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.turns).toEqual([{ at: [25, 50, 100], files: [join(projectRoot, "t.wav")] }]);
+		expect(config.elapsed).toEqual([{ seconds: [300, 1000], repeat: false, files: [join(projectRoot, "e.wav")] }]);
+	});
+
+	it("drops invalid list entries and a block with nothing valid", () => {
+		writeProjectSettings(
+			'{"sounds": {"turns": {"at": [0, -5, "x", 100], "files": ["t.wav"]}, "elapsed": {"seconds": [null, "soon"], "files": ["e.wav"]}}}',
+		);
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.turns).toEqual([{ at: [100], files: [join(projectRoot, "t.wav")] }]);
+		expect(config.elapsed).toEqual([]);
+	});
+
+	it("accepts a list of blocks, each with its own files", () => {
+		writeProjectSettings(
+			'{"sounds": {"turns": [{"at": 25, "files": ["a.wav"]}, {"every": 100, "at": [200], "files": ["b.wav"]}], "elapsed": [{"seconds": 300, "repeat": true, "files": ["c.wav"]}, {"seconds": 1000, "files": ["d.wav"]}]}}',
+		);
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.turns).toEqual([
+			{ at: 25, files: [join(projectRoot, "a.wav")] },
+			{ every: 100, at: [200], files: [join(projectRoot, "b.wav")] },
+		]);
+		expect(config.elapsed).toEqual([
+			{ seconds: 300, repeat: true, files: [join(projectRoot, "c.wav")] },
+			{ seconds: 1000, repeat: false, files: [join(projectRoot, "d.wav")] },
+		]);
+	});
+
+	it("drops malformed blocks: missing files, no condition, non-object entries", () => {
+		writeProjectSettings(
+			'{"sounds": {"turns": [{"every": 5}, {"at": 7, "files": ["t.wav"]}, 42], "elapsed": [{"seconds": 5}, {"seconds": 9, "files": ["e.wav"]}, "nope"]}}',
+		);
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.turns).toEqual([{ at: 7, files: [join(projectRoot, "t.wav")] }]);
+		expect(config.elapsed).toEqual([{ seconds: 9, repeat: false, files: [join(projectRoot, "e.wav")] }]);
 	});
 
 	it("replaces default quotaPatterns with a configured array", () => {
@@ -138,6 +197,24 @@ describe("malformed values fall back per-part without throwing", () => {
 		expect(config.events.promptSubmit).toEqual([]);
 	});
 
+	it("unknown sounds.events keys are ignored without throwing", () => {
+		writeProjectSettings('{"sounds": {"events": {"mysteryTrigger": ["m.wav"], "agentFailed": ["f.wav"]}}}');
+		const config = resolveConfig(projectRoot, agentDir);
+		expect(config.events.agentFailed).toEqual([join(projectRoot, "f.wav")]);
+		expect(Object.keys(config.events).sort()).toEqual([
+			"agentAborted",
+			"agentFailed",
+			"agentSettled",
+			"agentStart",
+			"error",
+			"promptSubmit",
+			"question",
+			"quota",
+			"quotaExhausted",
+			"sessionStart",
+		]);
+	});
+
 	it("non-string entries in a file list are dropped", () => {
 		writeProjectSettings('{"sounds": {"events": {"promptSubmit": ["ok.wav", 7, null]}}}');
 		const config = resolveConfig(projectRoot, agentDir);
@@ -149,8 +226,8 @@ describe("malformed values fall back per-part without throwing", () => {
 			'{"sounds": {"turns": {"every": "many", "files": ["t.wav"]}, "elapsed": {"seconds": -1, "files": ["e.wav"]}}}',
 		);
 		const config = resolveConfig(projectRoot, agentDir);
-		expect(config.turns).toBeUndefined();
-		expect(config.elapsed).toBeUndefined();
+		expect(config.turns).toEqual([]);
+		expect(config.elapsed).toEqual([]);
 	});
 
 	it("non-array quotaPatterns keeps the defaults", () => {

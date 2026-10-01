@@ -22,18 +22,43 @@ export type EventTriggerName =
 	| "promptSubmit"
 	| "agentStart"
 	| "agentSettled"
+	| "agentFailed"
+	| "agentAborted"
 	| "question"
 	| "error"
 	| "quota"
 	| "quotaExhausted";
+
+/**
+ * One turn-milestone trigger block: a periodic interval (`every`), a
+ * one-shot milestone list (`at`), or both, plus its own files. A block
+ * fires when either condition matches; blocks fire independently, so
+ * each milestone can carry its own sound.
+ */
+export interface TurnTriggerSpec {
+	/** Periodic: fire when turnIndex > 0 and turnIndex % every === 0. */
+	every?: number;
+	/** One-shot: fire exactly when turnIndex equals one of these values. */
+	at?: number | number[];
+	files: string[];
+}
+
+/** One elapsed-time trigger block: second-mark(s), optional repeat, and its own files. */
+export interface ElapsedTriggerSpec {
+	/** Fire after this many seconds — or after each listed value. */
+	seconds: number | number[];
+	/** Repeat each listed value on its own interval while the agent runs. */
+	repeat: boolean;
+	files: string[];
+}
 
 /** Normalized sound configuration. */
 export interface SoundConfig {
 	enabled: boolean;
 	volume: number;
 	events: Record<EventTriggerName, string[]>;
-	turns: { every: number; files: string[] } | undefined;
-	elapsed: { seconds: number; repeat: boolean; files: string[] } | undefined;
+	turns: TurnTriggerSpec[];
+	elapsed: ElapsedTriggerSpec[];
 	quotaPatterns: string[];
 	exhaustedPatterns: string[];
 }
@@ -66,6 +91,8 @@ const EVENT_TRIGGER_NAMES: EventTriggerName[] = [
 	"promptSubmit",
 	"agentStart",
 	"agentSettled",
+	"agentFailed",
+	"agentAborted",
 	"question",
 	"error",
 	"quota",
@@ -83,8 +110,8 @@ export function defaultConfig(): SoundConfig {
 		enabled: true,
 		volume: DEFAULT_VOLUME,
 		events,
-		turns: undefined,
-		elapsed: undefined,
+		turns: [],
+		elapsed: [],
 		quotaPatterns: [...DEFAULT_QUOTA_PATTERNS],
 		exhaustedPatterns: [...DEFAULT_EXHAUSTED_PATTERNS],
 	};
@@ -147,6 +174,69 @@ function normalizeFiles(value: unknown, baseDir: string): string[] {
 }
 
 /**
+ * Normalize a `turns.at` / `elapsed.seconds` value: a single positive
+ * finite number passes through as a scalar, an array is filtered to positive
+ * finite numbers then deduped and sorted ascending, and anything with no
+ * surviving entries (including non-numbers) is undefined.
+ */
+function normalizeValues(value: unknown): number | number[] | undefined {
+	if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : undefined;
+	if (!Array.isArray(value)) return undefined;
+	const out = new Set<number>();
+	for (const entry of value) {
+		if (typeof entry === "number" && Number.isFinite(entry) && entry > 0) out.add(entry);
+	}
+	if (out.size === 0) return undefined;
+	return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * Parse the `turns` setting: one block or an array of blocks. Each block
+ * carries its own files and either a periodic `every`, a one-shot `at`
+ * (scalar or list), or both; blocks with no files or no valid condition
+ * are dropped. Invalid entries never throw.
+ */
+function parseTurnSpecs(value: unknown, baseDir: string): TurnTriggerSpec[] {
+	const entries = Array.isArray(value) ? value : [value];
+	const specs: TurnTriggerSpec[] = [];
+	for (const entry of entries) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const raw = entry as Record<string, unknown>;
+		const files = normalizeFiles(raw.files, baseDir);
+		if (files.length === 0) continue;
+		const every =
+			typeof raw.every === "number" && Number.isFinite(raw.every) && raw.every > 0 ? raw.every : undefined;
+		const at = normalizeValues(raw.at);
+		if (every === undefined && at === undefined) continue;
+		const spec: TurnTriggerSpec = { files };
+		if (every !== undefined) spec.every = every;
+		if (at !== undefined) spec.at = at;
+		specs.push(spec);
+	}
+	return specs;
+}
+
+/**
+ * Parse the `elapsed` setting: one block or an array of blocks, each with
+ * its own files, `seconds` (scalar or list), and an optional `repeat`.
+ * Blocks with no files or no valid `seconds` are dropped; invalid entries
+ * never throw.
+ */
+function parseElapsedSpecs(value: unknown, baseDir: string): ElapsedTriggerSpec[] {
+	const entries = Array.isArray(value) ? value : [value];
+	const specs: ElapsedTriggerSpec[] = [];
+	for (const entry of entries) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const raw = entry as Record<string, unknown>;
+		const files = normalizeFiles(raw.files, baseDir);
+		const seconds = normalizeValues(raw.seconds);
+		if (files.length === 0 || seconds === undefined) continue;
+		specs.push({ seconds, repeat: raw.repeat === true, files });
+	}
+	return specs;
+}
+
+/**
  * Resolve the effective configuration: defaults merged with the first
  * `sounds` object found in project then global settings. Invalid parts of a
  * `sounds` object fall back to defaults; this function never throws.
@@ -177,23 +267,10 @@ export function resolveConfig(projectRoot: string, agentDir: string): SoundConfi
 		}
 	}
 
-	if (typeof raw.turns === "object" && raw.turns !== null) {
-		const turns = raw.turns as Record<string, unknown>;
-		const every = turns.every;
-		const files = normalizeFiles(turns.files, source.baseDir);
-		if (typeof every === "number" && Number.isFinite(every) && every > 0 && files.length > 0) {
-			config.turns = { every, files };
-		}
-	}
-
-	if (typeof raw.elapsed === "object" && raw.elapsed !== null) {
-		const elapsed = raw.elapsed as Record<string, unknown>;
-		const seconds = elapsed.seconds;
-		const files = normalizeFiles(elapsed.files, source.baseDir);
-		if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 && files.length > 0) {
-			config.elapsed = { seconds, repeat: elapsed.repeat === true, files };
-		}
-	}
+	// Turn and elapsed triggers accept one block or a list of blocks, each
+	// with its own files; invalid blocks are dropped without affecting siblings.
+	config.turns = parseTurnSpecs(raw.turns, source.baseDir);
+	config.elapsed = parseElapsedSpecs(raw.elapsed, source.baseDir);
 
 	// quotaPatterns must be an array of strings; non-array values keep the defaults.
 	if (Array.isArray(raw.quotaPatterns)) {

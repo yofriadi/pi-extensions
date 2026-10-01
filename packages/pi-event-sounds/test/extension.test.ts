@@ -29,11 +29,20 @@ interface PiHarness {
 	api: ExtensionAPI;
 	registeredFlags: { name: string; options: { description?: string; type: string; default?: boolean | string } }[];
 	handlers: Map<string, HandlerFn>;
+	commands: Map<
+		string,
+		{
+			description?: string;
+			handler: (args: string, ctx?: unknown) => Promise<void> | void;
+			getArgumentCompletions?: (prefix: string) => { value: string; label: string; description: string }[];
+		}
+	>;
 }
 
 function makePi(flags: Record<string, boolean | string> = {}): PiHarness {
 	const registeredFlags: PiHarness["registeredFlags"] = [];
 	const handlers = new Map<string, HandlerFn>();
+	const commands = new Map<string, PiHarness["commands"] extends Map<string, infer V> ? V : never>();
 	const api = {
 		registerFlag(name: string, options: { description?: string; type: string; default?: boolean | string }) {
 			registeredFlags.push({ name, options });
@@ -42,14 +51,31 @@ function makePi(flags: Record<string, boolean | string> = {}): PiHarness {
 		on: (name: string, handler: HandlerFn) => {
 			handlers.set(name, handler);
 		},
+		registerCommand: (
+			name: string,
+			options: {
+				description?: string;
+				handler: (args: string, ctx?: unknown) => Promise<void> | void;
+				getArgumentCompletions?: (prefix: string) => { value: string; label: string; description: string }[];
+			},
+		) => {
+			commands.set(name, options);
+		},
 	};
-	return { api: api as unknown as ExtensionAPI, registeredFlags, handlers };
+	return { api: api as unknown as ExtensionAPI, registeredFlags, handlers, commands };
 }
 
 async function fire(h: PiHarness, event: string, payload?: unknown): Promise<unknown> {
 	const handler = h.handlers.get(event);
 	expect(handler).toBeDefined();
 	return handler?.(payload, undefined);
+}
+
+/** Dispatch a registered slash command with an optional UI ctx. */
+async function runCommand(h: PiHarness, name: string, args = "", ctx?: unknown): Promise<void> {
+	const command = h.commands.get(name);
+	expect(command).toBeDefined();
+	await command?.handler(args, ctx);
 }
 
 /** Settings root with a `sounds` block; chdir so config tests read it. */
@@ -242,6 +268,28 @@ describe("extension wiring", () => {
 		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "century.wav"));
 	});
 
+	it("turn milestone blocks fire their own files", async () => {
+		useProjectSounds({
+			turns: [
+				{ at: 25, files: ["quarter.wav"] },
+				{ at: [50, 100], files: ["big.wav"] },
+			],
+		});
+		const h = makePi();
+		piEventSounds(h.api);
+		for (const turnIndex of [37, 75, 101, 125]) {
+			await fire(h, "turn_start", { type: "turn_start", turnIndex });
+		}
+		expect(playSoundMock).not.toHaveBeenCalled();
+		await fire(h, "turn_start", { type: "turn_start", turnIndex: 25 });
+		await fire(h, "turn_start", { type: "turn_start", turnIndex: 50 });
+		await fire(h, "turn_start", { type: "turn_start", turnIndex: 100 });
+		expect(playSoundMock).toHaveBeenCalledTimes(3);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "quarter.wav"));
+		expect(playSoundMock.mock.calls[1]?.[0]).toBe(join(projectDir, "big.wav"));
+		expect(playSoundMock.mock.calls[2]?.[0]).toBe(join(projectDir, "big.wav"));
+	});
+
 	it("unconfigured events stay silent", async () => {
 		useProjectSounds({ events: { promptSubmit: ["yes.wav"] } });
 		const h = makePi();
@@ -278,6 +326,238 @@ describe("silencing", () => {
 		await fire(h, "input", { type: "input", text: "hi", source: "interactive" });
 		await fire(h, "agent_settled", { type: "agent_settled" });
 		expect(playSoundMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("settle outcome routing", () => {
+	function agentEndMessages(
+		stopReason?: string,
+		errorMessage?: string,
+	): { role: string; stopReason?: string; errorMessage?: string }[] {
+		return [{ role: "assistant", stopReason, errorMessage }];
+	}
+
+	it("agent_end(error) + agent_settled plays agentFailed and not agentSettled", async () => {
+		useProjectSounds({ events: { agentFailed: ["fail.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("error") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "fail.wav"));
+	});
+
+	it("agent_end(error) with agentFailed unset plays the error file (D4)", async () => {
+		useProjectSounds({ events: { error: ["err.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("error") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "err.wav"));
+	});
+
+	it("agent_end(aborted) + agent_settled plays nothing when agentAborted is unset (D6)", async () => {
+		useProjectSounds({ events: { error: ["err.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("aborted") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+	});
+
+	it("abort sound plays when agentAborted is configured", async () => {
+		useProjectSounds({ events: { agentAborted: ["abort.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("aborted") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "abort.wav"));
+	});
+
+	it("failed run after a recovered retry still plays the success file (last agent_end wins)", async () => {
+		// agent_start → error agent_end → agent_start → stop agent_end → agent_settled
+		useProjectSounds({ events: { agentFailed: ["fail.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_start", { type: "agent_start" });
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("error") });
+		await fire(h, "agent_start", { type: "agent_start" });
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("stop") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "ok.wav"));
+	});
+
+	it("tool error earlier in the turn does not suppress the failure sound", async () => {
+		useProjectSounds({ events: { error: ["err.wav"], agentFailed: ["fail.wav"], agentSettled: ["ok.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "turn_start", { type: "turn_start", turnIndex: 1 });
+		await fire(h, "tool_result", { type: "tool_result", toolCallId: "c0", isError: true });
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("error") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		expect(playSoundMock).toHaveBeenCalledTimes(2);
+		const played = playSoundMock.mock.calls.map((call) => call[0]);
+		expect(played).toContain(join(projectDir, "err.wav"));
+		expect(played).toContain(join(projectDir, "fail.wav"));
+	});
+
+	it("armed elapsed timer meeting agent_end(error) + agent_settled never fires", async () => {
+		// Delta scenario: the settle handler clears the elapsed timer
+		// regardless of the run outcome.
+		useProjectSounds({
+			events: { agentFailed: ["fail.wav"] },
+			elapsed: { seconds: 0.05, repeat: false, files: ["tick.wav"] },
+		});
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_start", { type: "agent_start" });
+		await fire(h, "agent_end", { type: "agent_end", messages: agentEndMessages("error") });
+		await fire(h, "agent_settled", { type: "agent_settled" });
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "fail.wav"));
+	});
+});
+
+describe("session mute command", () => {
+	/** UI harness whose notify calls are captured for assertions. */
+	function makeUi(): { ui: unknown; notifications: { message: string; type?: string }[] } {
+		const notifications: { message: string; type?: string }[] = [];
+		const ui = {
+			notify: (message: string, type?: string) => {
+				notifications.push({ message, type });
+			},
+		};
+		return { ui, notifications };
+	}
+
+	beforeEach(async () => {
+		// Mute state is module scope: tests must pin a known starting point.
+		const h = makePi();
+		piEventSounds(h.api);
+		await runCommand(h, "sounds", "on");
+	});
+
+	it("registers /sounds and /event-sounds sharing one handler", () => {
+		const h = makePi();
+		piEventSounds(h.api);
+		expect([...h.commands.keys()].sort()).toEqual(["event-sounds", "sounds"]);
+		expect(h.commands.get("sounds")?.handler).toBe(h.commands.get("event-sounds")?.handler);
+	});
+
+	it("offers on/off/status argument completions, filtered by prefix", () => {
+		const h = makePi();
+		piEventSounds(h.api);
+		const completions = h.commands.get("sounds")?.getArgumentCompletions;
+		expect(completions).toBeTypeOf("function");
+		const all = completions?.("") ?? [];
+		expect(all.map((item) => item.value).sort()).toEqual(["off", "on", "status"]);
+		for (const item of all) {
+			expect(item.label).toBe(item.value);
+			expect(item.description.length).toBeGreaterThan(0);
+		}
+		expect((completions?.("of") ?? []).map((item) => item.value)).toEqual(["off"]);
+		expect(completions?.("zzz") ?? []).toEqual([]);
+	});
+
+	it("muting silences every trigger including a timer armed earlier", async () => {
+		useProjectSounds({
+			events: { promptSubmit: ["yes.wav"], agentSettled: ["ok.wav"] },
+			elapsed: { seconds: 0.05, repeat: false, files: ["tick.wav"] },
+		});
+		const h = makePi();
+		piEventSounds(h.api);
+		// Arm the timer unmuted, then mute before it fires.
+		await fire(h, "agent_start", { type: "agent_start" });
+		await runCommand(h, "sounds", "off");
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		expect(playSoundMock).not.toHaveBeenCalled();
+	});
+
+	it("un-muting restores playback", async () => {
+		useProjectSounds({ events: { promptSubmit: ["yes.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await runCommand(h, "sounds", "off");
+		await fire(h, "input", { type: "input", text: "hi", source: "interactive" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+		await runCommand(h, "sounds", "on");
+		await fire(h, "input", { type: "input", text: "hi", source: "interactive" });
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "yes.wav"));
+	});
+
+	it("enabled: false or --no-sounds keeps silence after un-muting", async () => {
+		useProjectSounds({ enabled: false, events: { promptSubmit: ["yes.wav"] } });
+		const h1 = makePi();
+		piEventSounds(h1.api);
+		await runCommand(h1, "sounds", "on");
+		await fire(h1, "input", { type: "input", text: "hi", source: "interactive" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+
+		useProjectSounds({ events: { promptSubmit: ["yes.wav"] } });
+		const h2 = makePi({ "no-sounds": true });
+		piEventSounds(h2.api);
+		await runCommand(h2, "sounds", "on");
+		await fire(h2, "input", { type: "input", text: "hi", source: "interactive" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+	});
+
+	it("mute stays on across a session_start dispatch", async () => {
+		useProjectSounds({ events: { sessionStart: ["start.wav"], promptSubmit: ["yes.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await runCommand(h, "sounds", "off");
+		await fire(h, "session_start", { type: "session_start", reason: "new" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+		await fire(h, "input", { type: "input", text: "hi", source: "interactive" });
+		expect(playSoundMock).not.toHaveBeenCalled();
+	});
+
+	it("status and unknown arguments notify without throwing", async () => {
+		useProjectSounds({ events: { promptSubmit: ["yes.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		const ui = makeUi();
+		await expect(runCommand(h, "sounds", "status", ui)).resolves.toBeUndefined();
+		await expect(runCommand(h, "sounds", "bogus", ui)).resolves.toBeUndefined();
+		expect(ui.notifications.length).toBe(2);
+		expect(ui.notifications[0]?.message).toBe("Sounds on");
+		expect(ui.notifications[1]?.message).toBe("Usage: /sounds [toggle|on|off|status]");
+		expect(ui.notifications[1]?.type).toBe("warning");
+	});
+
+	it("toggle flips mute state and notifies each direction", async () => {
+		useProjectSounds({ events: { promptSubmit: ["yes.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		const ui = makeUi();
+		await runCommand(h, "sounds", "", ui); // default toggle
+		expect(ui.notifications[0]?.message).toBe("Sounds muted for this session");
+		await runCommand(h, "sounds", "toggle", ui);
+		expect(ui.notifications[1]?.message).toBe("Sounds unmuted");
+	});
+
+	it("mute off silences an already-armed repeating timer until unmuted", async () => {
+		useProjectSounds({
+			events: { agentSettled: ["ok.wav"] },
+			elapsed: { seconds: 0.03, repeat: true, files: ["tick.wav"] },
+		});
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_start", { type: "agent_start" });
+		await runCommand(h, "sounds", "off");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		const mutedCount = playSoundMock.mock.calls.length;
+		expect(mutedCount).toBe(0);
+		await runCommand(h, "sounds", "on");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(playSoundMock.mock.calls.length).toBeGreaterThan(mutedCount);
+		// Stop the repeating timer so it does not leak into later tests.
+		await fire(h, "agent_settled", { type: "agent_settled" });
 	});
 });
 
@@ -367,5 +647,33 @@ describe("best-effort contract", () => {
 		const settledCount = playSoundMock.mock.calls.length;
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(playSoundMock.mock.calls.length).toBe(settledCount); // no more fires
+	});
+
+	it("elapsed seconds list arms one timer per value and both fire", async () => {
+		useProjectSounds({ elapsed: { seconds: [0.03, 0.06], repeat: false, files: ["tick.wav"] } });
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_start", { type: "agent_start" });
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		expect(playSoundMock).toHaveBeenCalledTimes(2);
+		expect(playSoundMock.mock.calls.every((call) => call[0] === join(projectDir, "tick.wav"))).toBe(true);
+	});
+
+	it("elapsed blocks fire their own files at their own marks", async () => {
+		useProjectSounds({
+			elapsed: [
+				{ seconds: 0.03, files: ["first.wav"] },
+				{ seconds: 0.08, files: ["second.wav"] },
+			],
+		});
+		const h = makePi();
+		piEventSounds(h.api);
+		await fire(h, "agent_start", { type: "agent_start" });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(playSoundMock).toHaveBeenCalledTimes(1);
+		expect(playSoundMock.mock.calls[0]?.[0]).toBe(join(projectDir, "first.wav"));
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(playSoundMock).toHaveBeenCalledTimes(2);
+		expect(playSoundMock.mock.calls[1]?.[0]).toBe(join(projectDir, "second.wav"));
 	});
 });

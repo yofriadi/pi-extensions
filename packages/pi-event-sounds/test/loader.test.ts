@@ -39,6 +39,23 @@ describe("pi-event-sounds — loader integration", () => {
 		expect(flag?.description?.length).toBeGreaterThan(0);
 	});
 
+	it("is discovered and registers both /sounds and /event-sounds", async () => {
+		agentDir = mkdtempSync(join(tmpdir(), "pi-sounds-loader-"));
+		const result = await discoverAndLoadExtensions([packageRoot], packageRoot, agentDir);
+		expect(result.errors).toEqual([]);
+
+		const extension = result.extensions.find((ext) => ext.path === extensionPath);
+		expect(extension).toBeDefined();
+
+		// Both command names share one options object (loader stores
+		// name + sourceInfo + the registered options).
+		expect([...(extension?.commands.keys() ?? [])].sort()).toEqual(["event-sounds", "sounds"]);
+		for (const command of extension?.commands.values() ?? []) {
+			expect(command.description?.length).toBeGreaterThan(0);
+			expect(command.handler).toBeTypeOf("function");
+		}
+	});
+
 	it("subscribes to every sound-bearing lifecycle event", async () => {
 		agentDir = mkdtempSync(join(tmpdir(), "pi-sounds-loader-"));
 		const result = await discoverAndLoadExtensions([packageRoot], packageRoot, agentDir);
@@ -47,6 +64,7 @@ describe("pi-event-sounds — loader integration", () => {
 		const extension = result.extensions.find((ext) => ext.path === extensionPath);
 		const handlers = [...(extension?.handlers.keys() ?? [])].sort();
 		expect(handlers).toEqual([
+			"agent_end",
 			"agent_settled",
 			"agent_start",
 			"input",
