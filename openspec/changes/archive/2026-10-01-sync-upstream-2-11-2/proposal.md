@@ -31,7 +31,7 @@ None.
 
 ### Modified Capabilities
 
-- `upstream-sync`: four clarifications this sync earned — inherited `.pi/` files are upstream-owned content inside a protected tree, upstream release mechanics are adopted while fork identity is protected, spec-first red suites are skip-guarded so G3 stays a real gate, and an out-of-band higher npm publication does not override the version policy.
+- `upstream-sync`: four requirement-level clarifications this sync earned (plus two conflict-policy scenarios) — inherited `.pi/` files are upstream-owned content inside a protected tree, upstream release mechanics are adopted while fork identity is protected, spec-first red suites are skip-guarded so G3 stays a real gate, and an out-of-band higher npm publication does not override the version policy.
 
 ## Impact
 

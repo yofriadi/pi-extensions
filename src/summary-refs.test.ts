@@ -193,6 +193,13 @@ describe("wrapSummaryForContext", () => {
     const wrapped = wrapSummaryForContext(body);
     expect(unwrapSummaryForDisplay(wrapped)).toBe(body);
   });
+
+  test("idempotency is keyed on the open tag alone: an unterminated wrapper is returned as-is", () => {
+    // Documented strip-or-passthrough edge: nothing is added, so the result
+    // still has no close tag and unwrapSummaryForDisplay passes it through.
+    const partial = `${SUMMARY_CONTEXT_OPEN}\nbody without close`;
+    expect(wrapSummaryForContext(partial)).toBe(partial);
+  });
 });
 
 describe("unwrapSummaryForDisplay", () => {
@@ -240,5 +247,12 @@ describe("unwrapSummaryForDisplay", () => {
     expect(unwrapSummaryForDisplay(undefined)).toBe("");
     expect(unwrapSummaryForDisplay({})).toBe("");
     expect(unwrapSummaryForDisplay(42)).toBe("");
+  });
+
+  test("trailing content after the close tag passes through unchanged", () => {
+    // The endsWith guard fails, so the whole string is returned with tags intact
+    // rather than partially stripped.
+    const raw = `${SUMMARY_CONTEXT_OPEN}\nbody\n${SUMMARY_CONTEXT_CLOSE}\ntrailing note`;
+    expect(unwrapSummaryForDisplay(raw)).toBe(raw);
   });
 });
