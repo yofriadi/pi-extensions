@@ -11,7 +11,7 @@ Current package state:
 - Unit tests: Vitest 4.1.9 with a local `node:test` shim, c8 Istanbul JSON coverage, fork pool, one fork, and `isolate: false`.
 - Integration tests: serial Node test runner using `node --test --test-concurrency=1`.
 - `check`: currently only `biome check .`; `typecheck` is separate.
-- Current baseline observed during planning: Biome passes, TypeScript passes, 29 Vitest files / 359 tests pass.
+- Current baseline observed during planning: Biome passes, TypeScript passes, 32 Vitest files / 422 tests pass (1 skipped).
   Vitest emits one configuration deprecation warning because `test.poolOptions` was removed in Vitest 4.
 - The sibling `pi-provider-antigravity` package already has a package-local `verify-pack.mjs` pattern that packs a tarball, extracts its manifest, checks metadata, and checks the tarball listing.
 - The package currently has no `exports`, no `engines`, no `verify-pack`, and no `prepublishOnly`.
@@ -114,7 +114,7 @@ Add:
 
 1. Capture the current package baseline: `check`, `typecheck`, `test`, `test:coverage`, `test:integration`, Fallow health/dead-code where available, and current `pnpm pack` listing.
 2. Update `vitest.config.ts` to remove `test.poolOptions`, then rerun unit tests, coverage, and Fallow.
-   If the 359-test count or coverage parity changes, stop and resolve before continuing.
+   If the 422-test count or coverage parity changes, stop and resolve before continuing.
 3. Update `package.json` with the combined check, `engines`, `exports`, `verify-pack`, and `prepublishOnly` scripts.
 4. Add `scripts/verify-pack.mjs`; run it against a real tarball and intentionally test at least one failure path (for example, a missing required manifest field in a temporary fixture or an assertion-level unit test for the verifier helper).
 5. Run the complete package gate and inspect the tarball with `tar -tf`; verify test/configuration files are excluded and `src/index.ts` is present.

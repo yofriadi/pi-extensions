@@ -3,7 +3,7 @@
 ## Why
 
 `@yofriadi/pi-subagent-herdr` already has a solid local test setup: Vitest runs the unit suite, `c8` produces the Istanbul artifact consumed by Fallow, and the serial `node:test` integration suite remains separate.
-The package currently passes its Biome check, TypeScript check, and 359 unit tests.
+The package currently passes its Biome check, TypeScript check, and 422 unit tests (1 skipped).
 
 The remaining tooling gaps are at the package boundary:
 
@@ -34,10 +34,6 @@ This change is limited to the local `pi-subagent-herdr` package and its directly
 
 - `package-artifact-verification`: The published tarball is checked as an external artifact, including manifest metadata, exports, Pi extension entrypoint, allowlisted files, and exclusion of development/test files.
 - `package-quality-gates`: The package-level check and publish commands run the static, type, test, integration, and package-artifact gates in an explicit order.
-
-### Modified Capabilities
-
-- `unit-test-runner`: The Vitest 4 configuration uses current pool options while preserving the existing single-fork and coverage behavior.
 
 ## Impact
 
