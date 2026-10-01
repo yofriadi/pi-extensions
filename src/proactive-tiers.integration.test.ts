@@ -1031,8 +1031,6 @@ describe.skip("proactive budget tiers — lifecycle", () => {
 describe("proactive budget tiers — behavior that already holds", () => {
   it("3.6: a text-only turn with no rearm performs NO tier evaluation no matter how high usage reads", async () => {
     summarizerCalls = 0;
-    const branch = multiBatchBranch(4);
-    const harness = await boot({ tiers: [0.5], batchLimit: 2, branch });
     // session_start's rearm probe clears: simulate by consuming the rearm
     // with an EMPTY-queue flush first? Simpler: boot with an empty branch so
     // nothing rears, then push usage sky-high on a text-only turn.

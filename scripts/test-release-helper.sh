@@ -85,7 +85,7 @@ esac
 EOF
 cat > "$bin/npm" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == "view" ]]; then printf '2.9.2\n'; fi
+if [[ "$1" == "view" ]]; then printf '%s\n' "${2##*@}"; fi
 EOF
 cat > "$bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -100,4 +100,19 @@ PATH="$bin:$PATH" bash .agents/skills/release/scripts/release.sh --skip-tests cu
 test "$(git rev-parse refs/tags/v2.9.2)" = "$(git --git-dir="$remote" rev-parse refs/tags/v2.9.2)"
 test "$(git rev-parse local/main)" = "$(git --git-dir="$remote" rev-parse refs/heads/local/main)"
 
-printf '%s\n' 'release helper tag selection, version, remote collision, changelog gate, and atomic push passed'
+# The promotion path: a non-empty "## [Unreleased]" is rewritten to the version
+# heading and committed as "Release X.Y.Z" by `current`, with no version bump.
+printf '%s\n' '# Changelog' '' '## [Unreleased]' '' '- promoted note' '' "## [2.9.2] - $(date +%F)" > CHANGELOG.md
+printf '%s\n' '{"version":"2.9.4"}' > package.json
+git add package.json CHANGELOG.md
+git commit --quiet -m 'docs: release notes for 2.9.4'
+PATH="$bin:$PATH" bash .agents/skills/release/scripts/release.sh --skip-tests current >/dev/null
+test "$(git log -1 --format=%s)" = 'Release 2.9.4'
+test "$(git show --name-only --format= HEAD)" = 'CHANGELOG.md'
+git show HEAD:CHANGELOG.md | grep -qF "## [2.9.4] - $(date +%F)"
+git show HEAD:CHANGELOG.md | grep -qF -- '- promoted note'
+! git show HEAD:CHANGELOG.md | grep -qF '## [Unreleased]'
+test "$(git rev-parse refs/tags/v2.9.4)" = "$(git --git-dir="$remote" rev-parse refs/tags/v2.9.4)"
+test "$(git rev-parse local/main)" = "$(git --git-dir="$remote" rev-parse refs/heads/local/main)"
+
+printf '%s\n' 'release helper tag selection, version, remote collision, changelog gate, promotion, and atomic push passed'
