@@ -88,14 +88,43 @@ describe("formatter", () => {
   });
 
   describe("formatDateTime", () => {
-    it("formats date and time to YYYY-MM-DD HH:MM:SS format", () => {
+    // Derived from Intl rather than from getTimezoneOffset arithmetic, so a sign,
+    // padding or rounding bug in utcOffsetLabel cannot be mirrored by the
+    // expectation and both exact-string tests stay load-bearing.
+    const zone = (date: Date): string => {
+      const name = new Intl.DateTimeFormat("en-US", { timeZoneName: "longOffset" })
+        .formatToParts(date)
+        .find((part) => part.type === "timeZoneName")?.value ?? "";
+      // ICU renders a zero offset as "GMT+00:00" here and older ECMA-402 said bare
+      // "GMT", while utcOffsetLabel prints "UTC" either way -- so both zero forms
+      // are folded explicitly or the suite is red under TZ=UTC (what CI runs).
+      const offset = name.replace(/^GMT/, "");
+      return offset === "" || offset === "+00:00" || offset === "-00:00" ? "UTC" : `UTC${offset}`;
+    };
+
+    it("formats local date and time to YYYY-MM-DD HH:MM:SS with a zone label", () => {
       const date = new Date(2026, 8, 2, 14, 5, 9);
-      assert.equal(formatDateTime(date), "2026-09-02 14:05:09");
+      assert.equal(formatDateTime(date), `2026-09-02 14:05:09 (${zone(date)})`);
     });
 
     it("handles zero-padded single-digit months, days, hours, mins, secs", () => {
       const date = new Date(2026, 0, 5, 8, 4, 3);
-      assert.equal(formatDateTime(date), "2026-01-05 08:04:03");
+      assert.equal(formatDateTime(date), `2026-01-05 08:04:03 (${zone(date)})`);
+    });
+
+    it("labels a zone that reconciles the local rendering with the instant", () => {
+      // The rendered time is local, so the label is the only thing that stops
+      // "Expected token reset time: 2026-09-21 04:43:12" being read as UTC.
+      const instant = Date.UTC(2026, 8, 2, 12, 0, 0);
+      const rendered = formatDateTime(instant);
+      const label = rendered.match(/\((UTC(?:[+-]\d{2}:\d{2})?)\)$/);
+      assert.ok(label, rendered);
+      const [hours, minutes] = label[1] === "UTC"
+        ? [0, 0]
+        : label[1].slice(4).split(":").map((part) => Number(part));
+      const offsetMinutes = (label[1][3] === "-" ? -1 : 1) * (hours * 60 + minutes);
+      const asUtc = new Date(instant + offsetMinutes * 60000).toISOString().slice(0, 19).replace("T", " ");
+      assert.equal(rendered.slice(0, 19), asUtc);
     });
   });
 

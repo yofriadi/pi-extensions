@@ -24,7 +24,7 @@ import {
   truncateErrorMessage,
 } from "./formatter.ts";
 import { RetryManager, type RetryCheckResult } from "./retry-manager.ts";
-import type { ClassificationResult } from "./types.ts";
+import type { AutoContinueConfig, ClassificationResult } from "./types.ts";
 
 type AssistantMessage = Extract<MessageEndEvent["message"], { role: "assistant" }>;
 type RecoveryType = "RATE_LIMIT" | "TOKEN_LIMIT" | "INCOMPLETE_TOOL_CALL";
@@ -64,7 +64,12 @@ interface DispatchedRecovery {
 }
 
 export default function (pi: ExtensionAPI, customSettingsPath?: string) {
-  let config = loadConfig(customSettingsPath);
+  const configWarnings: string[] = [];
+  const loadSettings = (): AutoContinueConfig => {
+    configWarnings.length = 0;
+    return loadConfig(customSettingsPath, (message) => configWarnings.push(message));
+  };
+  let config = loadSettings();
   const retryManager = new RetryManager();
   let generation = 0;
   const submissionPrefix = `<!-- auto-continue:${randomUUID()}:`;
@@ -88,14 +93,52 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
   const isAutoActive = (): boolean =>
     config.enabled && (!isSubagentSession() || config.subagent);
 
+  /**
+   * A `ctx` can outlive the session it came from -- an embedded caller that
+   * disposes without `session_shutdown` -- and reading a disposed context throws.
+   * Notifications happen inside listeners and timer callbacks, where a throw is an
+   * uncaughtException that kills the process, so both the accessor and the call are
+   * guarded and a lost message is the worst outcome.
+   */
+  const hasUsableUI = (ctx: ExtensionContext): boolean => {
+    try {
+      return ctx.hasUI;
+    } catch {
+      return false;
+    }
+  };
+
   const notify = (
     ctx: ExtensionContext,
     message: string,
     type: "info" | "warning" | "error" = "info"
   ) => {
-    if (ctx.hasUI) {
+    if (!hasUsableUI(ctx)) return;
+    try {
       ctx.ui.notify(`[auto-continue] [${formatTime(Date.now())}] ${message}`, type);
+    } catch {
+      // The UI is gone; there is nowhere left to report through.
     }
+  };
+
+  /**
+   * Surfaces settings problems the loader reported. Buffered because the first
+   * load happens before any context exists; a misconfigured setting must not be
+   * indistinguishable from an extension bug.
+   */
+  const flushConfigWarnings = (ctx: ExtensionContext): void => {
+    // Without a UI the warnings cannot be delivered, so keep them buffered:
+    // a later interactive session reports them instead of dropping them.
+    if (!hasUsableUI(ctx) || configWarnings.length === 0) return;
+    // One aggregated notice: five bad settings should not produce five toasts
+    // on every session start. A failed delivery drops the buffer; the next
+    // session_start or /auto-continue reset re-derives it from settings.
+    notify(
+      ctx,
+      `Settings problem${configWarnings.length === 1 ? "" : "s"}:\n${configWarnings.join("\n")}`,
+      "warning"
+    );
+    configWarnings.length = 0;
   };
 
   const cancelWait = () => {
@@ -156,7 +199,10 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
       // necessarily emit agent_settled when it finishes.
       if (compacting || !wait.ctx.isIdle() || wait.ctx.hasPendingMessages()) {
         if (wait.manual) armTimer(wait, BUSY_RECHECK_MS);
-        else stopRecovery();
+        else {
+          notify(wait.ctx, "Recovery cancelled: Pi was busy when the retry came due, so no continuation was sent.", "warning");
+          stopRecovery();
+        }
         return;
       }
 
@@ -177,7 +223,10 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
       // its error listeners, not this try/catch. Never resend an unacknowledged
       // submission: it may still start after a slow preflight or another hook.
       submission.timer = setTimeout(() => {
-        if (dispatched !== submission) return;
+        // "started" means Pi accepted the submission and opened the turn, so the
+        // acknowledgement exists and pausing here would wipe the retry budget
+        // mid-turn -- restarting the next cycle at the uncapped first attempt.
+        if (dispatched !== submission || dispatched.phase === "started") return;
         stopRecovery();
         notify(wait.ctx, "Continuation did not start within 30s. Automatic recovery paused to avoid duplicate prompts; check Pi's status before resuming manually.", "warning");
       }, SUBMISSION_TIMEOUT_MS);
@@ -250,7 +299,8 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
   pi.on("session_start", (_event, ctx) => {
     resetRecovery();
     observingAssistant = false;
-    config = loadConfig(customSettingsPath);
+    config = loadSettings();
+    flushConfigWarnings(ctx);
     suppressRecovery = false;
     compacting = false;
     shuttingDown = false;
@@ -393,22 +443,10 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
     if (event.message.stopReason === "aborted") stopRecovery();
   });
 
-  pi.on("agent_settled", (_event, ctx) => {
-    detachAbort?.();
-    detachAbort = undefined;
-    if (pending?.manual) {
-      if (Date.now() >= pending.dueAt) dispatchRecovery(pending);
-      return;
-    }
-    if (!isAutoActive() || shuttingDown || suppressRecovery || compacting || pending || dispatched) return;
-    if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
-    const observed = lastAssistant;
-    if (!observed || processedMessages.has(observed.message)) return;
-    processedMessages.add(observed.message);
-
+  const classifyObserved = (observed: ObservedAssistant): ClassificationResult => {
     const message = observed.message;
     const response = message.stopReason === "error" ? observed.response : undefined;
-    const classification = classifyInterruption({
+    return classifyInterruption({
       stopReason: message.stopReason,
       errorMessage: message.errorMessage,
       content: message.content,
@@ -418,6 +456,44 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
       fatalFirst: config.rateLimit.fatalFirst,
       windowRetryMargin: config.rateLimit.windowRetryMargin,
     });
+  };
+
+  const contextOverflowNotice = (classification: ClassificationResult): string =>
+    `Context overflow: no continuation sent${
+      classification.errorMessage ? ` ("${truncateErrorMessage(classification.errorMessage)}")` : ""
+    }. Pi owns compaction recovery; check its compaction result.`;
+
+  const billingNotice = (classification: ClassificationResult): string =>
+    `Non-retryable error: "${truncateErrorMessage(classification.errorMessage)}". Check your account or provider configuration.`;
+
+  pi.on("agent_settled", (_event, ctx) => {
+    detachAbort?.();
+    detachAbort = undefined;
+    const manualWait = pending?.manual ? pending : undefined;
+    if (!manualWait) {
+      if (!isAutoActive() || shuttingDown || suppressRecovery || compacting || pending || dispatched) return;
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+    }
+    const observed = lastAssistant;
+    if (!observed || processedMessages.has(observed.message)) {
+      if (manualWait && Date.now() >= manualWait.dueAt) dispatchRecovery(manualWait);
+      return;
+    }
+    processedMessages.add(observed.message);
+
+    const message = observed.message;
+    const classification = classifyObserved(observed);
+
+    if (manualWait) {
+      // A manual /auto-continue at wait can be armed for hours. It schedules
+      // nothing and leaves the retry state alone, but it must not silence the two
+      // reports nothing else makes: a non-retryable billing failure and a context
+      // overflow.
+      if (classification.type === "CONTEXT_OVERFLOW") notify(ctx, contextOverflowNotice(classification));
+      else if (classification.type === "BILLING_HARD_LIMIT") notify(ctx, billingNotice(classification), "error");
+      if (Date.now() >= manualWait.dueAt) dispatchRecovery(manualWait);
+      return;
+    }
 
     if (classification.type === "RATE_LIMIT") {
       if (classification.expectedResetTime !== undefined) lastExpectedTokenResetTime = classification.expectedResetTime;
@@ -438,17 +514,43 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
     } else {
       const state = retryManager.getState();
       if (classification.type === "CONTEXT_OVERFLOW") {
-        notify(ctx, "Context overflow: no continuation sent. Pi owns compaction recovery; check its compaction result.");
+        notify(ctx, contextOverflowNotice(classification));
       } else if (classification.type === "BILLING_HARD_LIMIT") {
-        notify(ctx, `Non-retryable error: "${truncateErrorMessage(classification.errorMessage)}". Check your account or provider configuration.`, "error");
+        notify(ctx, billingNotice(classification), "error");
       } else if (message.stopReason === "stop" && state.isRetrying && state.attempt > 0) {
         notify(ctx, `Response completed after ${state.attempt} retry/continuation attempt(s) (total time: ${formatDuration(Date.now() - (state.startTime ?? Date.now()))}).`);
+        // The cycle is over, so a hint from it is stale: status would otherwise
+        // keep printing it as "(passed)" until the next recovery or restart.
+        lastExpectedTokenResetTime = undefined;
+      } else if (message.stopReason === "error" && state.isRetrying && state.attempt > 0) {
+        // The follow-up itself failed with something this extension will not
+        // retry — e.g. a 400 rejecting the dangling tool call Pi forwarded from
+        // the interrupted turn. Without this branch the loop stops mid-recovery
+        // and the last thing the user saw was "Retrying request (attempt #1)…".
+        notify(
+          ctx,
+          `Recovery stopped after ${state.attempt} total attempt(s): the follow-up ended in a non-retryable error${
+            classification.errorMessage ? ` ("${truncateErrorMessage(classification.errorMessage)}")` : ""
+          }. No further continuation will be sent.`,
+          "error"
+        );
       }
       retryManager.reset();
     }
   });
 
   const commandHandler = async (args: string, ctx: ExtensionCommandContext) => {
+    // No unhandled rejection may escape a listener. The command body drives the
+    // scheduler and reloads settings (synchronously); `async` is the handler shape
+    // Pi registers.
+    try {
+      await runCommand(args, ctx);
+    } catch (error) {
+      notify(ctx, `/auto-continue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  };
+
+  const runCommand = async (args: string, ctx: ExtensionCommandContext) => {
     const trimmedArgs = args.trim();
     const subcommand = trimmedArgs.toLowerCase();
     if (/^at(\s+.*)?$/i.test(trimmedArgs)) {
@@ -466,20 +568,35 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
         notify(ctx, "Session completion is pending. Send fresh user input before scheduling another retry.", "warning");
         return;
       }
+      const wasDisabled = !config.enabled || !config.rateLimit.enabled;
+      // Name the flag that was actually off: `rateLimit.enabled` alone can be false
+      // while auto-continue as a whole stayed on.
+      const disabledScope = config.enabled ? "Rate-limit retry" : "Auto-continue";
       resetRecovery();
       suppressRecovery = false;
+      // Scheduling a retry is an explicit request for recovery, so it overrides
+      // `off` -- but not silently.
       config.enabled = true;
       config.rateLimit.enabled = true;
-      scheduleRecovery(retryManager.scheduleRetry(config, parsed.targetTimeMs), "RATE_LIMIT", ctx, undefined, true);
+      const scheduled = retryManager.scheduleRetry(config, parsed.targetTimeMs);
+      scheduleRecovery(scheduled, "RATE_LIMIT", ctx, undefined, true);
+      if (wasDisabled) {
+        // True whether or not the target was accepted: the flags above are forced
+        // on, so auto-recovery is live again either way. A refusal is reported
+        // separately, so this must not imply that a wait is armed.
+        notify(ctx, `${disabledScope} was off; this command re-enabled it for this session. Use /auto-continue off to disable it again.`, "warning");
+      }
       return;
     }
 
     if (subcommand === "status" || subcommand === "") {
       const state = retryManager.getState();
       const retryInfo = dispatched
-        ? "Continuation submitted; waiting for a turn to start (30s acknowledgement timeout)"
+        ? dispatched.phase === "started"
+          ? "Continuation submitted; Pi opened the turn"
+          : `Continuation ${dispatched.phase === "accepted" ? "accepted by the input hook" : "submitted"}; waiting for Pi to open the turn (30s acknowledgement timeout, counted from submission)`
         : state.isRetrying
-          ? `Active (attempt #${state.attempt}, elapsed: ${formatDuration(Date.now() - (state.startTime ?? Date.now()))}, last delay: ${formatDelay(state.lastDelayMs)})`
+          ? `Active (attempt #${state.attempt} total, rate limit #${state.rateLimitAttempts ?? 0}, continuation #${state.continuationAttempts ?? 0}, elapsed: ${formatDuration(Date.now() - (state.startTime ?? Date.now()))}, last delay: ${formatDelay(state.lastDelayMs)})`
           : "Idle (no active retry loop)";
       const rateLimitLimit = parseMaxRetries(config.rateLimit.maxRetries ?? DEFAULT_RATE_LIMIT_MAX_RETRIES);
       const rateLimitLines = [
@@ -514,7 +631,8 @@ export default function (pi: ExtensionAPI, customSettingsPath?: string) {
       notify(ctx, "Auto-continue disabled");
     } else if (subcommand === "reset") {
       stopRecovery();
-      config = loadConfig(customSettingsPath);
+      config = loadSettings();
+      flushConfigWarnings(ctx);
       notify(ctx, "Counters and retry state reset; settings reloaded");
     } else {
       notify(ctx, "Usage: /auto-continue [status | on | off | reset | at <HH:MM>]");

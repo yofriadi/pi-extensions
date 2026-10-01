@@ -429,6 +429,42 @@ describe("RetryManager", () => {
     assert.ok(defaultSummary.includes("Max: 5h"));
   });
 
+  it("reports the active kind's counter against its own limit in the status summary", () => {
+    const manager = new RetryManager();
+    const config = {
+      ...DEFAULT_CONFIG,
+      maxRetries: 3,
+      rateLimit: { ...DEFAULT_CONFIG.rateLimit, jitter: false, maxRetries: 5 },
+    };
+    let now = 1000000;
+    for (let index = 0; index < 3; index++) {
+      const result = manager.evaluateRetry(config, "HTTP 429", null, now);
+      now += result.delayMs;
+    }
+    for (let index = 0; index < 3; index++) {
+      const result = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff", now);
+      now += result.delayMs;
+    }
+    // The last interruption was a continuation, so the summary must compare the
+    // continuation counter with the global limit -- not print "Attempt: 6 / Max: 3".
+    const summary = manager.getStatusSummary(config, now);
+    assert.ok(summary.includes("Attempt: 3 / Max: 3 (all kinds: 6)"), summary);
+    assert.ok(summary.includes("Remaining attempts: 0"), summary);
+
+    const rateLimitSummary = (() => {
+      const m2 = new RetryManager();
+      let t = 1000000;
+      for (let index = 0; index < 2; index++) {
+        const r = m2.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff", t);
+        t += r.delayMs;
+      }
+      const r = m2.evaluateRetry(config, "HTTP 429", null, t);
+      return m2.getStatusSummary(config, t + r.delayMs);
+    })();
+    assert.ok(rateLimitSummary.includes("Attempt: 1 / Max: 5 (all kinds: 3)"), rateLimitSummary);
+    assert.ok(rateLimitSummary.includes("Remaining attempts: 4"), rateLimitSummary);
+  });
+
   it("evaluates continuation and advances attempts on shared retryState", () => {
     const manager = new RetryManager();
     const config = {
@@ -454,7 +490,7 @@ describe("RetryManager", () => {
     assert.equal(manager.getState().attempt, 2);
   });
 
-  it("consolidates rate limit retry and token continuation under the same attempt counter", () => {
+  it("keeps rate-limit and continuation budgets independent while sharing the aggregate", () => {
     const manager = new RetryManager();
     const config = {
       ...DEFAULT_CONFIG,
@@ -464,40 +500,81 @@ describe("RetryManager", () => {
       rateLimit: {
         ...DEFAULT_CONFIG.rateLimit,
         jitter: false,
+        maxRetries: 5,
       },
     };
 
     const startTime = 1000000;
-    // Attempt 1: Token truncation
     const res1 = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff", startTime);
     assert.equal(res1.attempt, 1);
     assert.equal(manager.getState().attempt, 1);
+    assert.equal(manager.getState().continuationAttempts, 1);
 
-    // Attempt 2: Provider hits rate limit during continuation
+    // A rate limit during a continuation cycle counts as its own first attempt.
     const res2 = manager.evaluateRetry(config, "HTTP 429", null, startTime + 2000);
-    assert.equal(res2.attempt, 2);
+    assert.equal(res2.attempt, 1);
     assert.equal(manager.getState().attempt, 2);
+    assert.equal(manager.getState().rateLimitAttempts, 1);
     assert.equal(manager.getState().lastInterruptionType, "RATE_LIMIT");
 
-    // Attempt 3: Another token truncation after recovering from rate limit
     const res3 = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff 2", startTime + 8000);
-    assert.equal(res3.attempt, 3);
+    assert.equal(res3.attempt, 2);
     assert.equal(manager.getState().attempt, 3);
     assert.equal(manager.getState().lastInterruptionType, "TOKEN_LIMIT");
   });
 
-  it("decrements attempt count and resets retrying state when reaching 0", () => {
+  it("does not let rate-limit retries exhaust the continuation budget", () => {
     const manager = new RetryManager();
-    const config = { ...DEFAULT_CONFIG };
+    const config = {
+      ...DEFAULT_CONFIG,
+      maxRetries: 3,
+      rateLimit: { ...DEFAULT_CONFIG.rateLimit, jitter: false, maxRetries: "90m" },
+    };
+    let now = 1000000;
+    for (let index = 0; index < 3; index++) {
+      const result = manager.evaluateRetry(config, "HTTP 429", null, now);
+      assert.equal(result.canRetry, true, `rate-limit attempt ${index + 1}`);
+      now += result.delayMs;
+    }
 
-    manager.evaluateContinuation(config, "TOKEN_LIMIT", "Truncated", 1000000);
-    assert.equal(manager.getState().attempt, 1);
-    assert.equal(manager.getState().isRetrying, true);
+    const token = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff", now);
+    assert.equal(token.canRetry, true, "continuations keep their own budget");
+    assert.equal(token.attempt, 1);
+    // Backoff must use the continuation count, not the aggregate: three charged
+    // rate-limit retries would otherwise start continuations at 5000 * 2^3.
+    assert.equal(token.delayMs, DEFAULT_CONFIG.baseDelayMs);
+    const tool = manager.evaluateContinuation(config, "INCOMPLETE_TOOL_CALL", "Truncated tool call", now + 1000);
+    assert.equal(tool.canRetry, true);
+    assert.equal(tool.attempt, 2);
+    const third = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff 3", now + 2000);
+    assert.equal(third.canRetry, true);
 
-    manager.decrementAttempt();
-    assert.equal(manager.getState().attempt, 0);
-    assert.equal(manager.getState().isRetrying, false);
-    assert.equal(manager.getState().startTime, null);
+    // The continuation limit still applies to continuations.
+    const fourth = manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff 4", now + 3000);
+    assert.equal(fourth.canRetry, false);
+    assert.match(fourth.reason ?? "", /Maximum retries limit of 3 attempt\(s\) exceeded/);
+  });
+
+  it("does not let continuations exhaust a numeric rate-limit budget", () => {
+    const manager = new RetryManager();
+    const config = {
+      ...DEFAULT_CONFIG,
+      maxRetries: 1,
+      rateLimit: { ...DEFAULT_CONFIG.rateLimit, jitter: false, maxRetries: 2 },
+    };
+    const now = 1000000;
+    assert.equal(manager.evaluateContinuation(config, "TOKEN_LIMIT", "Length cutoff", now).canRetry, true);
+
+    const first = manager.evaluateRetry(config, "HTTP 429", null, now + 5000);
+    assert.equal(first.canRetry, true);
+    assert.equal(first.attempt, 1);
+    const second = manager.evaluateRetry(config, "HTTP 429", null, now + 10000);
+    assert.equal(second.canRetry, true);
+    assert.equal(second.attempt, 2);
+    const third = manager.evaluateRetry(config, "HTTP 429", null, now + 15000);
+    assert.equal(third.canRetry, false);
+    assert.match(third.reason ?? "", /Maximum retries limit of 2 attempt\(s\) exceeded/);
+    assert.equal(manager.getState().continuationAttempts, 1);
   });
 
   describe("scheduleRetry", () => {
@@ -541,10 +618,20 @@ describe("RetryManager", () => {
       const now = 1000000;
       const targetTimeMs = now + 7200000; // 2 hours in future (> 1h max)
 
+      // Charge one attempt first, so the refusal's count distinguishes the charged
+      // total (1) from the prospective one (2) instead of both reading 0.
+      const first = manager.scheduleRetry(config, now + 60000, now);
+      assert.equal(first.canRetry, true);
+      assert.equal(first.attempt, 1);
+
       const res = manager.scheduleRetry(config, targetTimeMs, now);
 
       assert.equal(res.canRetry, false);
       assert.equal(res.deadlineExceeded, true);
+      // Nothing new was charged: this refusal happens before any state update, so
+      // the report must not claim an attempt that never happened.
+      assert.equal(res.attempt, 1);
+      assert.equal(manager.getState().rateLimitAttempts ?? 0, 1);
       assert.ok(res.reason?.includes("exceeds maximum retry duration"));
     });
 

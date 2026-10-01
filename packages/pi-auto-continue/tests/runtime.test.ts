@@ -376,6 +376,99 @@ describe("real Pi loader and AgentSession recovery", { concurrency: false }, () 
     assert.ok(h.notifications.some((message) => /Response completed after 1 retry/.test(message)));
   });
 
+  it("recovers an upstream stream interruption reported on a 200 response", async (t) => {
+    // Real transcript shape: the relay died mid-tool-call, so the message ends
+    // with a partial toolCall whose arguments never arrived. Pi forwards that
+    // dangling call to the next request unchanged; the extension cannot rewrite
+    // history, it can only make sure the turn is retried at all.
+    const h = await harness(t, [
+      {
+        stopReason: "error",
+        errorMessage: "upstream stream interrupted",
+        content: [
+          { type: "thinking", thinking: "Now the tasks.md edits." },
+          { type: "toolCall", id: "call_ef04a80ab1e64f418d3f6e14", name: "edit", arguments: {} },
+        ],
+      },
+      {},
+    ], { nativeRetries: 0 });
+    await h.session.prompt("Start the task");
+    assert.ok(h.notifications.some((message) => /upstream stream interrupted/.test(message)));
+    assert.ok(h.notifications.some((message) => /Waiting.*attempt #1/.test(message)));
+    await h.tick(60000);
+    await h.session.waitForIdle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.userMessages().length, 2);
+    // Characterization of a Pi limitation, not desired behaviour: the orphaned
+    // tool call is forwarded with no tool result, so a strict OpenAI-compatible
+    // endpoint can reject the continuation with a 400. If this fails because Pi
+    // now repairs the orphan, delete these assertions and the "Dangling tool
+    // calls" paragraph in README §3 — do not "fix" the extension for it.
+    // Deliberately not an exact role list: only the ordering is the claim, so an
+    // unrelated Pi change (extra system message, compaction) does not break it.
+    const roles = h.calls[1].messages.map((message) => message.role);
+    assert.ok(roles.indexOf("assistant") < roles.lastIndexOf("user"), "orphaned call must precede the continuation");
+    assert.match(JSON.stringify(h.calls[1].messages), /call_ef04a80ab1e64f418d3f6e14/);
+    assert.match(JSON.stringify(h.userMessages().at(-1)), /Resume the interrupted task/);
+    assert.doesNotMatch(JSON.stringify(h.calls), /<!-- auto-continue:/);
+    assert.equal(h.session.pendingMessageCount, 0);
+    // A healthy reply must not leave another timer armed.
+    await h.tick(60000);
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.notifications.some((message) => /Response completed after 1 retry/.test(message)));
+  });
+
+  it("preserves the rate-limit budget across its own follow-ups", async (t) => {
+    // The regression class behind a real 15-minute stall: the extension used to
+    // clear its own-input flag before Pi delivered the follow-up, so every cycle
+    // looked like fresh user input and re-ran attempt #1 forever — with a
+    // provider reset hint that meant the same uncapped first-attempt delay each
+    // time instead of escalating backoff.
+    const h = await harness(t, [transient, transient, transient, {}], { nativeRetries: 0 });
+    await h.session.prompt("Start the task");
+    for (let cycle = 0; cycle < 4; cycle++) {
+      await h.tick(60000);
+      await h.session.waitForIdle();
+    }
+    const attempts = h.notifications
+      .map((message) => message.match(/Waiting .*attempt #(\d+)/)?.[1])
+      .filter((attempt): attempt is string => attempt !== undefined);
+    assert.deepEqual(attempts, ["1", "2"]);
+    assert.ok(h.notifications.some((message) => /Rate limit retry stopped: .* after 2 attempt\(s\)/.test(message)));
+    assert.equal(h.calls.length, 3);
+    assert.equal(h.userMessages().length, 3);
+    assert.doesNotMatch(JSON.stringify(h.calls), /<!-- auto-continue:/);
+    assert.equal(h.session.pendingMessageCount, 0);
+  });
+
+  it("reports when a follow-up ends in a non-retryable error", async (t) => {
+    // The reachable failure mode of recovering an interrupted tool call: Pi
+    // forwards the dangling call, a strict endpoint rejects it with a 400, and
+    // recovery must say so instead of going quiet after "Retrying request…".
+    const h = await harness(t, [
+      transient,
+      {
+        stopReason: "error",
+        errorMessage: '400: {"message":"tool_calls must be followed by tool messages","type":"invalid_request_error"}',
+        content: [],
+      },
+      {},
+    ], { nativeRetries: 0 });
+    await h.session.prompt("Start the task");
+    await h.tick(60000);
+    await h.session.waitForIdle();
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.notifications.some((message) => /Retrying request \(attempt #1\)/.test(message)));
+    assert.ok(
+      h.notifications.some((message) => /Recovery stopped after 1 total attempt\(s\): the follow-up ended in a non-retryable error/.test(message)),
+      `notifications: ${JSON.stringify(h.notifications)}`
+    );
+    // Recovery must be torn down completely: no timer armed, nothing queued.
+    await h.tick(60000);
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.session.pendingMessageCount, 0);
+  });
+
   it("processes new user input while cancelling an extension wait", async (t) => {
     const h = await harness(t, [transient, {}], { nativeRetries: 0 });
     await h.session.prompt("Start the task");

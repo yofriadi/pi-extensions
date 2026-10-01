@@ -246,7 +246,10 @@ describe("fork additions", () => {
       const info = extractRetryAfterInfo(undefined, err, now);
       assert.equal(info.delayMs, 69000);
       assert.equal(info.isWindowEstimate, true);
-      assert.equal(info.expectedResetTime, now + 69000);
+      // The window's start is unknown, so no reset instant may be published: the
+      // wait is capped by maxDelayMs while `now + delayMs` would claim a reset
+      // 69s out (or 27.6h out for a daily window) that nobody observed.
+      assert.equal(info.expectedResetTime, null);
     });
 
     it("honours a configured windowRetryMargin", () => {
@@ -370,12 +373,163 @@ describe("fork additions", () => {
       for (const errorMessage of [
         "Stream ended without finish_reason",
         "upstream stream failed",
+        "upstream stream interrupted",
+        "Upstream network",
         '502 "upstream error"',
         '524 "upstream error"',
         '500: {"message":"upstream error: do request failed (request id: 20260913173637238708907fSiZbdHq)"}',
+        // Relays reuse 413 for upstream failures; it is not a payload verdict.
+        '413: {"message":"Upstream request failed","type":"api_error","code":"upstream_error"}',
       ]) {
         const result = classifyInterruption({ stopReason: "error", errorMessage });
         assert.equal(result.type, "RATE_LIMIT", `Failed on: ${errorMessage}`);
+        assert.equal(result.reason, "Transient transport or gateway failure", `Failed on: ${errorMessage}`);
+      }
+    });
+
+    it("classifies component-named interruptions and provider-side internal errors", () => {
+      for (const errorMessage of [
+        "The response was interrupted mid-stream",
+        "connection interrupted by remote peer",
+        "Internal server error",
+        "An internal error occurred. Please try again later.",
+        '500: {"message":"Internal server error","type":"api_error"}',
+      ]) {
+        const result = classifyInterruption({ stopReason: "error", errorMessage });
+        assert.equal(result.type, "RATE_LIMIT", `Failed on: ${errorMessage}`);
+        assert.equal(result.reason, "Transient transport or gateway failure", `Failed on: ${errorMessage}`);
+      }
+      // The component list IS the rule, so every entry is pinned: dropping one
+      // must fail here rather than silently narrow recovery.
+      for (const component of [
+        "stream",
+        "response",
+        "connection",
+        "socket",
+        "transfer",
+        "relay",
+        "upstream",
+        "generation",
+      ]) {
+        const result = classifyInterruption({
+          stopReason: "error",
+          errorMessage: `${component} interrupted while streaming`,
+        });
+        assert.equal(result.type, "RATE_LIMIT", `component not honoured: ${component}`);
+      }
+    });
+
+    it("keeps cancellation-flavoured interruption wording unclassified", () => {
+      for (const errorMessage of [
+        "interrupted",
+        "request interrupted",
+        "The operation was interrupted",
+        "Operation interrupted",
+        "stream interrupted by user",
+        "The request was interrupted by the client",
+        "This request was interrupted because the client disconnected",
+        "user interrupted the request",
+        "interrupted at user request",
+        "Ctrl+C interrupted the stream",
+        // Cancellation wording that co-occurs with a transient marker. These
+        // are what make the cancellation patterns load-bearing: without them a
+        // transient pattern fires and the turn is retried.
+        "The operation was interrupted. fetch failed",
+        "operation interrupted: server is overloaded",
+        "interrupted at user request: fetch failed",
+        "user interrupted the request; upstream error",
+        "client interrupted: socket hang up",
+        "Aborted after 1 retry attempt",
+      ]) {
+        const result = classifyInterruption({ stopReason: "error", errorMessage });
+        assert.equal(result.type, "NONE", `Failed on: ${errorMessage}`);
+      }
+    });
+
+    it("does not let interruption or internal-error wording resurrect terminal failures", () => {
+      const cases = [
+        ["Your authentication session was interrupted. Sign in again.", "NONE"],
+        ["Subscription upgrade interrupted", "NONE"],
+        ["upstream closed the connection because your API key is invalid", "NONE"],
+        ["This endpoint is not available in your region. Please try again later.", "NONE"],
+        ["This model is deprecated. Please try again later with a different model.", "NONE"],
+        ["internal error: model requires a paid plan", "BILLING_HARD_LIMIT"],
+        ["Internal error: forbidden", "BILLING_HARD_LIMIT"],
+        ["Internal error: permission denied for this workspace", "BILLING_HARD_LIMIT"],
+        ["Internal error: request is not authorized for this workspace", "BILLING_HARD_LIMIT"],
+        // Bare authorization wording is deliberately NOT terminal: it appears in
+        // throttled text ("Access Denied - Too Many Requests") and this list
+        // outranks every HTTP status branch. Only the internal-error wrapper
+        // makes it terminal, which is what the four rows below pin.
+        ["upstream reset: model requires an entitlement you do not have", "NONE"],
+        ["Access denied. Try again later.", "NONE"],
+        ["Internal error: unauthenticated", "BILLING_HARD_LIMIT"],
+        ["internal error: entitlement expired", "BILLING_HARD_LIMIT"],
+        ["InternalError: request entity too large", "CONTEXT_OVERFLOW"],
+        // A payload-size complaint that also carries throttling wording
+        // (`"code":"free_rate_limited"`): re-sending the same prompt cannot
+        // succeed, so this defers to compaction instead of retrying.
+        [
+          '400: {"message":"This prompt is longer than the free tier allows for a single request. Shorten it, or add credits","type":"invalid_request_error","code":"free_rate_limited"}',
+          "CONTEXT_OVERFLOW",
+        ],
+        [
+          '400: {"message":"<400> InternalError.Algo.DataInspectionFailed: Input text data may contain inappropriate content.","type":"data_inspection_failed"}',
+          "NONE",
+        ],
+      ];
+      for (const [errorMessage, expected] of cases) {
+        assert.equal(classifyInterruption({ stopReason: "error", errorMessage }).type, expected, errorMessage);
+      }
+    });
+
+    it("does not let ambiguous interruption or permission wording veto a retryable status", () => {
+      // USER_ABORT and BILLING_HARD_LIMIT outrank every status branch, so an
+      // over-broad match there silently discards a confirmed rate limit.
+      for (const httpStatus of [429, 502, 503]) {
+        for (const errorMessage of ["request interrupted", "upstream request interrupted", "Forbidden"]) {
+          assert.equal(
+            classifyInterruption({ stopReason: "error", httpStatus, errorMessage }).type,
+            "RATE_LIMIT",
+            `${httpStatus}: ${errorMessage}`
+          );
+        }
+      }
+      const retryable: Array<{ httpStatus?: number; errorMessage: string }> = [
+        { httpStatus: 429, errorMessage: "Rate limit exceeded. The request was interrupted. Retry after 60s" },
+        { httpStatus: 504, errorMessage: "entitlement check failed: upstream timed out" },
+        { errorMessage: "operation interrupted: ECONNRESET" },
+        { errorMessage: "The operation was interrupted by a socket hang up" },
+        // Each row pins one alternative in the lookahead's exclusion list;
+        // they must start with "operation" or the cancellation pattern never
+        // fires and the row proves nothing.
+        { errorMessage: "operation interrupted: the connection was reset by peer" },
+        { errorMessage: "operation interrupted: upstream error" },
+        { errorMessage: "operation interrupted: request timed out" },
+        { errorMessage: "request interrupted: connection reset by peer" },
+        { errorMessage: "Request interrupted due to a network timeout" },
+        { errorMessage: "unable to verify api key — forbidden" },
+        { errorMessage: "entitlement service temporarily unavailable" },
+        { errorMessage: "upstream error: 403 Forbidden" },
+      ];
+      for (const input of retryable) {
+        assert.equal(classifyInterruption({ stopReason: "error", ...input }).type, "RATE_LIMIT", JSON.stringify(input));
+      }
+    });
+
+    it("bounds the component-interrupt match to one sentence and a 40-character gap", () => {
+      // Pins both constraints. Widening the gap bound or letting "." through
+      // resurrects cross-sentence false positives such as "Stream finished
+      // successfully. The user then interrupted."
+      const gap = (n: number) => `stream ${"x".repeat(n)} interrupted`;
+      assert.equal(classifyInterruption({ stopReason: "error", errorMessage: gap(38) }).type, "RATE_LIMIT");
+      assert.equal(classifyInterruption({ stopReason: "error", errorMessage: gap(39) }).type, "NONE");
+      for (const errorMessage of [
+        "relay handed off. something something interrupted",
+        "generation started ok. the operator then interrupted",
+        "Stream finished successfully. The user then interrupted.",
+      ]) {
+        assert.equal(classifyInterruption({ stopReason: "error", errorMessage }).type, "NONE", errorMessage);
       }
     });
 
@@ -510,6 +664,7 @@ describe("fork additions", () => {
         "Provider rejected the request due to temporary capacity; retry after 10s",
         "Provider unavailable: safety service timed out",
         "Provider policy service temporarily unavailable",
+        "content moderation service temporarily unavailable",
       ]) {
         for (const httpStatus of [undefined, 429, 503]) {
           const result = classifyInterruption({ stopReason: "error", errorMessage, httpStatus });
@@ -555,6 +710,25 @@ describe("recovery safety regressions", () => {
     assert.equal(classifyInterruption({ stopReason: "length", httpStatus: 429, content: [{ type: "text", text: "partial" }] }).type, "TOKEN_LIMIT");
   });
 
+  it("retries a relay interruption that died mid-tool-call as RATE_LIMIT", () => {
+    const content = [
+      { type: "thinking", thinking: "Now tasks.md edits." },
+      { type: "toolCall", id: "call_ef04a80ab1e64f418d3f6e14", name: "edit", arguments: {} },
+    ];
+    // The reported stall: a 200 response whose stream broke while emitting a
+    // tool call. The relay failure outranks the truncated-tool-call reading —
+    // the turn never reached max_tokens, so the rate-limit path and its
+    // deadline apply.
+    const result = classifyInterruption({
+      stopReason: "error",
+      errorMessage: "upstream stream interrupted",
+      content,
+      httpStatus: 200,
+    });
+    assert.equal(result.type, "RATE_LIMIT");
+    assert.equal(result.reason, "Transient transport or gateway failure");
+  });
+
   it("gives cancellation, context, billing, and invalid requests priority over retryable statuses", () => {
     const cases = [
       ["Request was cancelled by the user; fetch failed", "NONE"],
@@ -574,6 +748,81 @@ describe("recovery safety regressions", () => {
     for (const httpStatus of [401, 402, 403]) {
       assert.equal(classifyInterruption({ stopReason: "error", httpStatus, errorMessage: "overloaded" }).type, "BILLING_HARD_LIMIT");
     }
+  });
+
+  it("retries a rate limit the gateway wrapped as an invalid request", () => {
+    const wrapped = '429: {"message":"Rate limited","type":"invalid_request_error","code":"rate_limit_exceeded"}';
+    for (const httpStatus of [undefined, 429]) {
+      const result = classifyInterruption({ stopReason: "error", errorMessage: wrapped, httpStatus, fatalFirst: true });
+      assert.equal(result.type, "RATE_LIMIT", `httpStatus ${String(httpStatus)}`);
+    }
+    // The override reaches the request-shape guard only. Refusals, credential
+    // errors, unknown models and an anchored permanent status stay terminal even
+    // when the same body mentions a rate limit.
+    for (const errorMessage of [
+      "Provider rejected the request for safety reasons; rate limit exceeded",
+      "invalid_grant: rate limit exceeded",
+      "model not found: rate limit exceeded",
+      '404: {"message":"Rate limited","type":"invalid_request_error"}',
+      "invalid_request: unsupported parameter",
+    ]) {
+      assert.equal(classifyInterruption({ stopReason: "error", errorMessage, fatalFirst: true }).type, "NONE", errorMessage);
+    }
+  });
+
+  it("keeps quota exhaustion wrapped as an invalid request terminal", () => {
+    // Bare "quota" is not an explicit throttling signal. If it were, these
+    // out-of-credit bodies would retry for the whole deadline at the default
+    // fatalFirst: false. That they stay NONE (rather than reporting a billing
+    // failure) is the documented open gap: the request-shape guard is consulted
+    // before the ambiguous-quota branch.
+    for (const errorMessage of [
+      '400: {"message":"Insufficient quota. Please add credits to continue.","type":"invalid_request_error","code":"insufficient_quota"}',
+      '{"message":"Quota exhausted for this account","type":"invalid_request_error","code":"quota_exhausted"}',
+    ]) {
+      for (const fatalFirst of [false, true]) {
+        assert.equal(
+          classifyInterruption({ stopReason: "error", errorMessage, fatalFirst }).type,
+          "NONE",
+          `fatalFirst=${String(fatalFirst)}: ${errorMessage}`
+        );
+      }
+    }
+    // The throttling wrapper that motivated the override is unaffected.
+    assert.equal(
+      classifyInterruption({
+        stopReason: "error",
+        errorMessage: '429: {"message":"Rate limited","type":"invalid_request_error","code":"rate_limit_exceeded"}',
+      }).type,
+      "RATE_LIMIT"
+    );
+  });
+
+  it("treats prompt and input size as context overflow, never request duration", () => {
+    for (const errorMessage of [
+      "This prompt is longer than the free tier allows for a single request.",
+      "input is longer than 128000 tokens",
+      "prompt is longer than the model context window",
+    ]) {
+      assert.equal(classifyInterruption({ stopReason: "error", errorMessage }).type, "CONTEXT_OVERFLOW", errorMessage);
+    }
+    // Context overflow is consulted before every HTTP status branch, so latency
+    // wording must not be able to veto a confirmed 429/504 or send a timeout to
+    // compaction that has nothing to compact.
+    for (const httpStatus of [undefined, 429, 504]) {
+      for (const errorMessage of [
+        "The request is longer than the gateway timeout",
+        "request is longer than 30000ms",
+        "This request is longer than 5 minutes old",
+      ]) {
+        const result = classifyInterruption({ stopReason: "error", errorMessage, httpStatus });
+        assert.notEqual(result.type, "CONTEXT_OVERFLOW", `${String(httpStatus)}: ${errorMessage}`);
+      }
+    }
+    assert.equal(
+      classifyInterruption({ stopReason: "error", errorMessage: "The request is longer than the gateway timeout", httpStatus: 504 }).type,
+      "RATE_LIMIT"
+    );
   });
 
   it("does not retry permanent numeric statuses even when the body sounds transient", () => {

@@ -75,13 +75,14 @@ function harness(t: TestContext, config: Record<string, unknown> = {}, tui = fal
   const api = new MockExtensionAPI();
   const state = { idle: true, queued: false, sessionId: "session-a" };
   const notifications: Array<{ message: string; type?: string }> = [];
+  const ui = { enabled: true };
   const terminalHandlers = new Set<TerminalInputHandler>();
   const abortController = new AbortController();
   // Only the context methods used by the extension are needed for these unit tests.
   // Loader/session integration tests exercise the complete, real context separately.
   const ctx = {
     mode: tui ? "tui" : "rpc",
-    hasUI: true,
+    get hasUI() { return ui.enabled; },
     model: { provider: "test", id: "test-model" },
     sessionManager: { getSessionId: () => state.sessionId },
     signal: abortController.signal,
@@ -137,7 +138,7 @@ function harness(t: TestContext, config: Record<string, unknown> = {}, tui = fal
     await emit("session_shutdown");
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  return { api, state, ctx, notifications, terminalHandlers, abortController, emit, command, settle, start, acceptRetry };
+  return { api, state, ctx, ui, notifications, terminalHandlers, abortController, emit, command, settle, start, acceptRetry };
 }
 
 const savedEnv = new Map<string, string | undefined>();
@@ -239,6 +240,118 @@ describe("native-aware recovery", () => {
     assert.equal(h.api.sentUserMessages.length, 0);
   });
 
+  it("survives a context whose UI accessor throws", async (t) => {
+    // "0.0" is rejected by the loader, so a warning is buffered for session_start.
+    const h = harness(t, { maxRetries: "0.0" });
+    // An embedded caller can dispose a session without emitting session_shutdown;
+    // reading the disposed context throws, and a throw out of a timer callback is an
+    // uncaughtException that kills the process. Notifications are best-effort.
+    Object.defineProperty(h.ui, "enabled", { get() { throw new Error("session disposed"); } });
+    await h.emit("session_start");
+    await h.command("status");
+    await h.emit("message_end", { message: assistant({ errorMessage: "payment required" }) });
+    await h.emit("agent_settled");
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    t.mock.timers.tick(30000);
+    await h.command("status");
+  });
+
+  it("survives a notify that throws inside a timer callback", async (t) => {
+    const h = harness(t);
+    // hasUI is true here, so this exercises the guard around the ui.notify call
+    // itself rather than the accessor: both dispatch and the watchdog notify from
+    // inside a setTimeout callback, where a throw is an uncaughtException.
+    (h.ctx.ui as unknown as { notify: unknown }).notify = () => {
+      throw new Error("ui gone");
+    };
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+    t.mock.timers.tick(30000);
+    await h.command("status");
+  });
+
+  it("flushes buffered settings warnings on /auto-continue reset", async (t) => {
+    const h = harness(t, { maxRetries: "0.0" });
+    assert.equal(h.notifications.length, 0);
+    await h.command("reset");
+    assert.ok(
+      h.notifications.some((n) => n.type === "warning" && /Settings problem/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+  });
+
+  it("survives a throwing UI when the submission itself fails", async (t) => {
+    const h = harness(t);
+    Object.defineProperty(h.ui, "enabled", { get() { throw new Error("session disposed"); } });
+    h.api.sendError = new Error("provider rejected");
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    await h.command("status");
+  });
+
+  it("says why recovery stopped when Pi is busy at dispatch time", async (t) => {
+    const h = harness(t);
+    await h.settle();
+    h.state.idle = false;
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 0);
+    assert.ok(
+      h.notifications.some((n) => n.type === "warning" && /Recovery cancelled: Pi was busy/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+  });
+
+  it("does not publish a fabricated reset time for a rolling-window estimate", async (t) => {
+    const h = harness(t);
+    await h.emit("message_end", {
+      message: assistant({
+        errorMessage:
+          'Error: 429: {"code":"","message":"You have reached the request limit[z-ai/glm-5.3-free]: Maximum 8 requests within 1 minutes. (request id: 20260913173637238708907fSiZbdHq)","type":"api_error"}',
+      }),
+    });
+    await h.emit("agent_settled");
+    const notice = h.notifications.find((n) => /Waiting/.test(n.message));
+    assert.ok(notice, JSON.stringify(h.notifications));
+    // The window's start is unknown; the wait is capped, so a reset instant
+    // derived from it would contradict the delay printed beside it.
+    assert.equal(/Expected token reset time/.test(notice.message), false, notice.message);
+    t.mock.timers.tick(60000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("drops the previous cycle's reset hint once a continuation completes", async (t) => {
+    const h = harness(t);
+    const hint = new Date(NOW + 30000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    await h.emit("message_end", { message: assistant({ errorMessage: `rate limit exceeded. Retry after ${hint}` }) });
+    await h.emit("agent_settled");
+    await h.command("status");
+    assert.match(h.notifications.at(-1)?.message ?? "", /Expected token reset time/);
+    t.mock.timers.tick(60000);
+    await h.acceptRetry();
+    await h.settle(assistant({ stopReason: "stop", errorMessage: undefined }));
+    await h.command("status");
+    const status = h.notifications.at(-1)?.message ?? "";
+    assert.match(status, /Response completed|Current retry status: Idle/);
+    assert.equal(/Expected token reset time/.test(status), false, status);
+  });
+
+  it("reports both recovery counters in status", async (t) => {
+    const h = harness(t);
+    await h.settle(assistant());
+    t.mock.timers.tick(1000);
+    await h.acceptRetry();
+    await h.settle(assistant({ stopReason: "length" }));
+    await h.command("status");
+    const status = h.notifications.at(-1)?.message ?? "";
+    assert.match(status, /attempt #2 total/);
+    assert.match(status, /rate limit #1/);
+    assert.match(status, /continuation #1/);
+  });
+
   it("preserves the budget across continuations and only reports a healthy completion", async (t) => {
     const h = harness(t);
     await h.settle(assistant({ stopReason: "length" }));
@@ -334,9 +447,32 @@ describe("native-aware recovery", () => {
     t.mock.timers.tick(1000);
     const text = h.api.sentUserMessages[0].content;
     assert.deepEqual(await h.emit("input", { source: "extension", text }), { action: "transform", text: "Continue" });
+    // Accepted by the input hook but not yet opened by Pi, and the watchdog still
+    // runs: status has to say both, and say when the 30s started.
+    await h.command("status");
+    assert.match(
+      h.notifications.at(-1)?.message ?? "",
+      /accepted by the input hook; waiting for Pi to open the turn \(30s acknowledgement timeout, counted from submission\)/
+    );
     t.mock.timers.tick(30000);
     assert.ok(h.notifications.some((n) => /Continuation did not start within 30s/.test(n.message)));
     assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("does not pause recovery when Pi opened the turn but has not emitted the user message", async (t) => {
+    const h = harness(t, { tokenLimit: { continuePrompt: "Continue" } });
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    const text = h.api.sentUserMessages[0].content;
+    assert.deepEqual(await h.emit("input", { source: "extension", text }), { action: "transform", text: "Continue" });
+    await h.emit("before_agent_start", { prompt: "Continue", systemPrompt: "Base." });
+    // The turn exists, so the acknowledgement exists: pausing here would wipe the
+    // budget mid-turn and restart the next cycle at the uncapped first attempt.
+    t.mock.timers.tick(30000);
+    assert.equal(h.notifications.some((n) => /did not start/.test(n.message)), false, JSON.stringify(h.notifications));
+    await h.command("status");
+    // The acknowledgement exists, so status must not still promise a watchdog.
+    assert.match(h.notifications.at(-1)?.message ?? "", /Continuation submitted; Pi opened the turn/);
   });
 
   it("clears the submission watchdog once its user message starts", async (t) => {
@@ -481,6 +617,33 @@ describe("input and cancellation", () => {
     t.mock.timers.tick(1000);
     assert.equal(h.api.sentUserMessages.length, 1);
   });
+
+  it("reports unusable settings as warnings at session start", async (t) => {
+    const h = harness(t, { backoffMultiplier: 0.5, rateLimit: { maxRetry: "90m" } });
+    await h.emit("session_start");
+    const warnings = () => h.notifications.filter((entry) => entry.type === "warning").map((entry) => entry.message);
+    // One aggregated notice per load, not one toast per problem.
+    assert.equal(warnings().length, 1, warnings().join("\n"));
+    assert.match(warnings()[0], /Settings problems:/);
+    assert.match(warnings()[0], /backoffMultiplier must be a number >= 1, got 0\.5; using 2/);
+    assert.match(warnings()[0], /unknown autoContinue\.rateLimit setting "maxRetry"; ignored/);
+    // A reload re-reports its own warnings; the buffer is not leaked or doubled
+    // within a single load.
+    await h.emit("session_start");
+    assert.equal(warnings().length, 2, warnings().join("\n"));
+  });
+
+  it("keeps settings warnings buffered when there is no UI to deliver them to", async (t) => {
+    const h = harness(t, { backoffMultiplier: 0.5 });
+    h.ui.enabled = false;
+    await h.emit("session_start");
+    assert.equal(h.notifications.length, 0);
+    h.ui.enabled = true;
+    await h.emit("session_start");
+    const warnings = h.notifications.filter((entry) => entry.type === "warning");
+    assert.equal(warnings.length, 1, JSON.stringify(h.notifications));
+    assert.match(warnings[0].message, /backoffMultiplier must be a number >= 1/);
+  });
 });
 
 describe("HTTP correlation and compaction", () => {
@@ -588,7 +751,25 @@ describe("HTTP correlation and compaction", () => {
     t.mock.timers.tick(60000);
     assert.equal(h.api.sentUserMessages.length, 0);
     assert.ok(h.notifications.some((n) => /Pi owns compaction/.test(n.message)));
+    // The overflow notice must carry the provider's own wording: for a free-tier
+    // prompt cap the remedy is in that text, not in the words "context overflow".
+    assert.ok(
+      h.notifications.some((n) => /Context overflow: no continuation sent \("maximum context length exceeded"\)/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
     assert.ok(h.notifications.some((n) => n.type === "error" && /Non-retryable/.test(n.message)));
+  });
+
+  it("reports a failing command instead of rejecting", async (t) => {
+    const h = harness(t);
+    h.ctx.sessionManager.getSessionId = () => {
+      throw new Error("boom");
+    };
+    await h.command("at 14:30");
+    assert.ok(
+      h.notifications.some((n) => n.type === "error" && /\/auto-continue failed: boom/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
   });
 });
 
@@ -628,6 +809,76 @@ describe("commands and subagent guards", () => {
     assert.equal(h.api.sentUserMessages.length, 1);
     await h.emit("agent_settled");
     assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("still reports non-retryable and overflow outcomes while a manual schedule waits", async (t) => {
+    const h = harness(t);
+    // 30 minutes out: inside the 5h default rate-limit deadline, far enough that
+    // the settlements below happen while the schedule is still waiting.
+    await h.command("at 12:30");
+    await h.emit("message_end", { message: assistant({ errorMessage: "payment required" }) });
+    await h.emit("agent_settled");
+    assert.ok(
+      h.notifications.some((n) => n.type === "error" && /Non-retryable error: "payment required"/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+    await h.emit("message_end", { message: assistant({ errorMessage: "maximum context length exceeded" }) });
+    await h.emit("agent_settled");
+    assert.ok(
+      h.notifications.some((n) => /Context overflow: no continuation sent \("maximum context length exceeded"\)/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+    // Reporting must not disturb the manual schedule.
+    assert.equal(h.api.sentUserMessages.length, 0);
+    t.mock.timers.tick(31 * 60 * 1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("says when a manual schedule re-enables recovery that was off", async (t) => {
+    const h = harness(t);
+    await h.command("off");
+    await h.command("at 12:00:05");
+    assert.ok(
+      h.notifications.some((n) => n.type === "warning" && /re-enabled it for this session/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+    t.mock.timers.tick(6000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("announces the re-enable even when the target is refused, without implying a wait", async (t) => {
+    const h = harness(t);
+    await h.command("off");
+    // 8 hours out, past the 5h default rate-limit deadline: nothing is armed, but
+    // `at` forced the flags on, so auto-recovery really is live again and the user
+    // has to be told -- by a notice that does not claim a schedule exists.
+    await h.command("at 20:00");
+    assert.ok(
+      h.notifications.some((n) => /exceeds maximum retry duration/.test(n.message)),
+      JSON.stringify(h.notifications)
+    );
+    const reEnabled = h.notifications.find((n) => /re-enabled it for this session/.test(n.message));
+    assert.ok(reEnabled, JSON.stringify(h.notifications));
+    assert.equal(/manual retry/.test(reEnabled.message), false, reEnabled.message);
+    // The claim has to be true: ordinary recovery works again after a refused `at`.
+    await h.settle(assistant({ stopReason: "length" }));
+    t.mock.timers.tick(1000);
+    assert.equal(h.api.sentUserMessages.length, 1);
+  });
+
+  it("names the flag that was actually off when only rate-limit retry was disabled", async (t) => {
+    const h = harness(t, { rateLimit: { enabled: false, jitter: false } });
+    await h.command("at 12:00:05");
+    const notice = h.notifications.find((n) => /re-enabled it for this session/.test(n.message));
+    assert.ok(notice, JSON.stringify(h.notifications));
+    assert.match(notice.message, /Rate-limit retry was off/);
+    assert.equal(/^.*Auto-continue was off/m.test(notice.message), false, notice.message);
+  });
+
+  it("does not claim a re-enable when recovery was already on", async (t) => {
+    const h = harness(t);
+    await h.command("at 12:00:05");
+    assert.equal(h.notifications.some((n) => /re-enabled/.test(n.message)), false, JSON.stringify(h.notifications));
   });
 
   it("polls a due manual schedule while busy even without another settlement event", async (t) => {

@@ -140,6 +140,31 @@ export const RATE_LIMIT_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Unambiguous throttling language. Deliberately narrower than
+ * RATE_LIMIT_PATTERNS: this list is allowed to override the permanent-request
+ * guard, so broad capacity wording ("capacity", "temporarily unavailable") must
+ * not be able to rescue a genuine invalid-request refusal. It exists because
+ * gateways wrap real 429s as
+ * `429: {"message":"Rate limited","type":"invalid_request_error",
+ * "code":"rate_limit_exceeded"}`, which the guard would otherwise discard.
+ *
+ * Bare `quota` is deliberately absent: `RATE_LIMIT_PATTERNS` only matches quota
+ * wording combined with a verb (`quota.?exceeded`, `insufficient.?quota`), and a
+ * bare match would turn `{"message":"Insufficient quota","type":
+ * "invalid_request_error","code":"insufficient_quota"}` — an out-of-credit error —
+ * into a retry loop for the whole deadline at the default `fatalFirst: false`.
+ */
+export const EXPLICIT_RATE_LIMIT_PATTERNS: RegExp[] = [
+  /rate.?limit/i,
+  /too.?many.?requests/i,
+  /resource.?exhausted/i,
+  /throttl/i,
+  /requests?.?per.?(?:minute|second|day|hour)/i,
+  /tokens?.?per.?(?:minute|second|day|hour)/i,
+  /\b(?:RPM|TPM|RPD|TPD)\b/i,
+];
+
+/**
  * Patterns for transient transport and gateway failures that surface as
  * `stopReason: "error"` turns: dropped connections, timed-out requests,
  * upstream relay errors, gateway maintenance, and routing capacity. The
@@ -159,8 +184,24 @@ export const TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   // "upstream stream failed", "stream ended before message_stop"
   /stream.{0,40}(?:ended|fail|error|without finish)/i,
   // Upstream relay failures: "upstream chain exhausted",
-  // '502 "upstream error"', "upstream error: do request failed"
-  /upstream.{0,30}(?:error|fail|exhaust)/i,
+  // '502 "upstream error"', "upstream error: do request failed",
+  // "Upstream network" (relays truncate the message mid-phrase)
+  /upstream.{0,30}(?:error|fail|exhaust|network)/i,
+  // Component-named interruption only, and only when the component is named
+  // BEFORE the verb: "upstream stream interrupted", "response interrupted
+  // mid-stream". A bare "interrupted" also appears in cancellation ("The
+  // operation was interrupted"), auth ("authentication session was
+  // interrupted") and billing text. The character class bounds the gap between
+  // the two words, not the sentence, so a component named after the verb
+  // ("Ctrl+C interrupted the stream") deliberately does not match; the same
+  // dot excludes dotted model names and hosts ("connection to claude-3.5-sonnet
+  // was interrupted"), which no observed error text has needed. User/client
+  // attribution is filtered earlier by USER_ABORT_PATTERNS.
+  /\b(?:stream|response|connection|socket|transfer|relay|upstream|generation)\b[^.\n]{0,40}\binterrupt/i,
+  // Provider-side 500s phrased as text with no observed status:
+  // "Internal server error", "An internal error occurred. Please try again
+  // later.", "internal_server_error", "InternalError".
+  /\binternal[\s_]*(?:server[\s_]*)?error\b/i,
   // Provider relay status: "Provider is unavailable",
   // "Provider rejected the request", "Provider finish_reason: error".
   // Policy/safety rejections are handled by the permanent-error guard below.
@@ -211,13 +252,37 @@ export const BILLING_HARD_LIMIT_PATTERNS: RegExp[] = [
   /authentication.?failed/i,
   /unauthorized/i,
   /forbidden.*billing/i,
+  // A generic "internal error" wrapper must not launder a permission, paywall,
+  // or entitlement failure into a retry loop. Scoped to that wrapper on purpose:
+  // bare "forbidden", "entitlement", "access denied" and "not authorized" also
+  // appear in throttled and transport text ("upstream error: 403 Forbidden",
+  // "Access Denied - Too Many Requests", "entitlement check failed: upstream
+  // timed out"), and this list is checked before every HTTP status branch, so a
+  // broad match would silently discard a confirmed 429/503. Real 401/402/403
+  // responses are caught by the httpStatus check in classifier.ts, and the
+  // money-and-account wording above stays global because it is never a rate
+  // limit.
+  /\binternal[\s_]*(?:server[\s_]*)?error\b[^.\n]{0,60}\b(?:forbidden|entitlement|unauthenticated|not\s+authorized|(?:access|permission)\s+denied|paid\s+(?:plan|subscription|tier))\b/i,
 ];
 
 /** User cancellation takes precedence over transport errors or cached status. */
 export const USER_ABORT_PATTERNS: RegExp[] = [
+  // Only explicit user/client attribution counts as cancellation for aborts.
   /\b(?:operation|request|stream)\s+(?:was\s+)?(?:aborted|cancelled|canceled)\b/i,
-  /\b(?:abort(?:ed)?|cancel(?:led|ed)?|terminated)\s+by\s+(?:the\s+)?(?:user|client)\b/i,
-  /\b(?:user|client)\s+(?:abort(?:ed)?|cancel(?:led|ed)?|closed)\b/i,
+  // "The operation was interrupted": wording that names no broken component.
+  // Skipping it costs one manual prompt; guessing wrong costs a whole retry
+  // deadline. Deliberately limited to "operation" — "request interrupted" also
+  // appears in gateway text that carries a retryable status ("429 … The request
+  // was interrupted. Retry after 60s"), and this list outranks every status
+  // check. Component-named interruption ("upstream stream interrupted") stays
+  // retryable via TRANSIENT_ERROR_PATTERNS; bare "request interrupted" matches
+  // nothing and is left alone. The lookahead keeps explicit transport evidence
+  // retryable ("operation interrupted: ECONNRESET", "… by a socket hang up",
+  // "operation interrupted: upstream error").
+  /\boperation\s+(?:was\s+)?interrupt(?:ed|ion)?\b(?![^.\n]{0,40}\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|socket hang.?up|reset by peer|timed?.?out|upstream)\b)/i,
+  /\b(?:abort(?:ed)?|cancel(?:led|ed)?|terminated|interrupt(?:ed)?)\s+by\s+(?:the\s+)?(?:user|client)\b/i,
+  /\binterrupt(?:ed|ion)?\s+(?:at|on|per)\s+(?:the\s+)?(?:user|client)\b/i,
+  /\b(?:user|client)\s+(?:abort(?:ed)?|cancel(?:led|ed)?|closed|interrupt(?:ed)?)\b/i,
   /\bAbortError\b/i,
 ];
 
@@ -228,10 +293,26 @@ export const PERMANENT_REQUEST_ERROR_PATTERNS: RegExp[] = [
   /provider.{0,30}rejected.{0,60}(?:polic|safety|prohibit|illegal)/is,
   /content[_\s-]?(?:policy|filter)|safety[_\s-]?(?:system|filter|violation)|policy\s+violation/i,
   /finish_reason["'\s:=]+(?:safety|recitation|blocklist|prohibited_content|spii)\b/i,
-  /invalid[_\s-]?(?:request|argument|schema|parameter)|unsupported[_\s-]?(?:model|parameter)/i,
+  // Input moderation rejections: Alibaba's "InternalError.Algo.
+  // DataInspectionFailed: Input text data may contain inappropriate content".
+  // The "InternalError" prefix must not make these transient. Scoped to the
+  // rejection itself: a moderation SERVICE outage ("content moderation service
+  // temporarily unavailable") stays retryable, exactly like the policy/safety
+  // service outages above.
+  /data[_\s-]?inspection[_\s-]?failed|\binappropriate\s+content\b/i,
   /model.{0,40}(?:not found|does not exist|disabled|not available for|not eligible)/i,
   /\binvalid_grant\b|refresh token.{0,40}(?:expired|not found|invalid)/i,
   /^\s*(?:error:\s*)?(?:HTTP[\s/]*)?(?:401|402|403|404|405|422|501|505)\b/i,
+];
+
+/**
+ * Request-shape refusals ("invalid_request", "unsupported parameter"). Kept
+ * apart from PERMANENT_REQUEST_ERROR_PATTERNS because gateways reuse that
+ * wrapper `type` for real 429s, so explicit throttling language may override
+ * these — and only these.
+ */
+export const REQUEST_SHAPE_ERROR_PATTERNS: RegExp[] = [
+  /invalid[_\s-]?(?:request|argument|schema|parameter)|unsupported[_\s-]?(?:model|parameter)/i,
 ];
 
 /**
@@ -243,7 +324,15 @@ export const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   /context.?window/i,
   /maximum.?context/i,
   /prompt.?(?:is.?)?too.?long/i,
-  /request.?too.?large/i,
+  // Prompt caps phrased as a comparison instead of "too long": "This prompt is
+  // longer than the free tier allows for a single request" (gateway code
+  // `free_rate_limited`). Re-sending the same prompt cannot succeed; compaction
+  // can, so this must outrank the throttling wording in the same body.
+  // `request` is deliberately not a subject here: "The request is longer than the
+  // gateway timeout" is a latency complaint, and this list is consulted before
+  // every HTTP status branch, so it would veto a confirmed 429/504.
+  /(?:prompt|input)\s+(?:is\s+)?longer\s+than\b/i,
+  /request.?(?:entity.?)?too.?large/i,
   /input.?too.?long/i,
   /exceeds?.?(?:the.?)?max(?:imum)?.?(?:context|tokens?)/i,
   /model.?context.?size/i,

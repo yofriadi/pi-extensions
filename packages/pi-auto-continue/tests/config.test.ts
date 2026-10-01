@@ -383,4 +383,139 @@ describe("configuration safety regressions", () => {
     assert.equal(loadConfig().baseDelayMs, 1234);
     assert.equal(loadConfig(explicit).baseDelayMs, 4567);
   });
+
+  describe("validation warnings", () => {
+    const collect = (settings: unknown) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-auto-continue-warn-"));
+      const file = path.join(dir, "settings.json");
+      fs.writeFileSync(file, typeof settings === "string" ? settings : JSON.stringify(settings));
+      const warnings: string[] = [];
+      try {
+        return { config: loadConfig(file, (message) => warnings.push(message)), warnings };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    it("reports every value it cannot use together with the fallback it applied", () => {
+      const { config, warnings } = collect({
+        autoContinue: {
+          enabled: 0,
+          baseDelayMs: "soon",
+          maxDelayMs: -5,
+          backoffMultiplier: 0.5,
+          maxRetries: -1,
+          rateLimit: { jitter: "yes", fatalFirst: 1, windowRetryMargin: 0.9, maxRetries: "abc", retryPrompt: "   " },
+          tokenLimit: { enabled: "no" },
+        },
+      });
+      assert.equal(config.enabled, true);
+      assert.equal(config.baseDelayMs, DEFAULT_CONFIG.baseDelayMs);
+      assert.equal(config.maxDelayMs, DEFAULT_CONFIG.maxDelayMs);
+      assert.equal(config.backoffMultiplier, DEFAULT_CONFIG.backoffMultiplier);
+      assert.equal(config.maxRetries, DEFAULT_CONFIG.maxRetries);
+      assert.equal(config.rateLimit.jitter, true);
+      assert.equal(config.rateLimit.fatalFirst, false);
+      assert.equal(config.rateLimit.windowRetryMargin, DEFAULT_CONFIG.rateLimit.windowRetryMargin);
+      assert.equal(config.rateLimit.maxRetries, DEFAULT_CONFIG.rateLimit.maxRetries);
+      assert.equal(config.rateLimit.retryPrompt, DEFAULT_CONFIG.rateLimit.retryPrompt);
+      assert.equal(config.tokenLimit.enabled, true);
+      for (const label of [
+        "enabled must be true or false",
+        "baseDelayMs must be a non-negative duration",
+        "maxDelayMs must be a non-negative duration",
+        "backoffMultiplier must be a number >= 1",
+        "maxRetries must be a non-negative integer or a duration",
+        "rateLimit.jitter must be true or false",
+        "rateLimit.fatalFirst must be true or false",
+        "rateLimit.windowRetryMargin must be a number >= 1",
+        "rateLimit.maxRetries must be a non-negative integer or a duration",
+        'rateLimit.retryPrompt must be a non-empty string, got "   "',
+        "tokenLimit.enabled must be true or false",
+      ]) {
+        assert.ok(warnings.some((message) => message.includes(label)), `missing warning: ${label}\n${warnings.join("\n")}`);
+      }
+    });
+
+    it("reports a typo'd key instead of ignoring it", () => {
+      const { config, warnings } = collect({ autoContinue: { rateLimit: { maxRetry: "90m" } } });
+      assert.equal(config.rateLimit.maxRetries, DEFAULT_CONFIG.rateLimit.maxRetries);
+      assert.ok(
+        warnings.some((message) => message.includes('unknown autoContinue.rateLimit setting "maxRetry"')),
+        warnings.join("\n")
+      );
+    });
+
+    it("reports an unreadable settings file", () => {
+      const { config, warnings } = collect("{ not json");
+      assert.deepEqual(config, DEFAULT_CONFIG);
+      assert.ok(warnings.some((message) => message.includes("could not load")), warnings.join("\n"));
+    });
+
+    it("reports a non-object autoContinue section", () => {
+      const { config, warnings } = collect({ autoContinue: "yes" });
+      assert.deepEqual(config, DEFAULT_CONFIG);
+      assert.ok(warnings.some((message) => message.includes("autoContinue must be an object")), warnings.join("\n"));
+    });
+
+    it("reports a base delay above the cap", () => {
+      const { warnings } = collect({ autoContinue: { baseDelayMs: "10m", maxDelayMs: "1m" } });
+      assert.ok(warnings.some((message) => message.includes("exceeds maxDelayMs")), warnings.join("\n"));
+    });
+
+    it("rejects maxRetries values that parseMaxRetries would discard", () => {
+      // Accepting a string the limit parser cannot use stores a value whose
+      // effective limit is a different default: "0.0" used to mean a 5h deadline.
+      for (const value of ["5.5", "0.0", "99999999999999999999", "", "   ", "abc", "-1"]) {
+        const { config, warnings } = collect({ autoContinue: { maxRetries: value, rateLimit: { maxRetries: value } } });
+        assert.equal(config.maxRetries, DEFAULT_CONFIG.maxRetries, String(value));
+        assert.equal(config.rateLimit.maxRetries, DEFAULT_CONFIG.rateLimit.maxRetries, String(value));
+        assert.equal(warnings.length, 2, `${String(value)}: ${warnings.join(" | ")}`);
+        assert.match(warnings[0], /must be a non-negative integer or a duration/);
+      }
+      const fractional = collect({ autoContinue: { maxRetries: 2.4 } });
+      assert.equal(fractional.config.maxRetries, 2);
+      assert.match(fractional.warnings[0], /must be an integer, got 2\.4; using 2/);
+      for (const value of [0, 5, "5", "15m", "5h", "500ms", "1d"]) {
+        assert.deepEqual(collect({ autoContinue: { maxRetries: value } }).warnings, [], String(value));
+      }
+    });
+
+    it("reports sections and roots that are not objects", () => {
+      const { config, warnings } = collect({ autoContinue: { rateLimit: 5, tokenLimit: "x", incompleteToolCall: [] } });
+      assert.equal(config.rateLimit.maxRetries, DEFAULT_CONFIG.rateLimit.maxRetries);
+      assert.equal(config.tokenLimit.continuePrompt, DEFAULT_CONFIG.tokenLimit.continuePrompt);
+      assert.equal(warnings.filter((message) => /must be an object/.test(message)).length, 3, warnings.join(" | "));
+
+      const root = collect(5);
+      assert.deepEqual(root.config, DEFAULT_CONFIG);
+      assert.ok(root.warnings.some((message) => /must contain a JSON object/.test(message)), root.warnings.join(" | "));
+    });
+
+    it("stays quiet for a valid configuration", () => {
+      const { warnings } = collect({
+        autoContinue: {
+          enabled: true,
+          subagent: false,
+          baseDelayMs: "5s",
+          maxDelayMs: "5m",
+          backoffMultiplier: 1.5,
+          maxRetries: 3,
+          rateLimit: {
+            enabled: true,
+            baseDelayMs: "70s",
+            maxDelayMs: "5m",
+            maxRetries: "90m",
+            jitter: true,
+            fatalFirst: true,
+            windowRetryMargin: 1.15,
+            retryPrompt: ".",
+          },
+          tokenLimit: { enabled: true, continuePrompt: "Continue exactly where you stopped." },
+          incompleteToolCall: { enabled: true, continuePrompt: "Re-issue that tool call." },
+        },
+      });
+      assert.deepEqual(warnings, []);
+    });
+  });
 });

@@ -2,9 +2,11 @@ import {
   BILLING_HARD_LIMIT_PATTERNS,
   CONTEXT_OVERFLOW_PATTERNS,
   DEFAULT_WINDOW_RETRY_MARGIN,
+  EXPLICIT_RATE_LIMIT_PATTERNS,
   PERMANENT_REQUEST_ERROR_PATTERNS,
   QUOTA_EXHAUSTION_PATTERNS,
   RATE_LIMIT_PATTERNS,
+  REQUEST_SHAPE_ERROR_PATTERNS,
   RESET_SIGNAL_PATTERNS,
   TRANSIENT_ERROR_PATTERNS,
   USER_ABORT_PATTERNS,
@@ -122,7 +124,10 @@ export function extractRetryAfterInfo(
         const margin = Number.isFinite(windowRetryMargin) && windowRetryMargin >= 1 ? windowRetryMargin : DEFAULT_WINDOW_RETRY_MARGIN;
         const delayMs = widthMs === null ? NaN : Math.round(widthMs * margin);
         if (Number.isSafeInteger(now + delayMs)) {
-          return { delayMs, expectedResetTime: now + delayMs, hasHeader: false, isWindowEstimate: true };
+          // The window's start is unknown, so this is a worst-case wait rather
+          // than a reset instant. Publishing `now + delayMs` as one contradicts the
+          // capped delay shown next to it ("Waiting 10m … reset at +27.6h").
+          return { delayMs, expectedResetTime: null, hasHeader: false, isWindowEstimate: true };
         }
       }
     }
@@ -217,6 +222,14 @@ export function classifyInterruption(
   }
   if (httpStatus !== undefined && [404, 405, 422, 501, 505].includes(httpStatus)) return none;
   if (PERMANENT_REQUEST_ERROR_PATTERNS.some((pattern) => pattern.test(errorText))) return none;
+  // Gateways wrap real 429s as {"type":"invalid_request_error",
+  // "code":"rate_limit_exceeded"}, so explicit throttling language outranks the
+  // request-shape guard — and only that guard. Refusals, moderation,
+  // unknown-model and credential errors stay terminal whatever else the body
+  // says, and this is deliberately not keyed on httpStatus: a confirmed 429
+  // carrying "invalid_request: unsupported parameter" must stay permanent.
+  const throttled = EXPLICIT_RATE_LIMIT_PATTERNS.some((pattern) => pattern.test(errorText));
+  if (!throttled && REQUEST_SHAPE_ERROR_PATTERNS.some((pattern) => pattern.test(errorText))) return none;
 
   const retryInfo = extractRetryAfterInfo(httpHeaders, errorMessage, now ?? input.now ?? Date.now(), input.windowRetryMargin);
   // Preserve the opt-in policy for ambiguous quota exhaustion, but a bare

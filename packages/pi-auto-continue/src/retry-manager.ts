@@ -26,6 +26,7 @@ export class RetryManager {
     startTime: null,
     attempt: 0,
     rateLimitAttempts: 0,
+    continuationAttempts: 0,
     lastDelayMs: 0,
     lastErrorMessage: undefined,
     lastInterruptionType: undefined,
@@ -117,7 +118,7 @@ export class RetryManager {
     if (!config.enabled || !rateLimitConfig.enabled) {
       return {
         canRetry: false,
-        attempt: this.state.attempt,
+        attempt: this.state.rateLimitAttempts ?? 0,
         delayMs: 0,
         elapsedMs: 0,
         remainingMs: 0,
@@ -130,7 +131,11 @@ export class RetryManager {
     if (!this.state.isRetrying || this.state.startTime === null) {
       this.state.isRetrying = true;
       this.state.startTime = now;
+      // A fresh cycle clears every counter, not just the aggregate: the limit
+      // checks below read the per-kind counters.
       this.state.attempt = 0;
+      this.state.rateLimitAttempts = 0;
+      this.state.continuationAttempts = 0;
     }
 
     const limit = this.getActiveLimit(config, "RATE_LIMIT");
@@ -141,7 +146,7 @@ export class RetryManager {
       if (elapsedMs >= limit.durationMs) {
         return {
           canRetry: false,
-          attempt: this.state.attempt,
+          attempt: this.state.rateLimitAttempts ?? 0,
           delayMs: 0,
           elapsedMs,
           remainingMs: 0,
@@ -150,10 +155,10 @@ export class RetryManager {
         };
       }
     } else {
-      if (this.state.attempt >= limit.count) {
+      if ((this.state.rateLimitAttempts ?? 0) >= limit.count) {
         return {
           canRetry: false,
-          attempt: this.state.attempt,
+          attempt: this.state.rateLimitAttempts ?? 0,
           delayMs: 0,
           elapsedMs,
           remainingMs: 0,
@@ -212,7 +217,8 @@ export class RetryManager {
       if (!capToMaxDelay && delayMs > remainingMs) {
         return {
           canRetry: false,
-          attempt: this.state.attempt,
+          // Nothing was charged: this refusal happens before the state update.
+          attempt: this.state.rateLimitAttempts ?? 0,
           delayMs,
           elapsedMs,
           remainingMs,
@@ -241,7 +247,7 @@ export class RetryManager {
 
     return {
       canRetry: true,
-      attempt: nextAttempt,
+      attempt: rateLimitAttempt,
       delayMs,
       elapsedMs,
       remainingMs,
@@ -296,7 +302,7 @@ export class RetryManager {
     if (!config.enabled || !isEnabled) {
       return {
         canRetry: false,
-        attempt: this.state.attempt,
+        attempt: this.state.continuationAttempts ?? 0,
         delayMs: 0,
         elapsedMs: 0,
         remainingMs: 0,
@@ -310,6 +316,8 @@ export class RetryManager {
       this.state.isRetrying = true;
       this.state.startTime = now;
       this.state.attempt = 0;
+      this.state.rateLimitAttempts = 0;
+      this.state.continuationAttempts = 0;
     }
 
     const limit = this.getActiveLimit(config, type);
@@ -320,7 +328,7 @@ export class RetryManager {
       if (elapsedMs >= limit.durationMs) {
         return {
           canRetry: false,
-          attempt: this.state.attempt,
+          attempt: this.state.continuationAttempts ?? 0,
           delayMs: 0,
           elapsedMs,
           remainingMs: 0,
@@ -329,10 +337,10 @@ export class RetryManager {
         };
       }
     } else {
-      if (this.state.attempt >= limit.count) {
+      if ((this.state.continuationAttempts ?? 0) >= limit.count) {
         return {
           canRetry: false,
-          attempt: this.state.attempt,
+          attempt: this.state.continuationAttempts ?? 0,
           delayMs: 0,
           elapsedMs,
           remainingMs: 0,
@@ -342,12 +350,17 @@ export class RetryManager {
       }
     }
 
+    // `attempt` stays the aggregate across both recovery kinds (used for the
+    // "completed after N attempt(s)" summary and the deadline); each kind also
+    // keeps its own counter so rate-limit retries cannot exhaust the
+    // continuation limit or vice versa.
     const nextAttempt = this.state.attempt + 1;
+    const continuationAttempt = (this.state.continuationAttempts ?? 0) + 1;
     const baseDelayMs = this.getBaseDelay(config, type);
     const maxDelayMs = this.getMaxDelay(config, type);
     const rawDelay =
       baseDelayMs *
-      Math.pow(config.backoffMultiplier, Math.max(0, nextAttempt - 1));
+      Math.pow(config.backoffMultiplier, Math.max(0, continuationAttempt - 1));
 
     let delayMs = Math.min(rawDelay, maxDelayMs);
 
@@ -367,6 +380,7 @@ export class RetryManager {
 
     // Update consolidated state
     this.state.attempt = nextAttempt;
+    this.state.continuationAttempts = continuationAttempt;
     this.state.lastDelayMs = delayMs;
     this.state.lastErrorMessage = message;
     this.state.lastInterruptionType = type;
@@ -376,29 +390,12 @@ export class RetryManager {
 
     return {
       canRetry: true,
-      attempt: nextAttempt,
+      attempt: continuationAttempt,
       delayMs,
       elapsedMs,
       remainingMs,
       deadlineExceeded: false,
     };
-  }
-
-  /**
-   * Decrements attempt count if a retry or continuation prompt failed to send.
-   */
-  public decrementAttempt(): void {
-    if (this.state.attempt > 0) {
-      this.state.attempt--;
-    }
-    if (this.state.rateLimitAttempts && this.state.rateLimitAttempts > 0) {
-      this.state.rateLimitAttempts--;
-    }
-    if (this.state.attempt === 0) {
-      this.state.isRetrying = false;
-      this.state.startTime = null;
-      this.state.rateLimitAttempts = 0;
-    }
   }
 
   /**
@@ -410,6 +407,7 @@ export class RetryManager {
       startTime: null,
       attempt: 0,
       rateLimitAttempts: 0,
+      continuationAttempts: 0,
       lastDelayMs: 0,
       lastErrorMessage: undefined,
       lastInterruptionType: undefined,
@@ -435,22 +433,26 @@ export class RetryManager {
     }
 
     const elapsed = now - this.state.startTime;
-    const limit = this.getActiveLimit(
-      config,
-      this.state.lastInterruptionType || "RATE_LIMIT"
-    );
+    const kind = this.state.lastInterruptionType || "RATE_LIMIT";
+    const limit = this.getActiveLimit(config, kind);
+    // The limit applies to one recovery kind, so compare it with that kind's
+    // counter. `attempt` is the aggregate across both and would otherwise print
+    // an attempt count above its own maximum.
+    const used = kind === "RATE_LIMIT"
+      ? this.state.rateLimitAttempts ?? 0
+      : this.state.continuationAttempts ?? 0;
 
     let limitLines = "";
     if (limit.type === "duration") {
       const remaining = Math.max(0, limit.durationMs - elapsed);
       limitLines =
-        `  Attempt: ${this.state.attempt}\n` +
+        `  Attempt: ${used} (all kinds: ${this.state.attempt})\n` +
         `  Elapsed: ${formatDuration(elapsed)} / Max: ${formatDuration(limit.durationMs)}\n` +
         `  Remaining: ${formatDuration(remaining)}`;
     } else {
-      const remaining = Math.max(0, limit.count - this.state.attempt);
+      const remaining = Math.max(0, limit.count - used);
       limitLines =
-        `  Attempt: ${this.state.attempt} / Max: ${limit.count}\n` +
+        `  Attempt: ${used} / Max: ${limit.count} (all kinds: ${this.state.attempt})\n` +
         `  Elapsed: ${formatDuration(elapsed)}\n` +
         `  Remaining attempts: ${remaining}`;
     }

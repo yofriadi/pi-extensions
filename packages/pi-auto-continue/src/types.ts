@@ -127,10 +127,11 @@ export interface RetryState {
   lastMessageTimestamp?: number;
   /** Number of rate limit attempts in the current retry cycle */
   rateLimitAttempts?: number;
+  /**
+   * Number of token-limit / incomplete-tool-call continuations in the current
+   * cycle. Kept separate from `rateLimitAttempts` so a throttled session cannot
+   * exhaust the continuation budget; `attempt` remains the aggregate.
+   */
+  continuationAttempts?: number;
 }
 
-/**
- * Consolidated into RetryState.
- * Retained as an alias for backward compatibility.
- */
-export type ContinuationState = RetryState;

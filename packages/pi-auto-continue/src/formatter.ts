@@ -100,5 +100,18 @@ export function formatDateTime(date: Date | number = new Date()): string {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   const time = formatTime(d);
-  return `${year}-${month}-${day} ${time}`;
+  // The value is local time; say so. A bare "2026-09-21 04:43:12" next to a
+  // provider quota window is ambiguous by hours.
+  return `${year}-${month}-${day} ${time} (${utcOffsetLabel(d)})`;
+}
+
+/** Local UTC offset label: "UTC", "UTC+07:00", "UTC-05:30". */
+function utcOffsetLabel(d: Date): string {
+  const minutes = -d.getTimezoneOffset();
+  if (minutes === 0) return "UTC";
+  const sign = minutes > 0 ? "+" : "-";
+  const absolute = Math.abs(minutes);
+  const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
+  const rest = String(absolute % 60).padStart(2, "0");
+  return `UTC${sign}${hours}:${rest}`;
 }
