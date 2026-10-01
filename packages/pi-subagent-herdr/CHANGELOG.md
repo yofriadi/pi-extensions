@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reviving session-keyed delivery singletons at `session_start`: switching sessions (`/resume`, `/new`, `/fork`) and resuming back used to leave the target session permanently un-spawnable — every `subagent` call failed with `Subagent coordinator is shut down.` (async) or `Subagent delivery suppressed during shutdown.` (blocking), because the terminally poisoned admission coordinator and foreground delivery barrier cached in the process-global session-ID-keyed registries were retrieved again on resume-back. `session_start` now detects a shut-down coordinator or suppressed barrier for the session and replaces it with a fresh instance (evict-and-insert, never un-shutdown/un-suppress in place, so pre-switch closures stay fail-closed). Healthy singletons — including a live coordinator with active background leases adopted across `/reload` — are preserved unchanged, so background-subagent reload survival is intact. Old late watchers of killed runs remain blocked by their own recorded suppression state.
+
 ### Added
 
 - Automatic in-extension retries for well-formed child error sidecars (provider rate limits, error-terminated child turns): up to 3 total attempts against the same session file, with the failed attempt's pane closed and confirmed gone before a stepped backoff (5s, 15s) relaunches through the same launch pipeline with a fresh per-attempt id. Malformed sidecars, pane disappearance, watch abandonment, and aborts are never retried. The widget presents `retrying (2/3)` during backoff, and exhaustion reports `provider/agent error — auto-retry exhausted after 3 attempts`.

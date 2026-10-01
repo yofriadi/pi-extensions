@@ -9,7 +9,7 @@ import {
 	parseAgentDefinition,
 	validateCanonicalAgentId,
 } from "./agent-definition.ts";
-import { getAdmissionCoordinator } from "./coordinator.ts";
+import { ensureHealthyAdmissionCoordinator, getAdmissionCoordinator } from "./coordinator.ts";
 import {
 	type ActiveCompletionRuntime,
 	acknowledgeDelivery,
@@ -33,7 +33,7 @@ import {
 	verifyDeliveryPersisted,
 	WAKE_MESSAGE,
 } from "./delivery.ts";
-import { getForegroundDeliveryBarrier } from "./delivery-barrier.ts";
+import { ensureHealthyForegroundDeliveryBarrier, getForegroundDeliveryBarrier } from "./delivery-barrier.ts";
 import { abortAllLaunchTransactions } from "./launch-transaction.ts";
 import type { LayoutDirection, LayoutMode, SurfaceMode } from "./layout.ts";
 import {
@@ -972,8 +972,12 @@ function handleParentSessionStart(
 	runtime.latestCtx = ctx;
 	const parentSessionId = ctx.sessionManager.getSessionId();
 	instanceState.ownedCompletionRuntime = activateCompletionRuntime(pi, parentSessionId);
-	getAdmissionCoordinator(parentSessionId); // in-place upgrade of pre-reload coordinator state
-	getForegroundDeliveryBarrier(parentSessionId).reconcileActive(activeForegroundRunIds());
+	// Revive session-keyed delivery singletons poisoned by a previous terminal
+	// shutdown of the same session identity (switch away → resume back). Runs
+	// before reconcileActive so foreground reconciliation targets the healthy
+	// barrier; healthy instances (reload adoption) are returned unchanged.
+	ensureHealthyAdmissionCoordinator(parentSessionId);
+	ensureHealthyForegroundDeliveryBarrier(parentSessionId).reconcileActive(activeForegroundRunIds());
 	redriveDeferredPendingDeliveries(parentSessionId);
 	void retryPendingDeliveries().catch(() => undefined);
 	if (pendingDeliveries.size > 0) startDeliveryRetry();

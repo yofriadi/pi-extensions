@@ -243,6 +243,11 @@ export class AdmissionCoordinator {
 		}
 		return this.legacyActiveIds.has(lease.id);
 	}
+
+	/** Public read of the terminal shutdown flag; used by activation-time revival. */
+	isShutDown(): boolean {
+		return this.shutdown;
+	}
 }
 
 const COORDINATORS_KEY = Symbol.for("pi-subagent-herdr/coordinators");
@@ -275,4 +280,31 @@ export function getAdmissionCoordinator(parentSessionId: string): AdmissionCoord
 		Object.defineProperty(coordinator, "version", { value: 2, enumerable: true });
 	}
 	return coordinator;
+}
+
+/**
+ * Terminal-shutdown read robust to mixed process-global versions: a
+ * coordinator published by an older module (pre-isShutDown v2) still survives in
+ * the Symbol.for registry across /reload, so the own `shutdown` flag is read
+ * through the same any-cast the v1 migration uses when the method is absent.
+ */
+function isCoordinatorShutDown(coordinator: AdmissionCoordinator): boolean {
+	if (typeof coordinator.isShutDown === "function") return coordinator.isShutDown();
+	return (coordinator as any).shutdown === true;
+}
+
+/**
+ * Session-activation revival: resolve through getAdmissionCoordinator first (so
+ * legacy v1→v2 in-place migration still runs), then replace a terminally shut-down
+ * coordinator with a fresh instance under the same registry key. A healthy
+ * instance — including one adopted across /reload with live background leases —
+ * is returned unchanged. Evict-and-insert, never un-shutdown in place: closures
+ * holding the poisoned object stay fail-closed against the fresh one.
+ */
+export function ensureHealthyAdmissionCoordinator(parentSessionId: string): AdmissionCoordinator {
+	const coordinator = getAdmissionCoordinator(parentSessionId);
+	if (!isCoordinatorShutDown(coordinator)) return coordinator;
+	const fresh = new AdmissionCoordinator();
+	((globalThis as any)[COORDINATORS_KEY] as Map<string, AdmissionCoordinator>).set(parentSessionId, fresh);
+	return fresh;
 }

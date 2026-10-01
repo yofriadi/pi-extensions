@@ -233,3 +233,20 @@ export function getForegroundDeliveryBarrier(parentSessionId: string): Foregroun
 	}
 	return barrier;
 }
+
+/**
+ * Session-activation revival: resolve through getForegroundDeliveryBarrier first
+ * (so legacy replacement and held-delivery adoption still run), then replace a
+ * terminally suppressed barrier with a fresh v2 instance under the same registry
+ * key. An unsuppressed instance is returned unchanged. Evict-and-insert, never
+ * un-suppress in place: pre-switch closures and held-delivery references keep
+ * failing against the poisoned object rather than delivering into the revived
+ * session.
+ */
+export function ensureHealthyForegroundDeliveryBarrier(parentSessionId: string): ForegroundDeliveryBarrier {
+	const barrier = getForegroundDeliveryBarrier(parentSessionId);
+	if (!barrier.isSuppressed()) return barrier;
+	const fresh = new ForegroundDeliveryBarrier();
+	((globalThis as any)[DELIVERY_BARRIERS_KEY] as Map<string, ForegroundDeliveryBarrier>).set(parentSessionId, fresh);
+	return fresh;
+}

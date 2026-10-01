@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AdmissionCoordinator, getAdmissionCoordinator } from "../src/coordinator.ts";
+import {
+	AdmissionCoordinator,
+	ensureHealthyAdmissionCoordinator,
+	getAdmissionCoordinator,
+} from "../src/coordinator.ts";
 
 function ticket(
 	coordinator: AdmissionCoordinator,
@@ -165,6 +169,97 @@ describe("AdmissionCoordinator", () => {
 			upgraded.shutdownNow();
 			assert.equal(legacyLease.state, "admitted");
 			assert.equal(upgraded.isAdmissionCurrent(legacyLease), false);
+		} finally {
+			if (previous === undefined) delete globals[key];
+			else globals[key] = previous;
+		}
+	});
+
+	it("returns a shut-down instance as-is from the getter; ensure-healthy replaces it", () => {
+		const parent = `revival-${Date.now()}-${Math.random()}`;
+		const poisoned = getAdmissionCoordinator(parent);
+		poisoned.shutdownNow();
+		// The getter never revives: a shut-down instance is returned unchanged, so
+		// the failure mode stays observable at the getter level.
+		assert.equal(getAdmissionCoordinator(parent), poisoned);
+		assert.ok(poisoned.isShutDown());
+		assert.throws(() => poisoned.request({ id: "late", class: "background" }), /shut down/);
+
+		const fresh = ensureHealthyAdmissionCoordinator(parent);
+		assert.notEqual(fresh, poisoned, "revival inserted a fresh instance");
+		assert.equal(fresh.isShutDown(), false);
+		assert.equal(getAdmissionCoordinator(parent), fresh, "the registry entry was replaced");
+		// The fresh instance admits work; the poisoned one stays terminally dead.
+		const ticket = fresh.request({ id: "after-revival", class: "background" });
+		assert.equal(ticket.queued, false);
+		assert.throws(() => poisoned.request({ id: "late-2", class: "background" }), /shut down/);
+	});
+
+	it("ensure-healthy preserves a healthy coordinator by identity", () => {
+		const parent = `revival-healthy-${Date.now()}-${Math.random()}`;
+		const coordinator = getAdmissionCoordinator(parent);
+		const ticket = coordinator.request({ id: "leased", class: "background" });
+		assert.equal(ticket.queued, false);
+		// A live coordinator holding an active lease (reload adoption) must be
+		// returned unchanged — replacement would orphan the admission slot.
+		const healthy = ensureHealthyAdmissionCoordinator(parent);
+		assert.equal(healthy, coordinator);
+		assert.equal(coordinator.isAdmissionCurrent(ticket.lease), true);
+		ticket.lease.release();
+	});
+
+	it("ensure-healthy migrates a legacy shut-down coordinator before replacing it", () => {
+		const key = Symbol.for("pi-subagent-herdr/coordinators");
+		const globals = globalThis as any;
+		const previous = globals[key];
+		const parent = `legacy-revival-${Date.now()}-${Math.random()}`;
+		const legacy = {
+			activeIds: new Set(["legacy-run"]),
+			active: { foreground: 0, background: 1 },
+			shutdown: true,
+		};
+		globals[key] = new Map([[parent, legacy]]);
+		try {
+			const fresh = ensureHealthyAdmissionCoordinator(parent);
+			assert.notEqual(fresh as any, legacy);
+			assert.equal(fresh.isShutDown(), false);
+			assert.equal(getAdmissionCoordinator(parent), fresh);
+		} finally {
+			if (previous === undefined) delete globals[key];
+			else globals[key] = previous;
+		}
+	});
+
+	it("ensure-healthy survives a pre-fix v2 coordinator from the live registry (no isShutDown method)", () => {
+		// Mixed-version upgrade: a 0.5.0-era v2 coordinator (version = 2, but
+		// no isShutDown method) survives the Symbol.for registry across /reload.
+		// The poisoned check must read its own `shutdown` flag, not throw.
+		const key = Symbol.for("pi-subagent-herdr/coordinators");
+		const globals = globalThis as any;
+		const previous = globals[key];
+		const poisonedParent = `prefix-v2-poisoned-${Date.now()}-${Math.random()}`;
+		const healthyParent = `prefix-v2-healthy-${Date.now()}-${Math.random()}`;
+		const makePrefixV2 = (shutdown: boolean) => ({
+			version: 2,
+			shutdown,
+			active: { foreground: 0, background: shutdown ? 0 : 1 },
+		});
+		globals[key] = new Map([
+			[poisonedParent, makePrefixV2(true)],
+			[healthyParent, makePrefixV2(false)],
+		]);
+		try {
+			// Poisoned pre-fix instance: replaced without a TypeError.
+			const fresh = ensureHealthyAdmissionCoordinator(poisonedParent);
+			assert.equal(fresh.isShutDown(), false, "poisoned pre-fix v2 instance was replaced");
+			assert.equal(getAdmissionCoordinator(poisonedParent), fresh);
+			const ticket = fresh.request({ id: "post-prefix-revival", class: "background" });
+			assert.equal(ticket.queued, false);
+
+			// Healthy pre-fix instance: returned unchanged, no throw.
+			const healthy = ensureHealthyAdmissionCoordinator(healthyParent);
+			assert.equal((healthy as any).version, 2, "healthy pre-fix v2 instance preserved by identity");
+			assert.equal(getAdmissionCoordinator(healthyParent), healthy);
 		} finally {
 			if (previous === undefined) delete globals[key];
 			else globals[key] = previous;

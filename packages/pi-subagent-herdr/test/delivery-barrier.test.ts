@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	ensureHealthyForegroundDeliveryBarrier,
 	ForegroundDeliveryBarrier,
 	getForegroundDeliveryBarrier,
 	retryAcceptedDelivery,
@@ -172,5 +173,76 @@ describe("foreground delivery barrier", () => {
 		// retryAcceptedDelivery invokes a failed callback three times; only the
 		// final queued callback receives the positional wake flag.
 		assert.deepEqual(wakeFlags, [false, true, true, true]);
+	});
+
+	it("replaces a suppressed barrier with a fresh instance and keeps the original unusable", async () => {
+		const parent = `barrier-revival-${Date.now()}-${Math.random()}`;
+		const poisoned = getForegroundDeliveryBarrier(parent);
+		poisoned.suppressPending();
+		// The getter never revives: a suppressed instance is returned unchanged.
+		assert.equal(getForegroundDeliveryBarrier(parent), poisoned);
+		assert.equal(poisoned.isSuppressed(), true);
+
+		const fresh = ensureHealthyForegroundDeliveryBarrier(parent);
+		assert.notEqual(fresh, poisoned, "revival inserted a fresh instance, not the mutated original");
+		assert.equal(fresh.isSuppressed(), false);
+		assert.equal(getForegroundDeliveryBarrier(parent), fresh, "the registry entry was replaced");
+
+		// The fresh instance accepts enter()/deliver(); the original stays
+		// suppressed and unusable for any pre-revival closure.
+		const foreground = fresh.enter("revived-run");
+		const sent: boolean[] = [];
+		const delivered = fresh.deliver((wake) => {
+			sent.push(wake);
+		});
+		foreground.release();
+		await delivered;
+		assert.deepEqual(sent, [true]);
+		assert.throws(() => poisoned.enter("late"), /suppressed during shutdown/);
+		await assert.rejects(
+			poisoned.deliver(() => {}),
+			/suppressed during shutdown/,
+		);
+	});
+
+	it("preserves an unsuppressed barrier by identity", () => {
+		const parent = `barrier-revival-healthy-${Date.now()}-${Math.random()}`;
+		const barrier = getForegroundDeliveryBarrier(parent);
+		const foreground = barrier.enter("owned-run");
+		// Active foreground ownership (reload adoption) must survive revival —
+		// replacing the barrier would leak the held lease and stall flushes.
+		const healthy = ensureHealthyForegroundDeliveryBarrier(parent);
+		assert.equal(healthy, barrier);
+		assert.equal(barrier.isActive(), true);
+		foreground.release();
+		assert.equal(barrier.isActive(), false);
+	});
+
+	it("migrates a legacy cached barrier through the getter before the suppression check", () => {
+		const key = Symbol.for("pi-subagent-herdr/delivery-barriers");
+		const globals = globalThis as any;
+		const previous = globals[key];
+		const parent = `barrier-legacy-revival-${Date.now()}-${Math.random()}`;
+		// Legacy v1 barrier: no version, no isSuppressed — raw-cache access would
+		// throw a TypeError inside session_start. Migration replaces it first.
+		const legacy = {
+			held: [],
+			enter() {
+				throw new Error("legacy enter");
+			},
+		};
+		globals[key] = new Map([[parent, legacy]]);
+		try {
+			const fresh = ensureHealthyForegroundDeliveryBarrier(parent);
+			assert.notEqual(fresh as any, legacy);
+			assert.equal(fresh.isSuppressed(), false);
+			assert.equal(getForegroundDeliveryBarrier(parent), fresh);
+			const foreground = fresh.enter("migrated-run");
+			assert.ok(foreground);
+			foreground.release();
+		} finally {
+			if (previous === undefined) delete globals[key];
+			else globals[key] = previous;
+		}
 	});
 });
