@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (native MCP migration)
+
+- Transport: `mcporter` is removed entirely. The six tools and `/tilth-savings` now talk to `tilth --mcp` over one persistent in-process stdio connection managed by `@earendil-works/pi-mcp` (`McpClient` + `StdioTransport`) instead of spawning a `mcporter call` child process per tool call. Tool-call latency drops from ~1.2 s (process spawn) to sub-10 ms in-process JSON-RPC, and the long-lived connection activates tilth's session memory: repeat-read dedup (`[shown earlier]` elisions) and real `/tilth-savings` counters (previously permanently 0 because every CLI invocation was an isolated client).
+- Lifecycle: the stdio child spawns lazily on the first tool call (concurrent first calls share one memoized connect), survives across turns, auto-heals by reconstructing a fresh client + transport at most once per call if the server dies (a restart zeroes the session's savings counters), and is closed idempotently on `session_shutdown` (quit, reload, new, resume, fork). Note a fresh server process starts with empty read history.
+- Timeouts: `connectTimeoutMs` (new optional config key; default 120 s in `npx` mode for cold-cache downloads, 30 s for a local binary) bounds the MCP `initialize` handshake. `callTimeoutMs` (default 60 s) is now enforced by the MCP client cancelling the pending request in-process — the server process is no longer killed on timeout and the connection stays usable.
+- Availability probing no longer inspects mcporter: `tilth` binary on PATH → `npx` → unavailable (static remediation message unchanged in shape). The `serverName` config key is gone.
+- `[shown earlier]` elisions pass through unannotated by design: elided regions cannot be verified against disk lines, so no hashline anchors are fabricated and no snapshot is committed.
+- Dependencies: `@earendil-works/pi-mcp` added as a runtime `dependencies: "^0.99.1"` entry (it is not a host-provided package, so a `peerDependencies` declaration would break standalone `pi install`); the `@earendil-works/pi-coding-agent` peer floor is now `>=0.99.1`. `mcporter` removed from keywords/description.
+
+
 ### Changed
 
 - Packaging: `typebox` moved out of `dependencies` into `peerDependencies` as `"*"`, with an exact `devDependencies` pin (`1.3.27`) matching the copy the pi 0.99.2 host bundles. pi's resource loader warns when a host-provided package is declared under `dependencies`. Runtime behaviour is unchanged: the loader intercepts the bare `typebox` specifier — jiti alias in built mode, virtual module in compiled and TS-source modes — and serves pi's own copy ahead of node resolution, so no duplicate instance was ever observable. `pi install` never resolves peers, so a managed tree no longer carries a second copy either.

@@ -1,7 +1,7 @@
 {
 	"name": "@yofriadi/pi-tilth",
 	"version": "0.1.0",
-	"description": "Tilth code-intelligence tools for pi-coding-agent via mcporter",
+	"description": "Tilth code-intelligence tools for pi-coding-agent via a native in-process MCP transport",
 	"type": "module",
 	"keywords": [
 		"pi-package",
@@ -9,7 +9,6 @@
 		"pi-extension",
 		"pi-coding-agent",
 		"tilth",
-		"mcporter",
 		"mcp",
 		"code-search"
 	],
@@ -45,8 +44,11 @@
 			"./skills"
 		]
 	},
+	"dependencies": {
+		"@earendil-works/pi-mcp": "^0.99.1"
+	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.75.0",
+		"@earendil-works/pi-coding-agent": ">=0.99.1",
 		"@earendil-works/pi-tui": ">=0.75.0",
 		"pi-hashline-edit": "*",
 		"typebox": "*"

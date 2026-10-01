@@ -3,27 +3,27 @@
  *
  * Every tool: registers typebox params mirroring the server schema, consults
  * availability per call (throwing the static explanatory error when
- * unavailable), issues exactly one `mcporter call` through the Exec seam,
- * annotates tilth_read output with hashline anchors when compat is active,
- * truncates oversized output, and renders compact call/result lines via
- * pi-tui Text.
+ * unavailable), issues exactly one `client.callTool` through the persistent
+ * in-process MCP transport, annotates tilth_read output with hashline anchors
+ * when compat is active, truncates oversized output, and renders compact
+ * call/result lines via pi-tui Text.
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, type TSchema, Type } from "typebox";
 import { annotateReadOutput } from "./lib/annotate";
-import { type AvailabilityState, getAdHocDescriptor, unavailableMessage } from "./lib/availability";
+import { type AvailabilityState, unavailableMessage } from "./lib/availability";
 import type { TilthConfig } from "./lib/config";
-import type { Exec } from "./lib/exec";
 import type { CompatModule } from "./lib/hashline-bridge";
 import { isCompatActive } from "./lib/hashline-bridge";
-import { buildCallArgs, callMcporter } from "./lib/mcporter";
-import { parseEnvelope, ServerToolError, TransportError } from "./lib/result";
+import { ServerToolError, TransportError } from "./lib/result";
 import { applyScoping, readTargetPaths, type ScopeOptions, type ToolParams } from "./lib/scope";
+import type { TilthMcpTransport } from "./lib/transport";
 import { applyTruncation } from "./lib/truncate";
 
 export interface TilthToolDeps {
-	exec: Exec;
+	/** Persistent in-process MCP transport (lazily connected on first call). */
+	transport: TilthMcpTransport;
 	availability: AvailabilityState;
 	config: TilthConfig;
 	/** Settled compat module or null (null when off / not installed). */
@@ -59,7 +59,7 @@ export interface TilthCallResult {
  * Shared by the six tools and the /tilth-savings command handler.
  */
 export async function runTilthCall(options: {
-	deps: Pick<TilthToolDeps, "exec" | "availability" | "config">;
+	deps: Pick<TilthToolDeps, "transport" | "availability" | "config">;
 	toolName: string;
 	params: ToolParams;
 	cwd: string;
@@ -71,31 +71,18 @@ export async function runTilthCall(options: {
 	if (deps.availability.mode === "unavailable") {
 		throw new Error(unavailableMessage());
 	}
-	const mode = deps.availability.mode;
-	if (mode !== "config" && mode !== "binary" && mode !== "npx") {
+	if (deps.availability.mode !== "binary" && deps.availability.mode !== "npx") {
 		throw new Error("tilth availability has not been probed yet. Try again shortly.");
 	}
 
 	const scoped = applyScoping(params, cwd, scopeOptions);
-	const args = buildCallArgs({
-		mode,
-		serverName: deps.config.serverName,
-		toolName,
-		paramsJson: JSON.stringify(scoped),
-		adHoc: mode === "config" ? undefined : getAdHocDescriptor(mode),
-	});
-
-	const result = await callMcporter(deps.exec, args, {
-		cwd,
-		timeoutMs: deps.config.callTimeoutMs,
-		signal,
-	});
 
 	// Server-reported errors and transport failures both throw with the
 	// server's/stderr's own message — pi marks a result as an error only when
-	// execute() throws.
-	const envelope = parseEnvelope(result);
-	return { text: envelope.text, scopedParams: scoped };
+	// execute() throws. The transport connects lazily on this first call and
+	// enforces config.callTimeoutMs per request.
+	const text = await deps.transport.callTool(toolName, scoped, { signal });
+	return { text, scopedParams: scoped };
 }
 
 export interface RegisterTilthToolOptions<S extends TSchema> {
@@ -114,9 +101,8 @@ export interface RegisterTilthToolOptions<S extends TSchema> {
 	/**
 	 * Inject a default `scope` (the resolved root) when the caller supplied
 	 * none. Set only on tools whose `scope` is a search root: the server
-	 * resolves an omitted scope to its own process cwd (a keep-alive mcporter
-	 * daemon spawns it in the daemon directory, not the pi session) and
-	 * ignores `root` for that purpose.
+	 * resolves an omitted scope to its own process cwd (frozen at spawn — the
+	 * stdio child's session_start cwd) and ignores `root` for that purpose.
 	 */
 	defaultScope?: boolean;
 }

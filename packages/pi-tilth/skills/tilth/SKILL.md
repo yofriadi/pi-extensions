@@ -1,52 +1,41 @@
 ---
 name: tilth
-description: |
-  Decision guidance for using the six tilth tools (search, read, list,
-  deps, grok, diff) in pi via mcporter. Load before exploring an unfamiliar
-  repo — contains the tool-selection table, root/scope semantics, and the
-  section-before-edit flow that keeps context small.
+description: Reference for tilth tool parameters (mode/section/sections/paths/full, glob kinds, callers, budget) and the in-process MCP transport knobs. Tool *selection* is in the system prompt; load this when you know which tilth tool you want and need its exact arguments.
 ---
 
-# Code intelligence with tilth
+# tilth tool reference
 
-Tilth gives pi six tools backed by a tree-sitter + ripgrep MCP server: one invocation returns AST-aware outlines, definitions, callees, and usages instead of raw text dumps.
+The system prompt's `### Search & Discovery` already covers which tool to pick.
+This file covers arguments.
 
-## Tool selection
+## tilth_read
 
-| Question                               | Tool                                                                                               |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| "Where is X defined/used?"             | `tilth_search` (kind=symbol)                                                                       |
-| "Find all call sites of X"             | `tilth_search` (kind=callers)                                                                      |
-| "What does this file look like?"       | `tilth_read` (auto: outline for large files, full for small)                                       |
-| "Show me lines 45-89"                  | `tilth_read` with `section`                                                                        |
-| "What's in this project?"              | `tilth_list`                                                                                       |
-| "What breaks if I change this export?" | `tilth_deps` — blast radius before renaming/removing/signature changes                             |
-| "Everything about this one symbol"     | `tilth_grok` — definition, body, callees, callers, siblings, tests in one call                     |
-| "What changed, function-level?"        | `tilth_diff` — uncommitted (`no args`), `HEAD~1`, `main..feat`, `--log HEAD~5..HEAD`, `--expand 3` |
+- `path` (or `paths` for several files in one call), `root` absolute, `section` / `sections`.
+- `mode`: `auto` (default; small files whole, large files outlined) | `full` | `signature` (hashline-prefixed declarations) | `stripped` (code minus comments and blank lines).
+- `section` accepts a range (`45-89`) or a heading (`## Architecture`). `sections` takes several disjoint ranges from one file, emitted in the order given, capped at 20.
+- `budget` caps response tokens; if output is truncated, narrow the range instead of guessing at unseen lines.
+- Repeat reads over the persistent session connection may come back elided (`[shown earlier]`).
+  To edit the file afterwards, re-read with `full: true` or `section`.
 
-Search before reading: a `tilth_search` returns definitions, usages, and callee footers in one call — often removing the need to read the file at all.
+## tilth_list
 
-## Root and scope
+- `patterns` (up to 20) renders several globs into one tree; `depth` caps directory depth; per-directory token-size rollups show what a recursive read would cost.
 
-Every tool takes an absolute `root` (defaults to the session working directory) and most take `scope` for a subdirectory.
-Relative `path`/`scope` values are resolved against the session cwd by the extension before the call, so pass paths the way the user said them — but prefer `scope` over `..` chains when narrowing.
+## tilth_search
 
-Do not pass `scope` when you want the current working directory; the extension anchors an omitted scope to the session cwd for you (search, list, grok, deps).
+- `kind`: `symbol` (definitions first, then usages) | `callers` | `content` (literal) | `regex`.
+- `query` takes comma-separated symbol names, up to 5, for cross-file tracing.
+- `expand` = how many top matches get full source inlined (default 2); `context` = context lines.
+- `glob` filters paths: `*.rs`, `!*.test.ts`, `*.{go,rs}`, `src/**/*.ts`.
+- Pass the file you are editing as `context` — it reranks matches from that directory higher.
 
-## Section-before-edit
+## Transport
 
-Before editing a file you have not fully read:
+Tools run over a persistent in-process MCP stdio connection to `tilth --mcp` (`src/lib/transport.ts`): the server process spawns on the first tool call of the session and stays open, enabling session dedup and `/tilth-savings`.
 
-1. `tilth_read` the file (auto mode) — small files come back whole; large files return an outline with `[start-end]` ranges.
-2. `tilth_read` with `section: "<start>-<end>"` for the region you will edit.
-3. Edit.
-   The shown content is hashline-annotated (`NN#HASH:content`) when pi-hashline-edit is active, so its `edit` accepts anchors copied straight from tilth output.
+- `--search` / `--no-search` (default **on**, a tilth CLI flag): disables the MCP server, so `tilth_list` and `tilth_search` (all kinds) return unavailable while `tilth_read` keeps working.
+- Connect budget (`connectTimeoutMs`, default 120s npx / 30s binary) and per-call budget (`callTimeoutMs`, default 60s) are set in `~/.pi/agent/extensions/pi-tilth/config.json` or `<project>/.pi/extensions/pi-tilth/config.json`.
 
 ## When NOT to use tilth
 
-- Exact-pattern line greps over unindexed files — the built-in grep is faster and does not depend on tree-sitter grammars.
-- Reading images or non-code text files — use the built-in read.
-- Simple file existence/size checks — built-in ls/read is cheaper.
-- Anything write/edit — tilth tools are read-only here; edits go through pi-hashline-edit's edit tool.
-
-tilth complements, never replaces: tool precedence among your extensions is your call.
+- Exact-pattern greps over unindexed or non-code files: `rg` is faster and needs no tree-sitter grammar.

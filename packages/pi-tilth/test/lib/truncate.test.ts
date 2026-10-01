@@ -11,9 +11,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerSavingsCommand } from "../../src/commands/savings";
 import { createAvailabilityState } from "../../src/lib/availability";
-import type { Exec } from "../../src/lib/exec";
+import { TransportError } from "../../src/lib/result";
 import { applyTruncation } from "../../src/lib/truncate";
 import type { TilthToolDeps } from "../../src/toolkit";
+import { asTilthTransport, createFakeTransport } from "../helpers/fake-transport";
 
 describe("applyTruncation", () => {
 	it("passes small output through verbatim with no spill file", async () => {
@@ -57,28 +58,28 @@ describe("/tilth-savings applies truncation to its notify", () => {
 
 	type Handler = (args: unknown, ctx: ExtensionContext) => Promise<void>;
 
-	/** Register the command against a fake pi and return its handler. */
+	/** Register the command against a fake pi + fake transport, and return its handler. */
 	function captureHandler(
-		result: () => Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>,
+		handler: (toolName: string, params: Record<string, unknown>) => string | Promise<string>,
 	): () => Handler {
-		const exec: Exec = async () => result();
 		const availability = createAvailabilityState();
-		availability.mode = "config";
-		const deps = {
-			exec,
+		availability.mode = "binary";
+		const deps: TilthToolDeps = {
+			transport: asTilthTransport(createFakeTransport(handler)),
 			availability,
-			config: { serverName: "tilth", callTimeoutMs: 60_000, hashlineCompat: true },
+			config: { callTimeoutMs: 60_000, hashlineCompat: true },
+			compat: null,
 		};
-		let handler: Handler | null = null;
+		let handlerRef: Handler | null = null;
 		const pi = {
 			registerCommand: (_name: string, def: { handler: Handler }) => {
-				handler = def.handler;
+				handlerRef = def.handler;
 			},
 		} as unknown as ExtensionAPI;
-		registerSavingsCommand(pi, deps as TilthToolDeps);
+		registerSavingsCommand(pi, deps);
 		return () => {
-			if (!handler) throw new Error("command not registered");
-			return handler;
+			if (!handlerRef) throw new Error("command not registered");
+			return handlerRef;
 		};
 	}
 
@@ -100,12 +101,7 @@ describe("/tilth-savings applies truncation to its notify", () => {
 
 	it("truncates oversized savings output before notifying", async () => {
 		const big = `${"savings row\n".repeat(20_000)}`;
-		const getHandler = captureHandler(async () => ({
-			stdout: JSON.stringify({ content: [{ type: "text", text: big }] }),
-			stderr: "",
-			code: 0,
-			killed: false,
-		}));
+		const getHandler = captureHandler(() => big);
 
 		await run(getHandler());
 
@@ -117,12 +113,7 @@ describe("/tilth-savings applies truncation to its notify", () => {
 	});
 
 	it("notifies small savings output verbatim", async () => {
-		const getHandler = captureHandler(async () => ({
-			stdout: JSON.stringify({ content: [{ type: "text", text: "tilth saved you 1.2M tokens" }] }),
-			stderr: "",
-			code: 0,
-			killed: false,
-		}));
+		const getHandler = captureHandler(() => "tilth saved you 1.2M tokens");
 
 		await run(getHandler());
 
@@ -131,26 +122,29 @@ describe("/tilth-savings applies truncation to its notify", () => {
 
 	it("notifies the unavailable-transport message instead of calling the server", async () => {
 		// tilth-savings-command spec Scenario: Unavailable transport — the
-		// command warns via notify; it never reaches the exec seam.
+		// command warns via notify; it never reaches the transport seam.
 		const availability = createAvailabilityState();
 		availability.mode = "unavailable";
-		const deps = {
-			exec: (): never => {
-				throw new Error("must not be called");
-			},
+		const deps: TilthToolDeps = {
+			transport: asTilthTransport(
+				createFakeTransport(() => {
+					throw new Error("must not be called");
+				}),
+			),
 			availability,
-			config: { serverName: "tilth", callTimeoutMs: 60_000, hashlineCompat: true },
-		} as unknown as TilthToolDeps;
+			config: { callTimeoutMs: 60_000, hashlineCompat: true },
+			compat: null,
+		};
 
-		let handler: Handler | null = null;
+		let handlerRef: Handler | null = null;
 		const pi = {
 			registerCommand: (_name: string, def: { handler: Handler }) => {
-				handler = def.handler;
+				handlerRef = def.handler;
 			},
 		} as unknown as ExtensionAPI;
 		const getHandler = (): Handler => {
-			if (handler === null) throw new Error("command not registered");
-			return handler;
+			if (handlerRef === null) throw new Error("command not registered");
+			return handlerRef;
 		};
 		registerSavingsCommand(pi, deps);
 
@@ -165,12 +159,9 @@ describe("/tilth-savings applies truncation to its notify", () => {
 	});
 
 	it("warns on transport failure instead of throwing", async () => {
-		const getHandler = captureHandler(async () => ({
-			stdout: "",
-			stderr: "connection refused",
-			code: 7,
-			killed: false,
-		}));
+		const getHandler = captureHandler(() => {
+			throw new TransportError("tilth MCP transport error: connection refused");
+		});
 
 		await run(getHandler());
 

@@ -414,3 +414,24 @@ describe("annotate — multi-path independence", () => {
 		expect(compat.commits.get("/x/ewb.txt")).toBe(diskEwb.join("\n"));
 	});
 });
+
+describe("annotate — [shown earlier] elision passthrough", () => {
+	it("passes an elided full-view body through untouched and commits nothing", async () => {
+		const disk = ["line one", "line two", "line three", "line four"];
+		const compat = makeFakeCompat(new Map([["/x/elided.ts", disk]]));
+		// A repeat read whose body was replaced by tilth's connection-scoped
+		// dedup marker instead of the real content.
+		const output = ["# /x/elided.ts (4 lines, ~40 tokens) [full]", "", "[shown earlier]", ""].join("\n");
+		const result = await annotateReadOutput({ output, targetPaths: ["/x/elided.ts"], compat });
+		expect(result).toBe(output);
+		expect(compat.commits.size).toBe(0);
+	});
+
+	it("passes a bare elision response (no header) through untouched", async () => {
+		const compat = makeFakeCompat(new Map([["/x/elided.ts", ["a", "b"]]]));
+		const output = "[shown earlier]";
+		const result = await annotateReadOutput({ output, targetPaths: ["/x/elided.ts"], compat });
+		expect(result).toBe(output);
+		expect(compat.commits.size).toBe(0);
+	});
+});

@@ -18,6 +18,7 @@ type DependencyManifest = {
 	dependencies?: Record<string, string>;
 	devDependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
+	version?: string;
 };
 
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -43,5 +44,40 @@ describe("pi-tilth — host-provided typebox declaration", () => {
 		expect(hostTypebox).toBeDefined();
 		const message = `host @earendil-works/pi-coding-agent bundles typebox ${hostTypebox}; update the devDependency pin to match`;
 		expect(ownManifest.devDependencies?.typebox, message).toBe(hostTypebox);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// @earendil-works/pi-mcp — native MCP transport runtime dependency
+// ---------------------------------------------------------------------------
+
+const piMcpManifest = readManifest(join("node_modules", "@earendil-works", "pi-mcp", "package.json"));
+const piMcpRange = ownManifest.dependencies?.["@earendil-works/pi-mcp"];
+
+/** Minimal caret-range check: supports the single `^MAJOR.MINOR.PATCH` shape used here. */
+function satisfiesCaret(version: string, range: string): boolean {
+	const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range);
+	if (!m) throw new Error(`unsupported range: ${range}`);
+	const major = Number(m[1]);
+	const minor = Number(m[2]);
+	const patch = Number(m[3]);
+	const [vMajor = 0, vMinor = 0, vPatch = 0] = version.split(".").map(Number);
+	if (vMajor !== major) return false;
+	if (major === 0) return vMinor === minor && vPatch >= patch; // ^0.x.y
+	return vMinor > minor || (vMinor === minor && vPatch >= patch);
+}
+
+describe("pi-tilth — native MCP transport dependency declaration", () => {
+	it("declares @earendil-works/pi-mcp as a runtime dependency, never a peer", () => {
+		expect(piMcpRange).toBe("^0.99.1");
+		expect(ownManifest.peerDependencies?.["@earendil-works/pi-mcp"]).toBeUndefined();
+	});
+
+	it("resolves a version satisfying the declared ^0.99.1 range", () => {
+		expect(piMcpManifest.version, "resolved @earendil-works/pi-mcp version").toBeDefined();
+		expect(
+			satisfiesCaret(piMcpManifest.version ?? "0.0.0", "^0.99.1"),
+			`resolved ${piMcpManifest.version} must satisfy ^0.99.1`,
+		).toBe(true);
 	});
 });

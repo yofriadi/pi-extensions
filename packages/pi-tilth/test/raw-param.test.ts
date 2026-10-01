@@ -7,7 +7,7 @@
  *  - leaves the passthrough/annotate behavior unchanged when absent or false.
  *
  * Driven through the real registered-tool execute path (registerTilthTool) —
- * the same surface pi calls — with a fake exec seam and fake compat module.
+ * the same surface pi calls — with a fake transport seam and fake compat module.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,6 +16,7 @@ import { createAvailabilityState } from "../src/lib/availability";
 import type { CompatModule } from "../src/lib/hashline-bridge";
 import { runTilthCall, type TilthToolDeps } from "../src/toolkit";
 import { registerReadTool } from "../src/tools/read";
+import { asTilthTransport, createFakeTransport, type FakeTransport } from "./helpers/fake-transport";
 
 const FIXTURE_PATH = "/abs/file.ts";
 
@@ -35,13 +36,13 @@ interface RegisteredToolStub {
 	execute: (
 		id: string,
 		params: unknown,
-		signal: AbortSignal,
+		signal: AbortSignal | undefined,
 		onUpdate: unknown,
 		ctx: { cwd: string },
 	) => Promise<unknown>;
 }
 
-function makeDeps(): TilthToolDeps {
+function makeDeps(): { deps: TilthToolDeps; transport: FakeTransport } {
 	const compat: CompatModule = {
 		COMPAT_VERSION: 1,
 		isHashlineEditActive: () => true,
@@ -52,20 +53,15 @@ function makeDeps(): TilthToolDeps {
 		commitExternalRead: vi.fn(async () => {}),
 		mintAnchor: vi.fn((_fileLines: string[], line1: number) => `#${line1}anchor`),
 	};
-	const exec = vi.fn(async () => ({
-		stdout: JSON.stringify({ content: [{ type: "text", text: SERVER_SECTION_OUTPUT }] }),
-		stderr: "",
-		code: 0,
-		killed: false,
-	}));
+	const transport = createFakeTransport(() => SERVER_SECTION_OUTPUT);
 	const deps: TilthToolDeps = {
-		exec,
+		transport: asTilthTransport(transport),
 		availability: createAvailabilityState(),
-		config: { serverName: "tilth", callTimeoutMs: 60_000, hashlineCompat: true },
+		config: { callTimeoutMs: 60_000, hashlineCompat: true },
 		compat,
 	};
-	deps.availability.mode = "config";
-	return deps;
+	deps.availability.mode = "binary";
+	return { deps, transport };
 }
 
 function makePi() {
@@ -80,20 +76,14 @@ function makePi() {
 
 describe("tilth_read raw param — client-side anchor opt-out", () => {
 	it("annotates when raw is absent (baseline)", async () => {
-		const deps = makeDeps();
+		const { deps } = makeDeps();
 		const { api, registered } = makePi();
 		registerReadTool(api, deps);
 		const tool = registered.find((t) => t.name === "tilth_read");
 		expect(tool).toBeDefined();
-		const result = (await tool?.execute(
-			"id",
-			{ path: FIXTURE_PATH, section: "1-2" },
-			{} as AbortSignal,
-			undefined,
-			{
-				cwd: "/tmp",
-			},
-		)) as {
+		const result = (await tool?.execute("id", { path: FIXTURE_PATH, section: "1-2" }, undefined, undefined, {
+			cwd: "/tmp",
+		})) as {
 			content: Array<{ type: string; text: string }>;
 		};
 		const text = result.content[0]?.text ?? "";
@@ -105,30 +95,29 @@ describe("tilth_read raw param — client-side anchor opt-out", () => {
 	});
 
 	it("strips raw from the params forwarded to the server", async () => {
-		const deps = makeDeps();
-		const exec = deps.exec as unknown as ReturnType<typeof vi.fn>;
+		const { deps, transport } = makeDeps();
 		const { api, registered } = makePi();
 		registerReadTool(api, deps);
 		const tool = registered.find((t) => t.name === "tilth_read");
-		await tool?.execute("id", { path: FIXTURE_PATH, section: "1-2", raw: true }, {} as AbortSignal, undefined, {
+		await tool?.execute("id", { path: FIXTURE_PATH, section: "1-2", raw: true }, undefined, undefined, {
 			cwd: "/tmp",
 		});
-		const args = exec.mock.calls[0]?.[1] as string[];
-		const payload = JSON.parse(args[args.indexOf("--args") + 1] ?? "{}") as Record<string, unknown>;
+		const payload = transport.calls[0]?.params ?? {};
 		expect(payload).not.toHaveProperty("raw");
 		expect(payload).toHaveProperty("path", FIXTURE_PATH);
 		expect(payload).toHaveProperty("section", "1-2");
+		expect(payload).toHaveProperty("root", "/tmp");
 	});
 
 	it("skips annotation and commits nothing when raw: true", async () => {
-		const deps = makeDeps();
+		const { deps } = makeDeps();
 		const { api, registered } = makePi();
 		registerReadTool(api, deps);
 		const tool = registered.find((t) => t.name === "tilth_read");
 		const result = (await tool?.execute(
 			"id",
 			{ path: FIXTURE_PATH, section: "1-2", raw: true },
-			{} as AbortSignal,
+			undefined,
 			undefined,
 			{ cwd: "/tmp" },
 		)) as {
@@ -142,14 +131,14 @@ describe("tilth_read raw param — client-side anchor opt-out", () => {
 	});
 
 	it("raw: false behaves like absent (annotates)", async () => {
-		const deps = makeDeps();
+		const { deps } = makeDeps();
 		const { api, registered } = makePi();
 		registerReadTool(api, deps);
 		const tool = registered.find((t) => t.name === "tilth_read");
 		const result = (await tool?.execute(
 			"id",
 			{ path: FIXTURE_PATH, section: "1-2", raw: false },
-			{} as AbortSignal,
+			undefined,
 			undefined,
 			{ cwd: "/tmp" },
 		)) as {
@@ -161,7 +150,7 @@ describe("tilth_read raw param — client-side anchor opt-out", () => {
 	it("runTilthCall forwards raw through scoping when called directly (server tolerates unknown keys)", () => {
 		// Documents the current contract: runTilthCall itself does not filter —
 		// registerTilthTool's execute is the single strip point.
-		const deps = makeDeps();
+		const { deps } = makeDeps();
 		return expect(
 			runTilthCall({ deps, toolName: "tilth_read", params: { raw: true, path: FIXTURE_PATH }, cwd: "/tmp" }),
 		).resolves.toHaveProperty("scopedParams.root", "/tmp");

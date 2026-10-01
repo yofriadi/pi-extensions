@@ -45,7 +45,7 @@ function makePi(flags: Record<string, boolean | string> = {}) {
 		on(name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) {
 			handlers.set(name, handler);
 		},
-		// All probes succeed → availability settles on "config", no notify.
+		// All probes succeed → availability settles on "binary", no notify.
 		exec: vi.fn(async () => ({ stdout: "ok", stderr: "", code: 0, killed: false })),
 	};
 	return { api: api as unknown as ExtensionAPI, registeredFlags, handlers };

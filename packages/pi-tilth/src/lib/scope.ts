@@ -10,17 +10,15 @@
  *
  * Tools whose `scope` is a search root (search/list/deps/grok) additionally
  * inject `scope: <resolved root>` when the caller omitted it: the tilth
- * server resolves an *omitted* scope to its own process cwd (frozen at spawn
- * — for a keep-alive mcporter daemon that is the daemon directory, not the
- * pi session) and ignores `root` for that purpose. Explicitly anchoring the
- * scope is the only way a bare `tilth_search { query }` searches the
- * session's project. `tilth_diff`'s scope is an output filter, not a search
- * root, and `tilth_read` takes no scope — neither opts in.
+ * server resolves an *omitted* scope to its own process cwd (frozen at
+ * spawn — the transport's session_start cwd) and ignores `root` for that
+ * purpose. Explicit anchoring keeps bare calls deterministic even when the
+ * per-call session cwd differs from the spawn cwd.
+ * `tilth_diff`'s scope is an output filter, not a search root, and
+ * `tilth_read` takes no scope — neither opts in.
  *
  * Git references (`a`, `b`, `log` on tilth_diff) are not paths and pass
- * through untouched. This behavior is identical across configured and ad-hoc
- * server modes, so a keep-alive server rooted in another project cannot
- * receive mis-scoped queries.
+ * through untouched.
  */
 import { isAbsolute, resolve } from "node:path";
 
@@ -43,9 +41,9 @@ export interface ScopeOptions {
 	/**
 	 * Inject `scope: <resolved root>` when the caller supplied no `scope`.
 	 * Set only on tools whose `scope` is a search root: the server resolves an
-	 * omitted scope to its own (possibly foreign) process cwd and ignores
-	 * `root` for that purpose. Off for tilth_diff (scope = output filter) and
-	 * tilth_read (no scope param).
+	 * omitted scope to its own process cwd and ignores `root` for that
+	 * purpose. Off for tilth_diff (scope = output filter) and tilth_read
+	 * (no scope param).
 	 */
 	defaultScope?: boolean;
 }
@@ -82,10 +80,10 @@ export function applyScoping(params: ToolParams, cwd: string, options: ScopeOpti
 	if (typeof scoped.scope === "string") {
 		scoped.scope = absolutizePath(scoped.scope, cwd);
 	} else if ((scoped.scope === undefined || scoped.scope === null) && options.defaultScope) {
-		// The server resolves an omitted scope to its own process cwd — frozen
-		// at spawn, which for a keep-alive mcporter daemon is not the pi
-		// session's cwd — and ignores `root` for scope resolution. Anchor the
-		// default scope explicitly so bare calls search the session project.
+		// The server resolves an omitted scope to its own process cwd (frozen
+		// at spawn) and ignores `root` for scope resolution. Anchor the
+		// default scope explicitly so bare calls always search the session
+		// project, even when the per-call cwd differs from the spawn cwd.
 		scoped.scope = scoped.root;
 	}
 	if (typeof scoped.context === "string") {

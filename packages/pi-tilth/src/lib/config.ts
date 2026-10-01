@@ -15,9 +15,18 @@ import { join } from "node:path";
 export const EXTENSION_ID = "pi-tilth";
 
 export interface TilthConfig {
-	/** mcporter server entry to prefer (default "tilth"). */
-	serverName: string;
-	/** Per-call mcporter timeout in milliseconds (default 60_000). */
+	/**
+	 * Budget for the MCP `initialize` handshake in milliseconds. The transport
+	 * resolves it at connect time when omitted: 120,000 for `npx` (cold-cache
+	 * package download) and 30,000 for a local `tilth` binary.
+	 */
+	connectTimeoutMs?: number;
+	/**
+	 * Per-call timeout in milliseconds (default 60_000). Enforced in-process
+	 * by the MCP client (`timeoutMs` on `callTool`): the pending JSON-RPC
+	 * request is cancelled — the persistent server process is NOT killed, so
+	 * the connection stays usable after a timeout.
+	 */
 	callTimeoutMs: number;
 	/** Master switch for hashline-edit anchor compatibility (default true). */
 	hashlineCompat: boolean;
@@ -36,8 +45,12 @@ export function normalizeConfig(raw: unknown): Partial<TilthConfig> {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
 	const record = raw as Record<string, unknown>;
 	const config: Partial<TilthConfig> = {};
-	if (typeof record.serverName === "string" && record.serverName.length > 0) {
-		config.serverName = record.serverName;
+	if (
+		typeof record.connectTimeoutMs === "number" &&
+		Number.isFinite(record.connectTimeoutMs) &&
+		record.connectTimeoutMs > 0
+	) {
+		config.connectTimeoutMs = record.connectTimeoutMs;
 	}
 	if (typeof record.callTimeoutMs === "number" && Number.isFinite(record.callTimeoutMs) && record.callTimeoutMs > 0) {
 		config.callTimeoutMs = record.callTimeoutMs;
@@ -67,7 +80,9 @@ export function loadConfig(options: { globalConfigPath: string; projectConfigPat
 		...loadSingleConfig(options.projectConfigPath),
 	};
 	return {
-		serverName: merged.serverName ?? "tilth",
+		// undefined is meaningful: the transport then derives the connect
+		// budget from the resolved mode (120s npx / 30s binary).
+		...(merged.connectTimeoutMs !== undefined ? { connectTimeoutMs: merged.connectTimeoutMs } : {}),
 		callTimeoutMs: merged.callTimeoutMs ?? 60_000,
 		hashlineCompat: merged.hashlineCompat ?? true,
 	};

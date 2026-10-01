@@ -3,8 +3,11 @@
  *
  * The server's own description restricts `tilth_savings` to explicit user
  * requests, which is exactly what a command is; it is deliberately not
- * registered as a model-callable tool. Tool-style failures throw; command
- * failures notify.
+ * registered as a model-callable tool. The call goes over the active
+ * persistent in-process MCP connection (connecting it lazily if no tool call
+ * has run yet — bounded by connectTimeoutMs plus callTimeoutMs), so it
+ * reports the savings accumulated across the whole session. Tool-style
+ * failures throw; command failures notify.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { unavailableMessage } from "../lib/availability";

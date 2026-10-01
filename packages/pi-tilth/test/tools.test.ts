@@ -4,8 +4,9 @@ import { fileURLToPath } from "node:url";
 import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { createAvailabilityState } from "../src/lib/availability";
-import type { Exec } from "../src/lib/exec";
+import { ServerToolError, TransportError } from "../src/lib/result";
 import { runTilthCall, type TilthToolDeps } from "../src/toolkit";
+import { asTilthTransport, createFakeTransport, type FakeTransport } from "./helpers/fake-transport";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(testDir, "..");
@@ -69,19 +70,23 @@ describe("tools — verbatim server schema fidelity", () => {
 	});
 });
 
-function makeDeps(exec: Exec): TilthToolDeps {
-	return {
-		exec,
+function makeDeps(
+	handler: (toolName: string, params: Record<string, unknown>) => string | Promise<string> = () => "ok",
+): { deps: TilthToolDeps; transport: FakeTransport } {
+	const transport = createFakeTransport(handler);
+	const deps: TilthToolDeps = {
+		transport: asTilthTransport(transport),
 		availability: createAvailabilityState(),
-		config: { serverName: "tilth", callTimeoutMs: 60_000, hashlineCompat: false },
+		config: { callTimeoutMs: 60_000, hashlineCompat: false },
 		compat: null,
 	};
+	return { deps, transport };
 }
 
 describe("runTilthCall — transport integration", () => {
-	it("throws the static unavailable error without spawning", async () => {
-		const deps = makeDeps(async () => {
-			throw new Error("must not spawn");
+	it("throws the static unavailable error without calling the transport", async () => {
+		const { deps, transport } = makeDeps(() => {
+			throw new Error("must not call");
 		});
 		deps.availability.mode = "unavailable";
 		await expect(
@@ -92,25 +97,12 @@ describe("runTilthCall — transport integration", () => {
 				cwd: "/tmp",
 			}),
 		).rejects.toThrow(/tilth is not available/);
+		expect(transport.calls).toHaveLength(0);
 	});
 
-	it("issues exactly one mcporter call in config mode and returns joined text", async () => {
-		let calls = 0;
-		const deps = makeDeps(async (cmd, args) => {
-			calls += 1;
-			expect(cmd).toBe("mcporter");
-			expect(args[0]).toBe("call");
-			expect(args[1]).toBe("tilth.tilth_search");
-			return {
-				stdout: JSON.stringify({
-					content: [{ type: "text", text: "result text" }],
-				}),
-				stderr: "",
-				code: 0,
-				killed: false,
-			};
-		});
-		deps.availability.mode = "config";
+	it("issues exactly one transport call and returns the joined text", async () => {
+		const { deps, transport } = makeDeps(() => "result text");
+		deps.availability.mode = "binary";
 		const result = await runTilthCall({
 			deps,
 			toolName: "tilth_search",
@@ -120,17 +112,14 @@ describe("runTilthCall — transport integration", () => {
 		});
 		expect(result.text).toBe("result text");
 		expect(result.scopedParams).toEqual({ query: "x", root: "/tmp", scope: "/tmp" });
-		expect(calls).toBe(1);
+		expect(transport.calls).toHaveLength(1);
+		expect(transport.calls[0]?.toolName).toBe("tilth_search");
+		expect(transport.calls[0]?.params).toEqual({ query: "x", root: "/tmp", scope: "/tmp" });
 	});
 
 	it("search tools inject a default scope so the server never searches its own cwd", async () => {
-		const deps = makeDeps(async () => ({
-			stdout: JSON.stringify({ content: [{ type: "text", text: "ok" }] }),
-			stderr: "",
-			code: 0,
-			killed: false,
-		}));
-		deps.availability.mode = "config";
+		const { deps, transport } = makeDeps(() => "ok");
+		deps.availability.mode = "binary";
 		const result = await runTilthCall({
 			deps,
 			toolName: "tilth_search",
@@ -138,67 +127,30 @@ describe("runTilthCall — transport integration", () => {
 			cwd: "/work/repo",
 			scopeOptions: { defaultScope: true },
 		});
-		// Regression (2026-09-13): tilth resolves an omitted scope to its own
-		// process cwd — for a keep-alive mcporter daemon that is the daemon
-		// directory — and ignores `root` for that purpose. The extension must
-		// anchor the default scope itself.
+		// The server resolves an omitted scope to its own process cwd and ignores
+		// `root` for that purpose; the extension anchors the default scope itself.
 		expect(result.scopedParams.scope).toBe("/work/repo");
+		expect(transport.calls[0]?.params.scope).toBe("/work/repo");
 	});
 
-	it("config mode scopes relative paths against cwd", async () => {
-		const deps = makeDeps(async (_cmd, args) => {
-			const argsIdx = args.indexOf("--args");
-			const payload = JSON.parse(args[argsIdx + 1] ?? "{}") as Record<string, unknown>;
-			expect(payload.root).toBe("/work");
-			expect(payload.path).toBe("/work/src/a.ts");
-			return {
-				stdout: JSON.stringify({ content: [{ type: "text", text: "ok" }] }),
-				stderr: "",
-				code: 0,
-				killed: false,
-			};
-		});
-		deps.availability.mode = "config";
+	it("scopes relative paths against cwd before the transport call", async () => {
+		const { deps, transport } = makeDeps(() => "ok");
+		deps.availability.mode = "binary";
 		await runTilthCall({
 			deps,
 			toolName: "tilth_read",
 			params: { path: "src/a.ts" },
 			cwd: "/work",
 		});
+		expect(transport.calls[0]?.params.root).toBe("/work");
+		expect(transport.calls[0]?.params.path).toBe("/work/src/a.ts");
 	});
 
-	it("ad-hoc binary mode passes --yes and the stdio descriptor", async () => {
-		const deps = makeDeps(async (_cmd, args) => {
-			expect(args).toContain("--yes");
-			const stdioIdx = args.indexOf("--stdio");
-			expect(args[stdioIdx + 1]).toBe("tilth");
-			return {
-				stdout: JSON.stringify({ content: [{ type: "text", text: "ok" }] }),
-				stderr: "",
-				code: 0,
-				killed: false,
-			};
+	it("propagates ServerToolError from the transport (tool result marked failed)", async () => {
+		const { deps } = makeDeps(() => {
+			throw new ServerToolError("file not found: /x");
 		});
 		deps.availability.mode = "binary";
-		await runTilthCall({
-			deps,
-			toolName: "tilth_read",
-			params: { path: "/x" },
-			cwd: "/tmp",
-		});
-	});
-
-	it("maps server isError envelopes to thrown errors (tool result marked failed)", async () => {
-		const deps = makeDeps(async () => ({
-			stdout: JSON.stringify({
-				content: [{ type: "text", text: "file not found: /x" }],
-				isError: true,
-			}),
-			stderr: "",
-			code: 0,
-			killed: false,
-		}));
-		deps.availability.mode = "config";
 		await expect(
 			runTilthCall({
 				deps,
@@ -209,14 +161,11 @@ describe("runTilthCall — transport integration", () => {
 		).rejects.toThrow("file not found: /x");
 	});
 
-	it("maps transport failures to thrown errors carrying stderr", async () => {
-		const deps = makeDeps(async () => ({
-			stdout: "",
-			stderr: "connection refused",
-			code: 7,
-			killed: false,
-		}));
-		deps.availability.mode = "config";
+	it("propagates TransportError from the transport", async () => {
+		const { deps } = makeDeps(() => {
+			throw new TransportError("tilth MCP transport error: connection refused");
+		});
+		deps.availability.mode = "binary";
 		await expect(
 			runTilthCall({
 				deps,
@@ -228,8 +177,8 @@ describe("runTilthCall — transport integration", () => {
 	});
 
 	it("throws when availability has not been probed yet", async () => {
-		const deps = makeDeps(async () => {
-			throw new Error("must not spawn");
+		const { deps, transport } = makeDeps(() => {
+			throw new Error("must not call");
 		});
 		await expect(
 			runTilthCall({
@@ -239,6 +188,7 @@ describe("runTilthCall — transport integration", () => {
 				cwd: "/tmp",
 			}),
 		).rejects.toThrow(/not been probed/);
+		expect(transport.calls).toHaveLength(0);
 	});
 });
 

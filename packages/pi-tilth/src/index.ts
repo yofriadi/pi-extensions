@@ -1,11 +1,14 @@
 /**
- * pi-tilth — tilth code-intelligence tools for pi-coding-agent via mcporter.
+ * pi-tilth — tilth code-intelligence tools for pi-coding-agent over a
+ * persistent in-process MCP stdio connection.
  *
- * Entry wiring: session_start loads config, resolves transport availability
- * (configured mcporter server → tilth binary → npx → unavailable) and
- * notifies on degraded modes; registers the six tools and /tilth-savings.
- * Tools consult availability per call and throw the static explanatory error
- * when unavailable.
+ * Entry wiring: session_start loads config, probes tilth availability
+ * (tilth binary → npx → unavailable), constructs the transport wrapper
+ * (lazily connected on the first tool call) and notifies on degraded modes;
+ * registers the six tools and /tilth-savings. session_shutdown tears the
+ * transport down idempotently (quit, reload, new, resume, fork). Tools
+ * consult availability per call and throw the static explanatory error when
+ * unavailable.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -13,6 +16,7 @@ import { registerSavingsCommand } from "./commands/savings";
 import { createAvailabilityState, unavailableMessage } from "./lib/availability";
 import { getGlobalConfigPath, getProjectConfigPath, loadConfig } from "./lib/config";
 import { type CompatModule, resolveCompatModule } from "./lib/hashline-bridge";
+import { TilthMcpTransport } from "./lib/transport";
 import type { TilthToolDeps } from "./toolkit";
 import { registerDepsTool } from "./tools/deps";
 import { registerDiffTool } from "./tools/diff";
@@ -36,13 +40,21 @@ export default function piTilthExtension(pi: ExtensionAPI): void {
 	// settled value per call (cheap, never re-imports).
 	let compat: CompatModule | null = null;
 	let config = {
-		serverName: "tilth",
 		callTimeoutMs: 60_000,
 		hashlineCompat: true,
 	};
+	// Transport is (re)constructed at session_start; null before the first
+	// start and after shutdown. Connection is lazy: the stdio child process
+	// spawns on the first tool call, not at session start.
+	let transport: TilthMcpTransport | null = null;
 
 	const deps: TilthToolDeps = {
-		exec: (cmd, args, opts) => pi.exec(cmd, args, opts),
+		get transport() {
+			if (transport === null) {
+				throw new Error("tilth transport is not initialized yet. Try again shortly.");
+			}
+			return transport;
+		},
 		availability,
 		get config() {
 			return config;
@@ -71,25 +83,39 @@ export default function piTilthExtension(pi: ExtensionAPI): void {
 			config = { ...config, hashlineCompat: false };
 		}
 
-		await availability.refresh(pi.exec.bind(pi), config.serverName);
+		await availability.refresh(pi.exec.bind(pi));
 
 		// Guarded dynamic import — sanctioned exception to the repo
 		// no-dynamic-imports rule (each extension must work standalone).
 		compat = config.hashlineCompat ? await resolveCompatModule() : null;
 
-		if (availability.mode === "unavailable") {
+		const mode = availability.mode;
+		if (mode === "unavailable" || mode === undefined) {
 			ctx.ui.notify(unavailableMessage(), "warning");
 			return;
 		}
-		if (availability.mode === "npx") {
+		transport = new TilthMcpTransport({
+			mode,
+			config,
+			cwd: ctx.cwd,
+		});
+		if (mode === "npx") {
 			ctx.ui.notify(
-				"tilth was not found as a binary or configured mcporter server; " +
-					"falling back to `npx -y tilth --mcp` per call. The first call may " +
-					"download tilth and exceed the per-call timeout — if it times out, " +
-					"simply retry. For session dedup, configure a keep-alive server:\n" +
-					'{ "mcpServers": { "tilth": { "command": "tilth", "args": ["--mcp"], "lifecycle": "keep-alive", "idleTimeoutMs": 300000 } } }',
+				"tilth was not found as a binary; falling back to `npx -y tilth --mcp` on a persistent " +
+					"in-process connection. The first tool call may download tilth and can take a while " +
+					"(the connect budget is 120s) — later calls are fast. Install the binary for instant startup: " +
+					"cargo install tilth (or npm i -g tilth).",
 				"info",
 			);
 		}
+	});
+
+	// Idempotent teardown for every shutdown reason (quit, reload, new,
+	// resume, fork). `disposed` guards post-shutdown respawns; a later
+	// session_start constructs a fresh transport.
+	pi.on("session_shutdown", async () => {
+		const current = transport;
+		transport = null;
+		await current?.stop();
 	});
 }
