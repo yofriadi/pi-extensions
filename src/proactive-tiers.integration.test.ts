@@ -527,21 +527,6 @@ describe.skip("proactive budget tiers — lifecycle", () => {
     expect(flushMetrics(harness)[0].trigger).toBe("proactive");
   });
 
-  it("3.6: a text-only turn with no rearm performs NO tier evaluation no matter how high usage reads", async () => {
-    summarizerCalls = 0;
-    const branch = multiBatchBranch(4);
-    const harness = await boot({ tiers: [0.5], batchLimit: 2, branch });
-    // session_start's rearm probe clears: simulate by consuming the rearm
-    // with an EMPTY-queue flush first? Simpler: boot with an empty branch so
-    // nothing rears, then push usage sky-high on a text-only turn.
-    const emptyHarness = await boot({ tiers: [0.5], batchLimit: 2, branch: [] });
-    await emptyHarness.handlers.get("session_start")!({}, emptyHarness.ctx);
-    emptyHarness.setUsage(Math.round(0.95 * 300_000));
-    await textTurn(emptyHarness, 20);
-    expect(summarizerCalls).toBe(0);
-    expect(flushMetrics(emptyHarness)).toHaveLength(0);
-  });
-
   it("3.6: a reload whose rescan finds only TRIVIAL captured work fires the tier, makes zero summarizer calls, and advances on skipped-trivial", async () => {
     summarizerCalls = 0;
     // Raw chars below minBatchChars... but the harness fixture sets
@@ -987,6 +972,78 @@ describe.skip("proactive budget tiers — lifecycle", () => {
     expect(proactive[0].tier).toBe(0.5);
   });
 
+  it("review-F4: a failed tier attempt clears its retry floor after a genuine dip below the tier's re-arm point", async () => {
+    summarizerCalls = 0;
+    const branch = multiBatchBranch(6);
+    let failNext = false;
+    const failing = () => {
+      if (failNext) {
+        return {
+          async *[Symbol.asyncIterator]() {},
+          async result() {
+            return { stopReason: "error", errorMessage: "boom", content: [], usage: USAGE };
+          },
+        };
+      }
+      summarizerCalls++;
+      return okStream("[[1:read]] summary");
+    };
+    const harness = await boot({ tiers: [0.5], batchLimit: 2, branch, streamImpl: failing });
+    await harness.handlers.get("session_start")!({}, harness.ctx);
+
+    // Attempt at 0.51 fails → retry floor ~0.56 recorded against tier 0.5.
+    failNext = true;
+    harness.setUsage(Math.round(0.51 * 300_000));
+    await toolTurn(harness, "f4-a", 20);
+    expect(flushMetrics(harness)[0].outcome).toBe("error");
+
+    // Genuine dip below the tier's re-arm point (0.5 - 0.10 = 0.4): the floor
+    // MUST clear even though the cursor never advanced (0 stays 0).
+    harness.setUsage(Math.round(0.30 * 300_000));
+    await toolTurn(harness, "f4-b", 21);
+
+    // Re-cross to 0.51 — BELOW the old 0.56 floor, but the dip re-armed the
+    // tier, so it fires (and now succeeds).
+    failNext = false;
+    harness.setUsage(Math.round(0.51 * 300_000));
+    await toolTurn(harness, "f4-c", 22);
+    expect(summarizerCalls).toBe(2);
+    const metrics = flushMetrics(harness);
+    expect(metrics.filter((m) => m.trigger === "proactive").length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/**
+ * Cases from the skipped suite above that hold on today's implementation, kept
+ * running so this sync's new upstream base does not lose their coverage:
+ *
+ * - `review-F2` exercises the real dedup/index path (including upstream's
+ *   v2.11.2 image-aware dedup key) through this harness, so it is genuine
+ *   regression coverage now.
+ * - The two tier cases pass vacuously while `proactive-budget-tiers` is
+ *   unimplemented (no tier evaluation exists, so "no evaluation" and "no
+ *   concurrent flush" hold trivially). They stay live so a partial
+ *   implementation cannot start evaluating tiers in the wrong place without
+ *   turning them red.
+ *
+ * The remaining 19 cases stay in the skipped block above until task 2.4 lands.
+ */
+describe("proactive budget tiers — behavior that already holds", () => {
+  it("3.6: a text-only turn with no rearm performs NO tier evaluation no matter how high usage reads", async () => {
+    summarizerCalls = 0;
+    const branch = multiBatchBranch(4);
+    const harness = await boot({ tiers: [0.5], batchLimit: 2, branch });
+    // session_start's rearm probe clears: simulate by consuming the rearm
+    // with an EMPTY-queue flush first? Simpler: boot with an empty branch so
+    // nothing rears, then push usage sky-high on a text-only turn.
+    const emptyHarness = await boot({ tiers: [0.5], batchLimit: 2, branch: [] });
+    await emptyHarness.handlers.get("session_start")!({}, emptyHarness.ctx);
+    emptyHarness.setUsage(Math.round(0.95 * 300_000));
+    await textTurn(emptyHarness, 20);
+    expect(summarizerCalls).toBe(0);
+    expect(flushMetrics(emptyHarness)).toHaveLength(0);
+  });
+
   it("review-F2: a partially-deduped batch commits only its novel tool calls as canonical index records", async () => {
     summarizerCalls = 0;
     // Turn 0: a batch whose tool result content will be REPEATED later (the
@@ -1103,45 +1160,5 @@ describe.skip("proactive budget tiers — lifecycle", () => {
     expect(summarizerCalls).toBe(6);
     const proactive = flushMetrics(harness).filter((m) => m.trigger === "proactive");
     expect(proactive).toHaveLength(0);
-  });
-
-  it("review-F4: a failed tier attempt clears its retry floor after a genuine dip below the tier's re-arm point", async () => {
-    summarizerCalls = 0;
-    const branch = multiBatchBranch(6);
-    let failNext = false;
-    const failing = () => {
-      if (failNext) {
-        return {
-          async *[Symbol.asyncIterator]() {},
-          async result() {
-            return { stopReason: "error", errorMessage: "boom", content: [], usage: USAGE };
-          },
-        };
-      }
-      summarizerCalls++;
-      return okStream("[[1:read]] summary");
-    };
-    const harness = await boot({ tiers: [0.5], batchLimit: 2, branch, streamImpl: failing });
-    await harness.handlers.get("session_start")!({}, harness.ctx);
-
-    // Attempt at 0.51 fails → retry floor ~0.56 recorded against tier 0.5.
-    failNext = true;
-    harness.setUsage(Math.round(0.51 * 300_000));
-    await toolTurn(harness, "f4-a", 20);
-    expect(flushMetrics(harness)[0].outcome).toBe("error");
-
-    // Genuine dip below the tier's re-arm point (0.5 - 0.10 = 0.4): the floor
-    // MUST clear even though the cursor never advanced (0 stays 0).
-    harness.setUsage(Math.round(0.30 * 300_000));
-    await toolTurn(harness, "f4-b", 21);
-
-    // Re-cross to 0.51 — BELOW the old 0.56 floor, but the dip re-armed the
-    // tier, so it fires (and now succeeds).
-    failNext = false;
-    harness.setUsage(Math.round(0.51 * 300_000));
-    await toolTurn(harness, "f4-c", 22);
-    expect(summarizerCalls).toBe(2);
-    const metrics = flushMetrics(harness);
-    expect(metrics.filter((m) => m.trigger === "proactive").length).toBeGreaterThanOrEqual(2);
   });
 });

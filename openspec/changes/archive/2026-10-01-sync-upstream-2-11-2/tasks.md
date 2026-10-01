@@ -43,12 +43,19 @@
 ## 5. Phase 4 — monorepo consumption (runs after the fork push)
 
 - [x] 5.1 Stash unrelated in-flight monorepo work so the tree is clean repo-wide (G0)
-- [x] 5.2 Squash subtree pull from `pi-condense-fork/local/main` in a detached candidate worktree, resolving the three one-time monorepo divergences (see design Decision 9), then root lockfile regeneration, frozen install, G1–G4 from `packages/pi-condense`, root `pnpm run check`, and the caller fast-forward (`pnpm update:pi-condense` stops at conflicts by design, so the candidate flow was driven by hand) from `pi-condense-fork/local/main` in a detached candidate, root lockfile regenerated for the consumed manifest change, frozen install, G1–G4 from `packages/pi-condense`, root `pnpm run check`, then fast-forward
-- [x] 5.3 Monorepo-side G5: protected paths present with local content, no upstream reverts; `.pi/` stays deleted monorepo-side; the duplicate active automation change directory is gone
+- [x] 5.2 Squash subtree pull from `pi-condense-fork/local/main` in a detached candidate worktree (`pnpm update:pi-condense` stops at conflicts by design, so the same flow was driven by hand), resolving the three one-time monorepo divergences per design Decision 9, then frozen install, G1–G4 from `packages/pi-condense`, root `pnpm run check`, and the caller fast-forward
+- [x] 5.3 Monorepo-side G5: `packages/pi-condense` verified byte-identical to fork `local/main` (177 files, per-file hashes), `.pi/**` restored, the duplicate active automation change directory gone, and no change outside `packages/pi-condense`. The lockfile regeneration the script would have committed was dropped: its only delta was deleting the `pi-cc-ui` and `pi-provider-cline` importers, which are in the committed lockfile but still untracked at HEAD, and the pi-condense importer block is unchanged by a version bump
 - [x] 5.4 Restore the stashed unrelated work and verify it came back intact
 - [x] 5.5 Tag the fork `subtree-v2.11.2+local` at the consumed tip
 
-## 6. Gates reference
+## 6. Phase 5 — adversarial review (code-reviewer agent)
+
+- [x] 6.1 Round 1 over the fork rebase, the reconciliation commits, and the monorepo merge: verdict *request changes* — one Required (this record misstated the `.pi/**` resolution in proposal Impact, design Decisions 1 and 9, and task 5.3), one Optional (the block-level `describe.skip` also silenced the 3 cases that pass), one Nit (task 5.2 text stitched twice). Every code area it attacked came back clean: wrapper/wrapped-text consistency at all construction, storage, fusion, render, hash, dedup, and metric sites; no upstream hunk lost in the auto-merged files; release-helper ordering and atomicity; both harness ports; the CHANGELOG restructure
+- [x] 6.2 Correct the record (proposal Impact, design Decisions 1, 6, 9, tasks 5.2/5.3), citing npm's `gitHead` metadata for the `3.9.1` attribution instead of implying commit `c57386f8` published it
+- [x] 6.3 Move the 3 green cases into an unskipped `describe("proactive budget tiers — behavior that already holds")` with a note on which of them are vacuous until task 2.4; the red block stays `describe.skip`, so the Sync-gates requirement is met unchanged and the suite is 689 pass / 19 skip / 0 fail
+- [ ] 6.4 Round 2 re-review of the remediation
+
+## 7. Gates reference
 
 - G0 clean tree (monorepo, pre-subtree-op): `git diff-index HEAD` and `git diff-index --cached HEAD` both empty repo-wide
 - G1 grep: no import from `@earendil-works/pi-ai/compat` and no `reasoningEffort:` property assignment under `src/` or `index.ts`; the `not.toHaveProperty("reasoningEffort")` assertion is allowed
@@ -59,6 +66,6 @@
 - G6 completeness: the local-layer diff against the new base contains every ported local path, and every excess path belongs to the named sync-introduced allowlist
 - Local automation suites: `bash scripts/test-release-helper.sh`, `bash scripts/test-smoke-antigravity.sh`
 
-## 7. Out of scope
+## 8. Out of scope
 
 Implementing `proactive-budget-tiers` (0/25) or `summarizer-fallback-model` (0/21); archiving `add-summary-context-wrapper` (implemented, tasks complete, left active for its own close-out); deciding the npm `3.9.1` high-water-mark question in Decision 6; monorepo files outside `packages/pi-condense`; upstream's stale unmerged branch `demote-oversized-skip-to-info`; contributing anything back upstream.
