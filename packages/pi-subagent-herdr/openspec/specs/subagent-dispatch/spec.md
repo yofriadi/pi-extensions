@@ -86,6 +86,8 @@ The canonical ID SHALL NOT by itself authorize a model-facing resume operation; 
 The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, `seed`, or `autoExit`.
 The agent definition SHALL own tools, skills, identity instructions, and optional model/thinking, and SHALL NOT support a `seed` frontmatter option; its presence SHALL fail validation before queueing rather than being silently ignored.
 Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing.
+The child SHALL receive that identity as its whole system prompt (an explicit prompt source), not as text appended to a discovered one, so a parent's operator-authored `SYSTEM.md` and the tool surface it states are never inherited.
+The launch SHALL also claim the append slot explicitly, so a parent's `APPEND_SYSTEM.md` is not discovered and appended to the child.
 Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime.
 Package-level model maps (`models.default`, `models.agents`) and other package `config.json` keys SHALL NOT participate in routing or defaults.
 Optional `label` SHALL affect presentation only.
@@ -122,6 +124,16 @@ Optional `layout`, `surface`, and `direction` remain per-call overrides only—n
 
 - **WHEN** a valid agent definition is assembled for launch
 - **THEN** its Markdown body supplies the sole agent-authored identity instructions and no duplicate identity prompt is applied
+
+#### Scenario: parent operator prompt is not inherited
+
+- **WHEN** a child is launched while the parent runs an operator-authored system prompt discovered from the Pi agent directory (`SYSTEM.md`)
+- **THEN** the launch passes the child's identity file as an explicit system-prompt source, so the parent's prompt and the tool surface it states do not appear in the child's prompt
+
+#### Scenario: parent append-prompt is not inherited
+
+- **WHEN** a child is launched while an `APPEND_SYSTEM.md` is discoverable from the inherited Pi agent directory
+- **THEN** the launch claims the append slot explicitly, so that file is not discovered and no parent-authored text is appended to the child's identity
 
 #### Scenario: obsolete system-prompt frontmatter fails
 

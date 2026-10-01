@@ -828,15 +828,36 @@ function buildActiveAgentTag(agentName: string): string {
 	return `<active_agent name="${validateCanonicalAgentId(agentName)}"/>`;
 }
 
-/** The canonical identity tag and Markdown body are always appended exactly once. */
+/**
+ * The canonical identity tag and Markdown body, as the child's whole system prompt.
+ *
+ * Passed with `--system-prompt`, not `--append-system-prompt`: an explicit
+ * prompt source short-circuits Pi's `SYSTEM.md` discovery
+ * (`resource-loader`: `systemPromptSource ?? discoverSystemPromptFile()`), so a
+ * child no longer inherits the parent's operator prompt or the tool surface it
+ * states. The agent definition body is the child's sole identity.
+ *
+ * Pi still appends `<project_context>`, `<available_skills>`, and the
+ * working-directory footer on its custom-prompt branch, so a child keeps those.
+ * It does not get Pi's preamble, its `Available tools:`/`Guidelines:` sections,
+ * or its documentation-paths block — an agent definition states its own tools.
+ *
+ * Note this flag also governs `APPEND_SYSTEM.md`: the append source is only
+ * suppressed when `--append-system-prompt` is passed, so leaving it unset would
+ * let a parent's `APPEND_SYSTEM.md` reach the child. It is therefore passed
+ * explicitly as empty alongside the prompt to keep the identity exact.
+ *
+ * The `<active_agent>` tag stays inside this content either way, so per-agent
+ * permission resolution is unaffected.
+ */
 export function buildSystemPromptFileContent(options: { agentName: string; identity: string }): {
 	content: string;
-	flag: "--append-system-prompt";
+	flag: "--system-prompt";
 } {
 	const tag = buildActiveAgentTag(options.agentName);
 	return {
 		content: options.identity ? `${tag}\n${options.identity}` : tag,
-		flag: "--append-system-prompt",
+		flag: "--system-prompt",
 	};
 }
 

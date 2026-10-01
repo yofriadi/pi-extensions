@@ -695,10 +695,21 @@ export function createSubagentLaunchService(deps: LaunchDeps) {
 			agentName: state.options.agentDefinition.id,
 			identity: state.options.agentDefinition.body,
 		});
-		if (!prompt) return;
+		// Both slots are claimed unconditionally. Returning early here would leave
+		// them unset, and pi would then discover the parent's SYSTEM.md *and*
+		// APPEND_SYSTEM.md from the inherited agent dir — silently restoring the
+		// inheritance this replaces. The identity is required, so a missing one is a
+		// launch error rather than a fallback to the parent's prompt.
+		if (!prompt) {
+			throw new Error(`Subagent ${state.options.agentDefinition.id}: identity system prompt could not be built.`);
+		}
 		const path = systemPromptPath(state);
 		writeLaunchArtifact(path, prompt.content);
 		parts.push(prompt.flag, shellQuote(path));
+		// pi only skips APPEND_SYSTEM.md discovery when an append source is supplied,
+		// so the append slot is claimed with an empty value: it suppresses discovery
+		// and resolves to nothing, appending no text.
+		parts.push("--append-system-prompt", shellQuote(""));
 	}
 
 	function systemPromptPath(state: LaunchState): string {

@@ -38,7 +38,7 @@ type ScriptHandoff = {
 	options?: { scriptPath?: string; scriptPreamble?: string };
 };
 
-function createService(handoffs: ScriptHandoff[], failHandoff = false) {
+function createService(handoffs: ScriptHandoff[], failHandoff = false, overrides: Record<string, unknown> = {}) {
 	return createSubagentLaunchService({
 		resolveBlocking: () => false,
 		resolveLayout: () => "attached",
@@ -51,7 +51,7 @@ function createService(handoffs: ScriptHandoff[], failHandoff = false) {
 		lifecycleDenySet: () => new Set(["subagent"]),
 		buildSystemPromptFileContent: ({ agentName, identity }) => ({
 			content: `<active_agent name="${agentName}"/>\n${identity}`,
-			flag: "--append-system-prompt",
+			flag: "--system-prompt",
 		}),
 		buildSubagentToolAllowlist: (tools) => `${tools},subagent_done`,
 		safeCommentValue: (value) => value.replace(/[\r\n]/g, " ").trim(),
@@ -75,6 +75,7 @@ function createService(handoffs: ScriptHandoff[], failHandoff = false) {
 		startStatusRefresh: () => {},
 		resolveResultPresentation: () => "",
 		shouldDeliverSubagentCompletion: () => true,
+		...overrides,
 	});
 }
 
@@ -127,6 +128,37 @@ function cleanupRun(
 }
 
 describe("direct subagent launch path", () => {
+	// The identity prompt is required: if it could not be built, the launch must
+	// fail rather than omit both prompt flags, which would let pi discover the
+	// parent's SYSTEM.md and APPEND_SYSTEM.md from the inherited agent dir.
+	it("fails the launch when the identity prompt cannot be built", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "subagent-launch-"));
+		const runId = "missing-identity-run";
+		const sessionId = "missing-identity-parent";
+		const handoffs: ScriptHandoff[] = [];
+		const service = createService(handoffs, false, {
+			buildSystemPromptFileContent: () => undefined,
+		});
+		const context = launchContext(dir, sessionId);
+		const admissionLease = getAdmissionCoordinator(sessionId).request({ id: runId, class: "foreground" }).lease;
+
+		try {
+			await assert.rejects(
+				() =>
+					service.launchSubagent(
+						{ agent: "reviewer", task: "Inspect the missing-identity path." },
+						context,
+						launchOptions(runId, admissionLease),
+					),
+				/identity system prompt could not be built/,
+			);
+			assert.equal(handoffs.length, 0);
+		} finally {
+			cleanupRun(runId, runningSubagents.get(runId));
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("seeds a child session, writes launch artifacts, hands the command to the supplied pane, and commits", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "subagent-launch-"));
 		const runId = "direct-launch-run";
@@ -186,6 +218,15 @@ describe("direct subagent launch path", () => {
 			assert.match(script, /# Subagent launch script for reviewer/);
 			assert.match(script, /# Run: direct-launch-run/);
 			assert.match(script, /# Surface: pane-direct-launch/);
+
+			// The append slot is claimed so a parent's APPEND_SYSTEM.md cannot reach
+			// the child via the inherited agent dir: pi only skips discovery when an
+			// append source is supplied. Asserted on argv because the flag, not the
+			// file content, is what decides which parent files pi discovers.
+			// (The --system-prompt flag itself comes from the stub above, so it is
+			// pinned against the real implementation in system-prompt-mode.test.ts.)
+			assert.match(script, /--append-system-prompt ''/);
+			assert.match(script, /--system-prompt '[^']*sysprompt\.md'/);
 
 			const artifactDir = getSubagentArtifactDir(running.sessionFile);
 			const systemPromptFile = join(artifactDir, "sysprompt.md");

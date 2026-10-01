@@ -392,7 +392,7 @@ function createLaunchService(config: { handoffs: ScriptHandoff[]; onRelaunchScri
 		lifecycleDenySet: () => new Set(["subagent"]),
 		buildSystemPromptFileContent: ({ agentName, identity }) => ({
 			content: `<active_agent name="${agentName}"/>\n${identity}`,
-			flag: "--append-system-prompt",
+			flag: "--system-prompt",
 		}),
 		buildSubagentToolAllowlist: (tools) => `${tools},subagent_done`,
 		safeCommentValue: (value) => value.replace(/[\r\n]/g, " ").trim(),

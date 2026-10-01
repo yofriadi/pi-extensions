@@ -16,7 +16,7 @@ describe("permission contracts", () => {
 			agentName: "worker",
 			identity: "You are worker.",
 		});
-		assert.equal(prompt.flag, "--append-system-prompt");
+		assert.equal(prompt.flag, "--system-prompt");
 		assert.equal(prompt.content, '<active_agent name="worker"/>\nYou are worker.');
 		assert.equal((prompt.content.match(/<active_agent/g) ?? []).length, 1);
 		assert.equal((prompt.content.match(/You are worker\./g) ?? []).length, 1);
