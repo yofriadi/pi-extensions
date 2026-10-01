@@ -2,7 +2,8 @@
 
 ### Requirement: extension-free standalone resource resolution
 
-Standalone resource resolution used to validate an agent's selected skills SHALL NOT execute configured extension factories or invoke extension-owned resource discovery. It SHALL retain the effective cwd, Pi agent directory, project-trust state, and ordinary skill resource precedence needed to resolve selected names, and SHALL complete validation before queue admission.
+Standalone resource resolution used to validate an agent's selected skills SHALL NOT execute configured extension factories or invoke extension-owned resource discovery.
+It SHALL retain the effective cwd, Pi agent directory, project-trust state, and ordinary skill resource precedence needed to resolve selected names, and SHALL complete validation before queue admission.
 
 #### Scenario: selected skill resolution does not execute extensions
 
@@ -21,7 +22,8 @@ Standalone resource resolution used to validate an agent's selected skills SHALL
 
 ### Requirement: session-bound completion API ownership
 
-The extension SHALL publish a completion API for background delivery only after Pi has bound the extension to an active parent session and emitted `session_start`. Evaluating the extension factory, loading resources, or constructing a discovery-only extension runtime SHALL NOT publish or replace the active completion API.
+The extension SHALL publish a completion API for background delivery only after Pi has bound the extension to an active parent session and emitted `session_start`.
+Evaluating the extension factory, loading resources, or constructing a discovery-only extension runtime SHALL NOT publish or replace the active completion API.
 
 #### Scenario: discovery-only factory cannot claim delivery ownership
 
@@ -40,7 +42,9 @@ The extension SHALL publish a completion API for background delivery only after 
 
 ### Requirement: session-affine asynchronous delivery
 
-Every asynchronous completion, caller-ping, queued-launch error, and queued-resume error SHALL resolve the active completion API at send time and SHALL require that its parent session identity matches the target session. A captured factory API SHALL NOT be used as a fallback after reload or session replacement. Status and recovery notifications are best-effort and are not retained or retried when no matching active API exists.
+Every asynchronous completion, caller-ping, queued-launch error, and queued-resume error SHALL resolve the active completion API at send time and SHALL require that its parent session identity matches the target session.
+A captured factory API SHALL NOT be used as a fallback after reload or session replacement.
+Status and recovery notifications are best-effort and are not retained or retried when no matching active API exists.
 
 #### Scenario: delivery uses the active replacement runtime
 
@@ -64,7 +68,9 @@ Every asynchronous completion, caller-ping, queued-launch error, and queued-resu
 
 ### Requirement: inactive runtime is recoverable and bounded
 
-When no matching session-bound completion API is available, asynchronous delivery SHALL remain pending without being marked delivered, without starting acknowledgement verification, and without consuming the ordinary bounded send-attempt budget. The pending work SHALL be retried after the target session emits `session_start`. Deferral SHALL NOT be unbounded: a delivery deferred past a bounded deferral budget SHALL be marked undeliverable with the cause recorded.
+When no matching session-bound completion API is available, asynchronous delivery SHALL remain pending without being marked delivered, without starting acknowledgement verification, and without consuming the ordinary bounded send-attempt budget.
+The pending work SHALL be retried after the target session emits `session_start`.
+Deferral SHALL NOT be unbounded: a delivery deferred past a bounded deferral budget SHALL be marked undeliverable with the cause recorded.
 
 #### Scenario: completion settles during reload gap
 

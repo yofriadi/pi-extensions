@@ -6,7 +6,9 @@ LLM-facing tools for running explicitly configured Pi subagents in Herdr panes, 
 
 ### Requirement: explicit named subagent tool
 
-The extension SHALL register `subagent` with required `agent` and `task`. It SHALL NOT support a bare or default agent. It SHALL resolve the canonical agent definition before queue admission and derive display identity from the canonical ID unless an optional presentation-only `label` is supplied.
+The extension SHALL register `subagent` with required `agent` and `task`.
+It SHALL NOT support a bare or default agent.
+It SHALL resolve the canonical agent definition before queue admission and derive display identity from the canonical ID unless an optional presentation-only `label` is supplied.
 
 #### Scenario: named async spawn
 
@@ -30,7 +32,10 @@ The extension SHALL register `subagent` with required `agent` and `task`. It SHA
 
 ### Requirement: canonical user-owned agent resolution
 
-The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<canonical-id>.md` and `${PI_CODING_AGENT_DIR}/agents/<canonical-id>.md` (Pi default `~/.pi/agent/agents`). A trusted project definition SHALL override the global definition. Package examples, bundled definitions, generated definitions, and unrelated directories SHALL NOT participate. The canonical ID SHALL be a validated filename stem and SHALL bind lookup, prompt tag, definition-owned model routing, permission identity, session metadata, and resume.
+The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<canonical-id>.md` and `${PI_CODING_AGENT_DIR}/agents/<canonical-id>.md` (Pi default `~/.pi/agent/agents`).
+A trusted project definition SHALL override the global definition.
+Package examples, bundled definitions, generated definitions, and unrelated directories SHALL NOT participate.
+The canonical ID SHALL be a validated filename stem and SHALL bind lookup, prompt tag, definition-owned model routing, permission identity, session metadata, and resume.
 
 #### Scenario: trusted project override
 
@@ -54,7 +59,11 @@ The extension SHALL resolve definitions only from trusted `<cwd>/.pi/agents/<can
 
 ### Requirement: minimal subagent call schema
 
-The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, or `autoExit`. The agent definition SHALL own tools, skills, seed, and identity instructions. Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing. Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime. Optional `label` SHALL affect presentation only.
+The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tools`, `skills`, `systemPrompt`, `fork`, `cwd`, `interactive`, or `autoExit`.
+The agent definition SHALL own tools, skills, seed, and identity instructions.
+Its Markdown body SHALL be the sole agent-authored identity prompt; obsolete `system-prompt` frontmatter SHALL fail validation before queueing.
+Declared `model`/`thinking` values SHALL be authoritative, while omitted values SHALL inherit the invoking parent runtime.
+Optional `label` SHALL affect presentation only.
 
 #### Scenario: schema inspection
 
@@ -88,7 +97,10 @@ The `subagent` tool SHALL NOT expose per-call `name`, `model`, `thinking`, `tool
 
 ### Requirement: foreground and background admission queues
 
-Per parent session, the extension SHALL run no more than one foreground blocking run and four background runs. Blocking `subagent` calls belong to the foreground class; async `subagent` and `subagent_resume` belong to the background class. Valid excess calls SHALL wait in separate FIFO queues rather than fail. Validation SHALL occur before queue insertion; queued entries SHALL create no session, artifact, sidecar, pane, or child process.
+Per parent session, the extension SHALL run no more than one foreground blocking run and four background runs.
+Blocking `subagent` calls belong to the foreground class; async `subagent` and `subagent_resume` belong to the background class.
+Valid excess calls SHALL wait in separate FIFO queues rather than fail.
+Validation SHALL occur before queue insertion; queued entries SHALL create no session, artifact, sidecar, pane, or child process.
 
 #### Scenario: one foreground plus four background
 
@@ -122,7 +134,11 @@ Per parent session, the extension SHALL run no more than one foreground blocking
 
 ### Requirement: agent-owned progressive-disclosure skills
 
-The extension SHALL read only plural `skills:` from the resolved agent definition as an ordered comma-separated allowlist. It SHALL normalize and validate every name, reject duplicate entries, resolve each name against Pi's effective skill resources, and fail before queueing if a name is missing or has multiple matches. It SHALL restrict the child resource set to selected canonical skill paths and SHALL NOT synthesize initial `/skill:<name>` prompts. An explicitly loaded child companion SHALL advertise selected metadata inside exactly one standard `<available_skills>` container, created when absent, before normally discovered permission-system sanitization runs. Launch SHALL fail closed before task submission if this ordering cannot be guaranteed or verified.
+The extension SHALL read only plural `skills:` from the resolved agent definition as an ordered comma-separated allowlist.
+It SHALL normalize and validate every name, reject duplicate entries, resolve each name against Pi's effective skill resources, and fail before queueing if a name is missing or has multiple matches.
+It SHALL restrict the child resource set to selected canonical skill paths and SHALL NOT synthesize initial `/skill:<name>` prompts.
+An explicitly loaded child companion SHALL advertise selected metadata inside exactly one standard `<available_skills>` container, created when absent, before normally discovered permission-system sanitization runs.
+Launch SHALL fail closed before task submission if this ordering cannot be guaranteed or verified.
 
 #### Scenario: multiple selected skills are metadata only
 
@@ -161,7 +177,9 @@ The extension SHALL read only plural `skills:` from the resolved agent definitio
 
 ### Requirement: agent-owned tool visibility and child controls
 
-The agent definition's `tools:` SHALL be authoritative and SHALL NOT be widened per call. In a child process, this extension SHALL expose only `subagent_done` and `caller_ping`; it SHALL hide and hard-deny `subagent`, `subagent_interrupt`, and `subagent_resume` regardless of agent configuration. `subagents_list` SHALL NOT exist.
+The agent definition's `tools:` SHALL be authoritative and SHALL NOT be widened per call.
+In a child process, this extension SHALL expose only `subagent_done` and `caller_ping`; it SHALL hide and hard-deny `subagent`, `subagent_interrupt`, and `subagent_resume` regardless of agent configuration.
+`subagents_list` SHALL NOT exist.
 
 #### Scenario: child cannot manage subagents
 
@@ -180,7 +198,8 @@ The agent definition's `tools:` SHALL be authoritative and SHALL NOT be widened 
 
 ### Requirement: permission frontmatter coexistence
 
-The extension SHALL treat `permission:` as a reserved compatibility key in agent markdown, preserve it untouched, and leave its interpretation exclusively to `@gotgenes/pi-permission-system`. The child SHALL inherit the parent's exact Pi agent directory, carry canonical `<active_agent>` identity, and set `PI_SUBAGENT_PARENT_SESSION` on spawn and resume.
+The extension SHALL treat `permission:` as a reserved compatibility key in agent markdown, preserve it untouched, and leave its interpretation exclusively to `@gotgenes/pi-permission-system`.
+The child SHALL inherit the parent's exact Pi agent directory, carry canonical `<active_agent>` identity, and set `PI_SUBAGENT_PARENT_SESSION` on spawn and resume.
 
 #### Scenario: per-agent permission applies
 
@@ -199,7 +218,10 @@ The extension SHALL treat `permission:` as a reserved compatibility key in agent
 
 ### Requirement: caller ping help requests
 
-The child-only `caller_ping` tool SHALL write a ping sidecar and exit. Async pings SHALL be delivered as background notifications; blocking pings SHALL settle the foreground run and resolve its suspended tool call with the help message and resumable path. A later `subagent_resume` SHALL be a new background-class entry, subject to background capacity and FIFO order; it SHALL NOT restore the prior foreground classification. Canonical agent identity SHALL come from persisted ownership metadata.
+The child-only `caller_ping` tool SHALL write a ping sidecar and exit.
+Async pings SHALL be delivered as background notifications; blocking pings SHALL settle the foreground run and resolve its suspended tool call with the help message and resumable path.
+A later `subagent_resume` SHALL be a new background-class entry, subject to background capacity and FIFO order; it SHALL NOT restore the prior foreground classification.
+Canonical agent identity SHALL come from persisted ownership metadata.
 
 #### Scenario: ping answered by resume
 
@@ -213,7 +235,9 @@ The child-only `caller_ping` tool SHALL write a ping sidecar and exit. Async pin
 
 ### Requirement: exclusive permission-compatible resume
 
-`subagent_resume` SHALL accept a conventional path parameter, optional follow-up message/label, and surface options. It SHALL canonicalize and permission-gate the path, require versioned owner-only session metadata, recover canonical agent identity, revalidate the agent definition, and acquire an exclusive session lease. It SHALL NOT accept caller-selected model, thinking, tools, skills, system prompt, seed, cwd, or agent identity.
+`subagent_resume` SHALL accept a conventional path parameter, optional follow-up message/label, and surface options.
+It SHALL canonicalize and permission-gate the path, require versioned owner-only session metadata, recover canonical agent identity, revalidate the agent definition, and acquire an exclusive session lease.
+It SHALL NOT accept caller-selected model, thinking, tools, skills, system prompt, seed, cwd, or agent identity.
 
 #### Scenario: valid resume
 
@@ -246,7 +270,8 @@ The extension SHALL register `subagent_interrupt`, verify that the target pane e
 
 ### Requirement: always visible and auto-exiting Pi children
 
-Every admitted launch SHALL run Pi in a real Herdr pane and SHALL set auto-exit so the process ends when the task, done tool, or ping settles. Agent frontmatter SHALL NOT provide co-pilot or alternate-backend modes.
+Every admitted launch SHALL run Pi in a real Herdr pane and SHALL set auto-exit so the process ends when the task, done tool, or ping settles.
+Agent frontmatter SHALL NOT provide co-pilot or alternate-backend modes.
 
 #### Scenario: visible blocking or background run
 

@@ -2,7 +2,14 @@
 
 ### Requirement: exactly-once delivery state machine
 
-Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-released, and delivered or suppressed once. `delivered` SHALL mean the parent delivery API accepted the message or the blocking tool result is being returned. Failed async delivery SHALL remain pending under a bounded retry policy and SHALL NOT be silently deleted. Waiting for delivery persistence SHALL itself be bounded: a delivery queued into a streaming parent SHALL be re-verified only while the parent remains active and only up to a cap far exceeding any plausible parent turn, after which the delivery SHALL be re-queued for bounded retry rather than waited on indefinitely. Notifying an idle parent SHALL NOT be gated on persistence acknowledgement, because the notification is what causes the persisting turn to run. Once a send has been accepted, registering its acknowledgement SHALL precede any presentation work, and presentation failures SHALL NOT fail or repeat a delivery. An asynchronous delivery attempted while no matching session-bound completion API is active SHALL remain pending without consuming the ordinary send-attempt budget. Deferral on an inactive runtime SHALL NOT be unbounded: a delivery deferred past a bounded deferral budget SHALL be marked undeliverable with the cause recorded.
+Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-released, and delivered or suppressed once.
+`delivered` SHALL mean the parent delivery API accepted the message or the blocking tool result is being returned.
+Failed async delivery SHALL remain pending under a bounded retry policy and SHALL NOT be silently deleted.
+Waiting for delivery persistence SHALL itself be bounded: a delivery queued into a streaming parent SHALL be re-verified only while the parent remains active and only up to a cap far exceeding any plausible parent turn, after which the delivery SHALL be re-queued for bounded retry rather than waited on indefinitely.
+Notifying an idle parent SHALL NOT be gated on persistence acknowledgement, because the notification is what causes the persisting turn to run.
+Once a send has been accepted, registering its acknowledgement SHALL precede any presentation work, and presentation failures SHALL NOT fail or repeat a delivery.
+An asynchronous delivery attempted while no matching session-bound completion API is active SHALL remain pending without consuming the ordinary send-attempt budget.
+Deferral on an inactive runtime SHALL NOT be unbounded: a delivery deferred past a bounded deferral budget SHALL be marked undeliverable with the cause recorded.
 
 #### Scenario: async accepted
 
@@ -76,7 +83,10 @@ Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-relea
 
 ### Requirement: reload and shutdown ownership
 
-Coordinator, queue, watcher, delivery, lease, and suppression state SHALL survive extension reload through fork-specific process globals. Async runs SHALL transfer to the latest session-bound extension API without duplicate delivery. A completion that settles while the old runtime is shut down SHALL remain pending until the replacement session is active. Because a suspended blocking tool result cannot be reconstructed after reload, its eventual outcome SHALL be suppressed rather than converted to an async steer, while cleanup and foreground release still occur.
+Coordinator, queue, watcher, delivery, lease, and suppression state SHALL survive extension reload through fork-specific process globals.
+Async runs SHALL transfer to the latest session-bound extension API without duplicate delivery.
+A completion that settles while the old runtime is shut down SHALL remain pending until the replacement session is active.
+Because a suspended blocking tool result cannot be reconstructed after reload, its eventual outcome SHALL be suppressed rather than converted to an async steer, while cleanup and foreground release still occur.
 
 #### Scenario: async completion across reload
 
@@ -105,7 +115,15 @@ Coordinator, queue, watcher, delivery, lease, and suppression state SHALL surviv
 
 ### Requirement: status widget includes queued and active work
 
-The extension SHALL always enable the human-only status widget. It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts. It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous. It SHALL NOT register a model-facing listing tool. It SHALL NOT require or honor a package `status.enabled` (or any other package config) toggle to disable the widget. A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected. Elapsed wait time SHALL be measured from the start of the current wait, not from run start. Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error. A delivery deferred because no session-bound runtime is active SHALL be counted and labelled as awaiting the runtime, distinctly from both actively-retrying and undeliverable results.
+The extension SHALL always enable the human-only status widget.
+It SHALL list queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts.
+It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous.
+It SHALL NOT register a model-facing listing tool.
+It SHALL NOT require or honor a package `status.enabled` (or any other package config) toggle to disable the widget.
+A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected.
+Elapsed wait time SHALL be measured from the start of the current wait, not from run start.
+Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error.
+A delivery deferred because no session-bound runtime is active SHALL be counted and labelled as awaiting the runtime, distinctly from both actively-retrying and undeliverable results.
 
 #### Scenario: status is always enabled
 

@@ -1,6 +1,7 @@
 # add-pi-subagent-herdr implementation notes
 
-The final implementation follows the strict explicit-agent schema in this change. See the package `README.md`, `AGENTS.md`, and `CHANGELOG.md` for user-facing behavior.
+The final implementation follows the strict explicit-agent schema in this change.
+See the package `README.md`, `AGENTS.md`, and `CHANGELOG.md` for user-facing behavior.
 
 ## Verification snapshot
 

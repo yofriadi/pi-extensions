@@ -6,7 +6,10 @@ Visible Herdr surfaces for admitted subagents, including attached-stack geometry
 
 ### Requirement: attached stack layout
 
-Every admitted run SHALL open a real Herdr pane or tab and SHALL default to attached layout. For `direction: right`, the first child splits the caller right and subsequent children split the tallest region pane down. For `direction: down`, the first child splits the caller down and subsequent children split the widest region pane right. Geometry SHALL be preferred, with deterministic depth/insertion-order fallback.
+Every admitted run SHALL open a real Herdr pane or tab and SHALL default to attached layout.
+For `direction: right`, the first child splits the caller right and subsequent children split the tallest region pane down.
+For `direction: down`, the first child splits the caller down and subsequent children split the widest region pane right.
+Geometry SHALL be preferred, with deterministic depth/insertion-order fallback.
 
 #### Scenario: first admitted run
 
@@ -35,7 +38,8 @@ Every admitted run SHALL open a real Herdr pane or tab and SHALL default to atta
 
 ### Requirement: surface options
 
-The extension SHALL support config and per-call `layout: attached|single`, `surface: pane|tab`, and `direction: right|down` for `subagent` and `subagent_resume`. A conflicting direction SHALL NOT silently mutate a nonempty attached region.
+The extension SHALL support config and per-call `layout: attached|single`, `surface: pane|tab`, and `direction: right|down` for `subagent` and `subagent_resume`.
+A conflicting direction SHALL NOT silently mutate a nonempty attached region.
 
 #### Scenario: explicit tab
 
@@ -54,7 +58,10 @@ The extension SHALL support config and per-call `layout: attached|single`, `surf
 
 ### Requirement: validation and queueing precede surface creation
 
-Agent, skill, permission-visible path, session ownership, and duplicate-session validation SHALL complete before admission queue insertion. Queue waiting SHALL create no pane. Surface creation SHALL begin only after the relevant foreground/background slot is atomically acquired. If a queued blocking call's parent tool execution is aborted before admission, or queued work is explicitly cancelled or shut down, the entry SHALL be removed without later launch or resource creation.
+Agent, skill, permission-visible path, session ownership, and duplicate-session validation SHALL complete before admission queue insertion.
+Queue waiting SHALL create no pane.
+Surface creation SHALL begin only after the relevant foreground/background slot is atomically acquired.
+If a queued blocking call's parent tool execution is aborted before admission, or queued work is explicitly cancelled or shut down, the entry SHALL be removed without later launch or resource creation.
 
 #### Scenario: queued call has no pane
 
@@ -73,7 +80,9 @@ Agent, skill, permission-visible path, session ownership, and duplicate-session 
 
 ### Requirement: transactional launch
 
-Launch SHALL transition through admitted, pane allocated, script accepted, watcher registered, and running. A call SHALL be acknowledged as started only after `pane run` succeeds and the watcher/runtime record is installed. Any failure before running SHALL roll back all created resources and release its slot/session lease exactly once.
+Launch SHALL transition through admitted, pane allocated, script accepted, watcher registered, and running.
+A call SHALL be acknowledged as started only after `pane run` succeeds and the watcher/runtime record is installed.
+Any failure before running SHALL roll back all created resources and release its slot/session lease exactly once.
 
 #### Scenario: pane run fails after split
 
@@ -87,7 +96,10 @@ Launch SHALL transition through admitted, pane allocated, script accepted, watch
 
 ### Requirement: robust pane operations
 
-Pane creation SHALL retry only classified transient control-plane failures within a bounded budget. Permanent usage errors SHALL fail without retry. A successful exit without a pane ID SHALL count as failure. Interactive control SHALL verify existence first; cleanup close SHALL be idempotent.
+Pane creation SHALL retry only classified transient control-plane failures within a bounded budget.
+Permanent usage errors SHALL fail without retry.
+A successful exit without a pane ID SHALL count as failure.
+Interactive control SHALL verify existence first; cleanup close SHALL be idempotent.
 
 #### Scenario: transient split failure
 
@@ -111,7 +123,9 @@ Pane creation SHALL retry only classified transient control-plane failures withi
 
 ### Requirement: permission-compatible launch execution
 
-The child SHALL launch Pi from an executable script using the parent's exact cwd and Pi agent directory, canonical `PI_SUBAGENT_*` metadata, `PI_SUBAGENT_PARENT_SESSION`, the owned session JSONL, explicitly loaded child companion extension, selected skill resources, task artifact, and terminal sentinel. It SHALL inject one canonical `<active_agent>` identity, use the agent Markdown body as the sole agent-authored identity prompt, and SHALL NOT launch before the definition and selected skills are valid. The explicit companion SHALL assemble selected skill metadata in one standard `<available_skills>` container, creating it when absent, before normally discovered permission-system sanitization; launch SHALL fail closed before task submission if that ordering is not guaranteed or verified.
+The child SHALL launch Pi from an executable script using the parent's exact cwd and Pi agent directory, canonical `PI_SUBAGENT_*` metadata, `PI_SUBAGENT_PARENT_SESSION`, the owned session JSONL, explicitly loaded child companion extension, selected skill resources, task artifact, and terminal sentinel.
+It SHALL inject one canonical `<active_agent>` identity, use the agent Markdown body as the sole agent-authored identity prompt, and SHALL NOT launch before the definition and selected skills are valid.
+The explicit companion SHALL assemble selected skill metadata in one standard `<available_skills>` container, creating it when absent, before normally discovered permission-system sanitization; launch SHALL fail closed before task submission if that ordering is not guaranteed or verified.
 
 #### Scenario: canonical active agent
 
@@ -130,7 +144,10 @@ The child SHALL launch Pi from an executable script using the parent's exact cwd
 
 ### Requirement: seeded owned sessions
 
-Every initial launch SHALL create deterministic JSONL plus owner-only versioned metadata binding the canonical agent. Agent frontmatter `seed` SHALL be `fresh` or `fork`, defaulting to fresh. Agent `model` and `thinking` SHALL use declared values or inherit omitted values from the invoking parent runtime. No per-call seed, model, or thinking override SHALL exist.
+Every initial launch SHALL create deterministic JSONL plus owner-only versioned metadata binding the canonical agent.
+Agent frontmatter `seed` SHALL be `fresh` or `fork`, defaulting to fresh.
+Agent `model` and `thinking` SHALL use declared values or inherit omitted values from the invoking parent runtime.
+No per-call seed, model, or thinking override SHALL exist.
 
 #### Scenario: fresh seed
 
@@ -149,7 +166,8 @@ Every initial launch SHALL create deterministic JSONL plus owner-only versioned 
 
 ### Requirement: pane lifecycle closes on settlement
 
-The extension SHALL close or recognize absence of the child surface when a run completes, fails, aborts, pings, or shuts down. It SHALL remove region membership and preserve owned session files for resume.
+The extension SHALL close or recognize absence of the child surface when a run completes, fails, aborts, pings, or shuts down.
+It SHALL remove region membership and preserve owned session files for resume.
 
 #### Scenario: normal settlement
 

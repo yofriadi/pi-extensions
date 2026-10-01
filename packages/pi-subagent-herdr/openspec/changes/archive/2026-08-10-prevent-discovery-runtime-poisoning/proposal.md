@@ -1,8 +1,10 @@
 ## Why
 
-Background subagent delivery can be permanently retried with `Extension runtime not initialized. Action methods cannot be called during extension loading.` When a parent validates an agent with selected skills, the skill resolver creates a standalone Pi resource loader that loads the configured Herdr extension for discovery; the extension factory publishes that loader's unbound `ExtensionAPI` into process-global delivery state, replacing the live session API. Foreground completion still works because it returns through the suspended tool call, while async completion loses its delivery path.
+Background subagent delivery can be permanently retried with `Extension runtime not initialized. Action methods cannot be called during extension loading.` When a parent validates an agent with selected skills, the skill resolver creates a standalone Pi resource loader that loads the configured Herdr extension for discovery; the extension factory publishes that loader's unbound `ExtensionAPI` into process-global delivery state, replacing the live session API.
+Foreground completion still works because it returns through the suspended tool call, while async completion loses its delivery path.
 
-The previous delivery-observability change fixed failures after a send was accepted, but this defect prevents `sendMessage` from being accepted at all. The resource-loading and API-ownership boundaries must be hardened now so selected skills, package discovery, and reload cannot poison background delivery.
+The previous delivery-observability change fixed failures after a send was accepted, but this defect prevents `sendMessage` from being accepted at all.
+The resource-loading and API-ownership boundaries must be hardened now so selected skills, package discovery, and reload cannot poison background delivery.
 
 ## What Changes
 
@@ -28,5 +30,8 @@ The previous delivery-observability change fixed failures after a send was accep
 
 - **Code:** `packages/pi-subagent-herdr/src/index.ts`, `packages/pi-subagent-herdr/src/skills.ts`, and supporting runtime/resource-loading helpers; selected integration harness paths under `packages/pi-subagent-herdr/test/integration/`.
 - **Tests:** API ownership/reload tests, selected-skill resolution tests, delivery retry tests, and a real parent/child async completion regression.
-- **Runtime:** No public model-facing tool schema change. Selected-skill validation remains pre-admission and permission-compatible. Background delivery may wait for a bound session runtime instead of invoking a discovery-time API.
-- **Compatibility:** The fix is scoped to extension lifecycle and resource discovery. Existing subagent definitions, skill selection semantics, foreground/background admission, and delivery envelope remain unchanged.
+- **Runtime:** No public model-facing tool schema change.
+  Selected-skill validation remains pre-admission and permission-compatible.
+  Background delivery may wait for a bound session runtime instead of invoking a discovery-time API.
+- **Compatibility:** The fix is scoped to extension lifecycle and resource discovery.
+  Existing subagent definitions, skill selection semantics, foreground/background admission, and delivery envelope remain unchanged.

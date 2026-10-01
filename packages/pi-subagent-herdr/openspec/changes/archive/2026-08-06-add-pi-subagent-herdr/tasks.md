@@ -1,6 +1,8 @@
 # Tasks: add-pi-subagent-herdr
 
-The vendored fork, basic blocking delivery, attached layout, pane retry, tag injection, and upstream-derived lifecycle code already exist. The unchecked tasks below supersede earlier bare-agent, list-tool, eager-skill, and unbounded-concurrency work. A checked historical item is not evidence that the revised acceptance criteria are complete.
+The vendored fork, basic blocking delivery, attached layout, pane retry, tag injection, and upstream-derived lifecycle code already exist.
+The unchecked tasks below supersede earlier bare-agent, list-tool, eager-skill, and unbounded-concurrency work.
+A checked historical item is not evidence that the revised acceptance criteria are complete.
 
 ## 0. Completed foundation
 
@@ -11,9 +13,11 @@ The vendored fork, basic blocking delivery, attached layout, pane retry, tag inj
 
 ## 1. Strict agent resolution and minimal API
 
-- [x] 1.1 Make `agent` and `task` required; remove bare/default launch and all fallback paths. Validate canonical filename-stem IDs and require optional frontmatter `name` to match.
+- [x] 1.1 Make `agent` and `task` required; remove bare/default launch and all fallback paths.
+      Validate canonical filename-stem IDs and require optional frontmatter `name` to match.
 - [x] 1.2 Resolve only trusted `<cwd>/.pi/agents/<id>.md` then `${PI_CODING_AGENT_DIR}/agents/<id>.md`; remove package/bundled/generated tiers and gate project definitions on `ctx.isProjectTrusted()`.
-- [x] 1.3 Remove `subagents_list`, discovery diagnostics/list rendering, `enabled`, and agent-level `disable-model-invocation` migration behavior. Keep no replacement model-facing listing tool.
+- [x] 1.3 Remove `subagents_list`, discovery diagnostics/list rendering, `enabled`, and agent-level `disable-model-invocation` migration behavior.
+      Keep no replacement model-facing listing tool.
 - [x] 1.4 Reduce `subagent` schema to required `agent`/`task` plus optional `label`, `blocking`, `layout`, `surface`, and `direction`; remove per-call name/model/thinking/tools/skills/systemPrompt/fork/cwd/interactive/autoExit.
 - [x] 1.5 Derive authority from canonical agent ID and assign every run a stable internal run ID; make `label` presentation-only, allow duplicate labels, disambiguate human/result presentation by run ID where needed, and verify labels cannot affect permissions, model routing, skills, tools, leases, or resume.
 - [x] 1.6 Return concise missing/unknown/invalid-agent errors before queueing and without creation, installation, trust, or editing guidance.
@@ -53,10 +57,13 @@ The vendored fork, basic blocking delivery, attached layout, pane retry, tag inj
 ## 5. Foreground/background admission coordinator
 
 - [x] 5.1 Add a process-global per-parent coordinator with one active foreground slot, four active background slots, separate FIFO queues, atomic admission, and fork-specific `Symbol.for` ownership.
-- [x] 5.2 Classify blocking `subagent` as foreground and async `subagent`/all resume as background. Validate fully before queue insertion.
+- [x] 5.2 Classify blocking `subagent` as foreground and async `subagent`/all resume as background.
+      Validate fully before queue insertion.
 - [x] 5.3 Keep queued foreground tool calls suspended; return truthful queued acknowledgements for async/background entries; create no pane/session/artifact/sidecar/script while queued; bind foreground queue entries to their parent tool abort signal so externally terminated blocking calls cannot launch later.
-- [x] 5.4 Release slots exactly once after settlement, cleanup, and delivery bookkeeping; ping, failure, cancellation, pane disappearance, rollback, and shutdown all admit the next same-class FIFO entry. Specify that blocking ping settles foreground while any later resume enters the background class.
-- [x] 5.5 Keep interrupt from releasing slot/lease. Add explicit cancellation of queued background entries and cancellation of all queued entries on parent shutdown, without resource creation.
+- [x] 5.4 Release slots exactly once after settlement, cleanup, and delivery bookkeeping; ping, failure, cancellation, pane disappearance, rollback, and shutdown all admit the next same-class FIFO entry.
+      Specify that blocking ping settles foreground while any later resume enters the background class.
+- [x] 5.5 Keep interrupt from releasing slot/lease.
+      Add explicit cancellation of queued background entries and cancellation of all queued entries on parent shutdown, without resource creation.
 - [x] 5.6 Persist/reuse active counts, queues, and ownership across `/reload`; prevent duplicate coordinator instances and double admission.
 - [x] 5.7 Unit-test 1 foreground + 4 background coexistence, second/third foreground serialization, fifth+ background FIFO, simultaneous admission races, class independence, queue cancellation including external blocking-call abort, ping-then-background-resume, and all release paths.
 

@@ -2,7 +2,13 @@
 
 ### Requirement: deterministic multi-channel settlement
 
-The extension SHALL poll the child exit sidecar, terminal sentinel, and pane existence. Settlement SHALL be atomically claimed once. A valid sidecar observed in the same poll SHALL take precedence; sentinel and pane disappearance SHALL receive a bounded sidecar grace. Nonzero exits, malformed sidecars, stale assistant text, and empty successful output SHALL produce explicit deterministic outcomes. Watching SHALL be bounded by a per-run configurable deadline whose default is generous enough not to curtail legitimate long-running work. Every evidence probe SHALL itself be bounded, and a probe that exceeds its bound SHALL count as no reading rather than as evidence. On expiry the extension SHALL first sweep every evidence channel it polls — exit sidecar, sentinel file, and terminal tail — and prefer any real evidence found; only with no evidence SHALL it settle as a distinct abandoned-watch outcome that is not classified as a child or provider failure, routed through the normal delivery path.
+The extension SHALL poll the child exit sidecar, terminal sentinel, and pane existence.
+Settlement SHALL be atomically claimed once.
+A valid sidecar observed in the same poll SHALL take precedence; sentinel and pane disappearance SHALL receive a bounded sidecar grace.
+Nonzero exits, malformed sidecars, stale assistant text, and empty successful output SHALL produce explicit deterministic outcomes.
+Watching SHALL be bounded by a per-run configurable deadline whose default is generous enough not to curtail legitimate long-running work.
+Every evidence probe SHALL itself be bounded, and a probe that exceeds its bound SHALL count as no reading rather than as evidence.
+On expiry the extension SHALL first sweep every evidence channel it polls — exit sidecar, sentinel file, and terminal tail — and prefer any real evidence found; only with no evidence SHALL it settle as a distinct abandoned-watch outcome that is not classified as a child or provider failure, routed through the normal delivery path.
 
 #### Scenario: valid sidecar wins
 
@@ -71,7 +77,12 @@ The extension SHALL poll the child exit sidecar, terminal sentinel, and pane exi
 
 ### Requirement: exactly-once delivery state machine
 
-Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-released, and delivered or suppressed once. `delivered` SHALL mean the parent delivery API accepted the message or the blocking tool result is being returned. Failed async delivery SHALL remain pending under a bounded retry policy and SHALL NOT be silently deleted. Waiting for delivery persistence SHALL itself be bounded: a delivery queued into a streaming parent SHALL be re-verified only while the parent remains active and only up to a cap far exceeding any plausible parent turn, after which the delivery SHALL be re-queued for bounded retry rather than waited on indefinitely. Notifying an idle parent SHALL NOT be gated on persistence acknowledgement, because the notification is what causes the persisting turn to run. Once a send has been accepted, registering its acknowledgement SHALL precede any presentation work, and presentation failures SHALL NOT fail or repeat a delivery.
+Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-released, and delivered or suppressed once.
+`delivered` SHALL mean the parent delivery API accepted the message or the blocking tool result is being returned.
+Failed async delivery SHALL remain pending under a bounded retry policy and SHALL NOT be silently deleted.
+Waiting for delivery persistence SHALL itself be bounded: a delivery queued into a streaming parent SHALL be re-verified only while the parent remains active and only up to a cap far exceeding any plausible parent turn, after which the delivery SHALL be re-queued for bounded retry rather than waited on indefinitely.
+Notifying an idle parent SHALL NOT be gated on persistence acknowledgement, because the notification is what causes the persisting turn to run.
+Once a send has been accepted, registering its acknowledgement SHALL precede any presentation work, and presentation failures SHALL NOT fail or repeat a delivery.
 
 #### Scenario: async accepted
 
@@ -120,7 +131,12 @@ Each settled run SHALL be atomically claimed, extracted, cleaned, capacity-relea
 
 ### Requirement: status widget includes queued and active work
 
-The extension SHALL display a human-only widget listing queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts. It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous. It SHALL NOT register a model-facing listing tool. A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected. Elapsed wait time SHALL be measured from the start of the current wait, not from run start. Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error.
+The extension SHALL display a human-only widget listing queued, starting, active, waiting, interrupted, blocked, stalled, running, and finalizing entries, with foreground/background class and active/open/queued counts.
+It SHALL use stable internal run IDs to distinguish repeated agents or duplicate labels where presentation would otherwise be ambiguous.
+It SHALL NOT register a model-facing listing tool.
+A settled run awaiting handoff SHALL identify why it is waiting, and the wording SHALL NOT imply a fault for waits that are expected.
+Elapsed wait time SHALL be measured from the start of the current wait, not from run start.
+Results whose retry policy is exhausted SHALL be counted and labelled distinctly from results still being retried, and both SHALL continue to surface the last delivery error.
 
 #### Scenario: queued capacity is visible
 

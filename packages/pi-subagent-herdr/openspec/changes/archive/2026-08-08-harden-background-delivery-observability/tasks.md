@@ -29,9 +29,11 @@
 ## 4. Decide pane and capacity disposition for an abandoned watch
 
 - [x] 4.1 Add `resolveSettlementDisposition` mapping each completion reason to `{ watchAbandoned, preservePane, releaseAdmissionNow }` in one place
-- [x] 4.2 Split `releaseAdmissionOnly` from `releaseRunOwnership`: release the admission slot immediately for an abandoned watch while retaining the session lease until explicit pane disappearance. Releasing the session lease here made the subsequent `sessionLease.transition("finalizing")` throw and destroyed delivery, and a live child could still be writing to that session
+- [x] 4.2 Split `releaseAdmissionOnly` from `releaseRunOwnership`: release the admission slot immediately for an abandoned watch while retaining the session lease until explicit pane disappearance.
+      Releasing the session lease here made the subsequent `sessionLease.transition("finalizing")` throw and destroyed delivery, and a live child could still be writing to that session
 - [x] 4.3 Preserve the abandoned run's pane rather than reaping it, documenting that a timeout does not establish the child finished and that reaping possibly-live work is unrecoverable
-- [x] 4.4 Apply the same admission-only release to reported errors (structured and the unexpected-watcher catch paths): the child has exited so its slot must not be held until the user closes the pane, while the session lease follows pane disappearance. Confirm leases are idempotent so an early admission release plus a later monitor release is safe
+- [x] 4.4 Apply the same admission-only release to reported errors (structured and the unexpected-watcher catch paths): the child has exited so its slot must not be held until the user closes the pane, while the session lease follows pane disappearance.
+      Confirm leases are idempotent so an early admission release plus a later monitor release is safe
 - [x] 4.5 Add `RunningSubagent.watchAbandoned` and `SubagentResult.watchAbandoned`, and propagate the flag into the delivered message details
 - [x] 4.6 Give the abandoned outcome its own presentation branch in `resolveResultPresentation`: state the outcome is unknown, keep any recovered summary and session pointer, say the pane was left open and capacity released, and never claim the run produced no result or that a provider error occurred
 
