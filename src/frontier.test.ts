@@ -89,7 +89,7 @@ describe("PruneFrontierTracker.reconstructFromSession", () => {
       getShortRefForToolCallId: (id: string) => (id === "tc-stub" ? "t1" : id === "tc-old" ? "told" : undefined),
       getRecord: () => undefined,
       getChainEntries: () => [chainEntry],
-      getPerBatchSummaryTextForToolCallIds: () => "chain summary text",
+      getPerBatchSummariesForToolCallIds: () => ["chain summary text"],
       findChainEntryByBlockId: () => undefined,
     } as any;
 

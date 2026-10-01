@@ -5,7 +5,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ToolCallRecord } from "./types.js";
 import { CUSTOM_TYPE_SUMMARY } from "./types.js";
-import { normalizeSummaryToolCallRefs } from "./summary-refs.js";
+import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
 import { occKey } from "./occurrence-key.js";
 
@@ -125,8 +125,11 @@ export function buildPruneTree(
       children.push(toolCallNode(record, 1));
     }
 
+    // Unwrap the summary-context wrapper for display: the header's char count
+    // measures the body, and the Ctrl-O overlay (node.detail) shows raw body
+    // without the <context-prune-summary> tags.
     const summaryText =
-      typeof customEntry.content === "string" ? customEntry.content : "";
+      typeof customEntry.content === "string" ? unwrapSummaryForDisplay(customEntry.content) : "";
     const summaryChars = summaryText.length;
     const totalOriginalChars = children.reduce(
       (sum, c) => sum + (c.charCount ?? 0),

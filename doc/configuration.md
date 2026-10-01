@@ -25,12 +25,14 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
     "minBatchChars": 1000,
     "recoveryGraceTurns": 3,
     "protectedTools": [],
-    "protectedPaths": ["**/skills/**/*.md"],
+    "protectedPaths": ["**/skills/**/*.md", "**/gauntlet-overrides.md"],
     "dedupByContentHash": true,
     "autoBudgetThreshold": null,
     "spillThreshold": 65536,
     "spillPreviewBytes": 2048,
     "budgetTurnDelta": null,
+    "frontierGapThresholdTokens": null,
+    "maxImagesPerRequest": null,
     "chainCompression": {
       "enabled": true,
       "rollingWindow": 3,
@@ -46,7 +48,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | Key | Values | Default | Notes |
 |---|---|---|---|
 | `enabled` | `true` / `false` | `false` | Master switch |
-| `showPruneStatusLine` | `true` / `false` | `true` | Footer widget + queued-turn notifications |
+| `showPruneStatusLine` | `true` / `false` | `true` | Footer widget + startup/queued-turn notifications |
 | `summarizerModel` | `"default"` or `"provider/model-id"` | `"default"` | `default` = your active pi model. See [Choosing a summarizer model](#choosing-a-summarizer-model) |
 | `summarizerThinking` | `default`/`off`/`minimal`/`low`/`medium`/`high`/`xhigh` | `default` | Provider-specific reasoning effort knob |
 | `pruneOn` | `agent-message` / `on-demand` | `agent-message` | Trigger mode - see README Architecture section |
@@ -58,12 +60,14 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | `summarizerMaxTimeoutMs` | non-negative integer (ms), `0` disables | `180000` | Hard ceiling on total duration of a single summarizer stream call. Backstop for a stream that dribbles forever without going idle. Generous by design (clears the observed p99). `0` = no ceiling. |
 | `summarizerConcurrency` | non-negative integer, `0` = unbounded | `4` | Max summarizer LLM calls in flight during one flush fan-out. A budget auto-flush drains the whole backlog at once, so an unbounded burst of N calls can trip provider rate limits (observed: 34 simultaneous calls answered with HTTP 429) and flip the configured summarizer into session-model fallback. Bounding the width - plus in-place rate-limit retry with a shared backoff gate - keeps the flush on the configured model. `0` restores the pre-pacing unbounded behavior for high-quota providers. |
 | `protectedTools` | `string[]` | `[]` | Never-pruned tool names (e.g. `["todowrite","todoread"]`). When a protected tool's chain is range-compressed, its output is preserved verbatim inside the `<compressed-chain>` block as `<protected-output>` - protected outputs are never lost. |
-| `protectedPaths` | `string[]` | `["**/skills/**/*.md"]` | Globs matched against a tool call's `args.path`; matching outputs are never pruned (same semantics as `protectedTools`, including `<protected-output>` relocation in compressed chains). Already-summarized matching reads are repaired on the next turn; chain-compressed ones are not. Set `[]` to disable. |
+| `protectedPaths` | `string[]` | `["**/skills/**/*.md", "**/gauntlet-overrides.md"]` | Globs matched against a tool call's `args.path`; matching outputs are never pruned (same semantics as `protectedTools`, including `<protected-output>` relocation in compressed chains). Already-summarized matching reads are repaired on the next turn; chain-compressed ones are not. Set `[]` to disable. |
 | `dedupByContentHash` | `true` / `false` | `true` | Re-reads of identical (toolName, content) skip the LLM and alias the original |
 | `autoBudgetThreshold` | fraction `0`-`1`, or `null` | `null` | Token-budget auto-flush: force a prune when context usage reaches this share of the window, or 300k tokens, whichever comes first - regardless of `pruneOn`. `0.8` = 80%, not `80`. The 300k ceiling only binds on models advertising more than 300k. `null` = off. See [Token-budget auto-flush](#token-budget-auto-flush) |
 | `spillThreshold` | positive integer | `65536` | Minimum chars (`resultText.length`) for a single tool result to be spilled eagerly to a sidecar file at capture time rather than waiting for normal summarization. Non-positive / invalid values fall back to the default; to effectively disable spilling, set it above any result you expect. See [Spilled outputs](#spilled-outputs) |
 | `spillPreviewBytes` | non-negative integer | `2048` | Head preview (bytes) kept inline in the stub and index record for a spilled result. Full body is on disk. |
 | `budgetTurnDelta` | fraction `0`-`1`, or `null` | `null` | Force a flush when a single turn's context-usage fraction jumps by at least this amount, ORed with `autoBudgetThreshold`. The fraction is measured against `min(context window, 300k)`, so `0.1` = +30k tokens in one turn on any model at or above 300k (+20k on a 200k model). Catches sudden spikes a static threshold would miss until the next turn. `null` = off. |
+| `frontierGapThresholdTokens` | `number \| null` | `null` | Opt-in absolute-token flush trigger: force a flush at `turn_end` when the un-pruned tail past the prune frontier (`frontierGapTokens`) reaches this many tokens. Validated finite and `> 0`, floored to an integer; any invalid value including `0` resets to `null`. Config-file-only - no `/pruner settings` row. `null` = off. See [Frontier-gap flush trigger](#frontier-gap-flush-trigger) |
+| `maxImagesPerRequest` | `number \| null` | `null` | Request-validity guard: once an outgoing request carries more than N image blocks, the oldest are replaced with a text note, in steps of half of N so the prompt prefix (and the provider's prompt cache) changes only once per step; a long session then never exceeds a provider's per-request image limit. `null` uses the built-in limit for the current model's wire API (`anthropic-messages`: `100`, the documented Anthropic maximum; other APIs: no cap). A number overrides the built-in for every API - set it for a gateway with a stricter limit (one rejects more than `30`). Request-local: the session file keeps every image. Applies even when `enabled` is `false`. Validated finite and `>= 1`, floored to an integer; any other value resets to `null`. Config-file-only - no `/pruner settings` row |
 | `chainCompression.enabled` | `true` / `false` | `true` | Master toggle for chain-level range compression |
 | `chainCompression.rollingWindow` | positive integer | `3` | Keep this many most-recent closed chains raw; compress older ones |
 | `chainCompression.stripFinalAssistantThinking` | `true` / `false` | `true` | Strip thinking blocks from the kept final text-only assistant when compressing |
@@ -88,6 +92,14 @@ When `autoBudgetThreshold` is set to a value in `(0, 1]`, the extension checks c
 - Default `null` = off.
 
 Inspired by DCP's `maxContextLimit` nudging; simplified to a single threshold that forces a flush rather than separate nudge/force levels.
+
+### Frontier-gap flush trigger
+
+`frontierGapThresholdTokens` (default `null`) is a third, opt-in flush trigger, ORed with `autoBudgetThreshold` and `budgetTurnDelta` (precedence: budget, then delta, then frontier-gap - the first one that fires wins for that turn). Where the other two triggers measure a *fraction* of the context window, this one measures an absolute token count: the un-pruned tail past the persisted prune frontier (`frontierGapTokens`, the same metric shown in `/pruner status` and the footer suffix). It exists for windows large enough that a window-fraction trigger never fires in practice - a huge advertised window makes `autoBudgetThreshold`/`budgetTurnDelta` unreachable long before the un-pruned tail becomes a real problem; this trigger is the absolute-token complement that fires independent of window size.
+
+Set it well above normal per-flush accumulation (roughly 5k-15k tokens between flushes in a typical session) so it only fires in pathological auto-continued stretches where flushes stop happening for a long run - **`80000` is a reasonable starting value**. The trigger is self-throttling: the frontier advances on every processed flush outcome (including this one), but an attempt that finds zero capturable batches does not advance it and rewrites nothing, so it cannot churn the cache; on a mid-flush summarizer failure the frontier advances only to the persisted prefix, so the next gated turn may re-fire while consuming the remaining backlog - the bound is amortized (one extra prefix rewrite per threshold-worth of new tail growth), not per-turn-exact under failures.
+
+`null` = off (default). The default stays null because no field data supports a universal threshold value - a wrong default would regress prompt-cache write cadence and summarizer cost for every user. Promotion to a non-null default is deferred until persisted `context-prune-flush-metrics` entries (which record `frontierGapTokens` per flush) provide evidence for a good value.
 
 ### Spilled outputs
 
@@ -197,7 +209,7 @@ Every rendered state is prefixed with a single leading `|` divider so the segmen
   See [PRUNING.md § Single-chain sessions](../PRUNING.md#single-chain-sessions) for exact definitions.
 - `| prune: recovered pending (reload)` - shown at `agent_end` when a session reload found recoverable unflushed work but no new turn re-queued it. See [PRUNING.md § Reload rearm](../PRUNING.md#reload-rearm) for what "recovered" means and when it actually flushes.
 
-Setting `showPruneStatusLine: false` hides the widget and silences the queued-turn notice; pruning still runs.
+Setting `showPruneStatusLine: false` hides the widget and silences the startup and queued-turn notices; pruning still runs.
 
 The status line does not show cost. Full token/cost detail is available via `/pruner stats`. The extension also emits cumulative session cost on the `cost:external` pi.events channel for external aggregators - see [README § External cost channel](../README.md#external-cost-channel).
 

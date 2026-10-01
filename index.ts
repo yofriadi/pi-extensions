@@ -13,9 +13,10 @@
  * Usage:  pi -e .
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
-import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
+import { capImages, imageLimitFor } from "./src/image-cap.js";
+import { captureBatch, captureUnindexedBatchesFromSession, deriveLiveTurnIndex, groupBatchesByMode, projectBranchMessages } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches, summarizeRange } from "./src/summarizer.js";
 import { FallbackController } from "./src/summarizer-fallback.js";
 import { ToolCallIndexer } from "./src/indexer.js";
@@ -23,7 +24,7 @@ import { pruneMessages } from "./src/pruner.js";
 import { isProtected } from "./src/protected.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
-import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs } from "./src/summary-refs.js";
+import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs, wrapSummaryForContext } from "./src/summary-refs.js";
 import type {
   ContextPruneConfig,
   CapturedBatch,
@@ -45,9 +46,10 @@ import { StatsAccumulator, emitExternalCost } from "./src/stats.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { BlockRefIssuer } from "./src/block-refs.js";
 import { compressEligible } from "./src/chain-compressor.js";
+import { createSupersedeState, earliestChainStart, earliestResultTimestamp, lowerFloor } from "./src/supersede.js";
 import { detectChains, withClosingMessage } from "./src/chain-detector.js";
 import { inGraceRecoveryToolCallIds } from "./src/recovery-grace.js";
-import { shouldBudgetFlush, shouldDeltaFlush, usageFraction } from "./src/budget.js";
+import { shouldBudgetFlush, shouldDeltaFlush, shouldFrontierGapFlush, usageFraction } from "./src/budget.js";
 import { spillOversizedBatch } from "./src/spill.js";
 import { occKey } from "./src/occurrence-key.js";
 import { DiagnosticSink } from "./src/diagnostics.js";
@@ -82,6 +84,10 @@ export default function (pi: ExtensionAPI) {
   // (dedup'd across the session's lifetime, not per-render).
   const diagnostics = new DiagnosticSink((type, data) => pi.appendEntry(type, data));
 
+  // Newest-protected-read-wins state (spec 2026-09-07). In-memory only: on
+  // session_start / session_tree the cold floor re-activates everything.
+  const supersede = createSupersedeState();
+
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
   let isFlushing = false;
@@ -93,28 +99,15 @@ export default function (pi: ExtensionAPI) {
   // Cleared on every non-concurrent flushPending invocation.
   let rearmedPending = false;
 
-  // Latest ContextMetricsSnapshot, recomputed at reload probes, batch capture,
-  // and flush entry. Cached (rather than recomputed on every widget refresh)
-  // because computeContextMetrics walks the full branch.
-  let metricsCache: ContextMetricsSnapshot | undefined;
   const computeMetricsSnapshot = (ctx: any): ContextMetricsSnapshot | undefined => {
     try {
       // Includes persisted custom_message entries (e.g. this extension's own
       // summary messages) alongside plain "message" entries: both are retained
       // LLM context, so both belong in the largest-chain-share denominator.
-      // Projected inline (rather than importing pi-coding-agent's
-      // createCustomMessage) because that helper isn't re-exported from the
-      // package's "." export map -- shape mirrors createCustomMessage's output
-      // (role "custom"), which never matches the user/assistant/toolResult
-      // roles computeContextMetrics keys off, so it only inflates totalChars.
-      const branch = ctx.sessionManager.getBranch()
-        .filter((e: any) => (e.type === "message" && e.message) || e.type === "custom_message")
-        .map((e: any) =>
-          e.type === "custom_message"
-            ? { role: "custom", customType: e.customType, content: e.content, display: e.display, details: e.details, timestamp: new Date(e.timestamp).getTime() }
-            : e.message,
-        );
-      metricsCache = computeContextMetrics(
+      // Shared projection (src/batch-capture.ts projectBranchMessages) so this
+      // matches the chain-detection feed sites exactly.
+      const branch = projectBranchMessages(ctx.sessionManager.getBranch());
+      return computeContextMetrics(
         branch,
         frontier.get(),
         (k: string) => indexer.isSummarized(k),
@@ -122,8 +115,8 @@ export default function (pi: ExtensionAPI) {
       );
     } catch (err) {
       console.error("pi-condense: context metrics computation failed", err);
+      return undefined;
     }
-    return metricsCache;
   };
 
   type FlushResult =
@@ -249,6 +242,7 @@ export default function (pi: ExtensionAPI) {
     // the emitter falls back to pi.appendEntry.
     let capturedBatches = 0;
     let processedCount = 0;
+    let stubCount = 0;
     let outcome: FlushMetricsEntry["outcome"] = "empty";
     let appendEntry: ((customType: string, data?: unknown) => void) | undefined;
 
@@ -259,6 +253,7 @@ export default function (pi: ExtensionAPI) {
         trigger,
         capturedBatches,
         processedBatches: processedCount,
+        stubCount,
         outcome,
         metrics: entryMetrics,
       };
@@ -406,6 +401,9 @@ export default function (pi: ExtensionAPI) {
       // "deduped" (pre-flush dedup ate every tool call in this batch).
       type ResultSlot = import("./src/types.js").SummarizeResult | null | "trivial" | "deduped";
       const results: ResultSlot[] = new Array(batches.length).fill(null);
+      // Wrapped summary length per batch (what the oversized-skip decision
+      // actually measured, per design D5), for honest skip notifications.
+      const wrappedSummaryLens: number[] = new Array(batches.length).fill(0);
 
       if (options.onProgress) {
         for (let i = 0; i < batches.length; i++) {
@@ -467,6 +465,12 @@ export default function (pi: ExtensionAPI) {
       const dedupedBatches: CapturedBatch[] = [];
       let firstFailureIndex = -1;
 
+      // Every tool call phase 1 will stub on the next render is a floor
+      // source for supersession: dedup aliases regardless of batch outcome,
+      // plus the batch's own calls when the batch was actually indexed.
+      const floorSources: import("./src/types.js").CapturedToolCall[] = [];
+      for (let i = 0; i < batches.length; i++) floorSources.push(...dedupedPerBatch[i].toolCalls);
+
       for (let i = 0; i < batches.length; i++) {
         const result = results[i];
         if (result === null) {
@@ -488,6 +492,7 @@ export default function (pi: ExtensionAPI) {
           totalRawCharCount += dedupRawChars;
           totalToolCallCount += dedupCount;
           totalDedupedCount += dedupCount;
+          stubCount += dedupCount;
           dedupedBatches.push(batch);
           processedBatches.push(batch);
           continue;
@@ -502,6 +507,7 @@ export default function (pi: ExtensionAPI) {
           totalRawCharCount += batchRawCharCount + dedupRawChars;
           totalToolCallCount += batch.toolCalls.length + dedupCount;
           totalDedupedCount += dedupCount;
+          stubCount += dedupCount;
           trivialBatches.push(batch);
           processedBatches.push(batch);
           continue;
@@ -510,8 +516,9 @@ export default function (pi: ExtensionAPI) {
         const summaryRefs = indexer.allocateSummaryRefs(batch);
         const toolNames = batch.toolCalls.map((tc) => tc.toolName);
         const decorated = substituteInlineRefs(result.summaryText, summaryRefs, toolNames);
-        const summaryText = decorated + formatSummaryToolCallRefs(summaryRefs);
+        const summaryText = wrapSummaryForContext(decorated + formatSummaryToolCallRefs(summaryRefs));
         const shouldSkipOversized = summaryText.length > batchRawCharCount;
+        wrappedSummaryLens[i] = summaryText.length;
 
         statsAccum.add(result.usage);
         totalRawCharCount += batchRawCharCount + dedupRawChars;
@@ -543,7 +550,10 @@ export default function (pi: ExtensionAPI) {
             // Keep the in-memory summary-body registry current so chain compression
             // can build synthetic chain messages without rescanning session entries.
             indexer.registerSummaryBody(batchOccurrenceKeys, summaryText);
+            stubCount += batch.toolCalls.length + dedupCount;
+            floorSources.push(...batch.toolCalls);
           } else {
+            stubCount += dedupCount;
             oversizedBatches.push(batch);
           }
         } catch (err) {
@@ -559,6 +569,8 @@ export default function (pi: ExtensionAPI) {
         processedBatches.push(batch);
       }
 
+      lowerFloor(supersede, earliestResultTimestamp(floorSources));
+
       // Restore unprocessed batches (those at and after the first failure)
       if (firstFailureIndex >= 0) {
         restoreBatches(batches.slice(firstFailureIndex));
@@ -566,7 +578,7 @@ export default function (pi: ExtensionAPI) {
 
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed or first call failed)
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
         outcome = "error";
         return { ok: false, reason: "summarizer-failed" };
       }
@@ -601,13 +613,11 @@ export default function (pi: ExtensionAPI) {
               ? "skipped-deduped"
               : "skipped-trivial";
 
-      // Raw session branch, unwrapped once for the chain-compression block below.
+      // Projected session branch (message + custom_message entries) for the chain-compression block below.
       // Only materialized when chain compression is enabled.
       let branchMessages: any[] | undefined;
       if (currentConfig.value.chainCompression.enabled) {
-        branchMessages = ctx.sessionManager.getBranch()
-          .filter((e: any) => e.type === "message" && e.message)
-          .map((e: any) => e.message);
+        branchMessages = projectBranchMessages(ctx.sessionManager.getBranch());
       }
 
       const frontierSnapshot: PruneFrontier = {
@@ -644,7 +654,7 @@ export default function (pi: ExtensionAPI) {
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
-      setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+      setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
       emitExternalCost(pi, statsAccum);
 
       // Chain compression — compress closed chains beyond the rolling window.
@@ -679,6 +689,7 @@ export default function (pi: ExtensionAPI) {
             inGrace,
           );
           if (compressedEntries.length > 0) {
+            lowerFloor(supersede, earliestChainStart(compressedEntries));
             statsAccum.addChainsCompressed(compressedEntries.length);
             statsAccum.persist(pi);
             emitExternalCost(pi, statsAccum);
@@ -703,8 +714,9 @@ export default function (pi: ExtensionAPI) {
       if (!currentConfig.value.quietOversizedSkips) {
         for (const batch of oversizedBatches) {
           const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          const slot = results[batches.indexOf(batch)];
-          const batchSummaryLen = slot && slot !== "trivial" && slot !== "deduped" ? slot.summaryText.length : 0;
+          // Report the wrapped length the skip decision actually measured
+          // (design D5), so the shown numbers never contradict the outcome.
+          const batchSummaryLen = wrappedSummaryLens[batches.indexOf(batch)];
           safeNotify(
             ctx,
             `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
@@ -771,7 +783,7 @@ export default function (pi: ExtensionAPI) {
       // When the abort signal fired, summarizeBatch rethrows rather than
       // swallowing the error.  Don't show a UI error — the user intended this.
       if (options.signal?.aborted) {
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
         return { ok: false, reason: "aborted" };
       }
       if (isStaleContextError(err)) {
@@ -800,6 +812,8 @@ export default function (pi: ExtensionAPI) {
     statsAccum.reconstructFromSession(ctx);
     fallbackController.reset();
     diagnostics.reset();
+    supersede.activated.clear();
+    supersede.floor = 0;
 
     // Rebuild prune frontier from persisted session entries
     frontier.reconstructFromSession(ctx);
@@ -816,25 +830,25 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    computeMetricsSnapshot(ctx);
-
     // Update footer status
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
 
-    ctx.ui.setWidget(
-      "pruner-boot",
-      [
-        `pruner loaded — pruning ${currentConfig.value.enabled ? "ON" : "OFF"} | model: ${currentConfig.value.summarizerModel}`,
-      ],
-      { placement: "belowEditor" },
-    );
-    setTimeout(() => {
-      try {
-        ctx.ui.setWidget("pruner-boot", undefined);
-      } catch {
-        // UI owner may be gone after session replacement.
-      }
-    }, 10000).unref?.();
+    if (currentConfig.value.showPruneStatusLine) {
+      ctx.ui.setWidget(
+        "pruner-boot",
+        [
+          `pruner loaded — pruning ${currentConfig.value.enabled ? "ON" : "OFF"} | model: ${currentConfig.value.summarizerModel}`,
+        ],
+        { placement: "belowEditor" },
+      );
+      setTimeout(() => {
+        try {
+          ctx.ui.setWidget("pruner-boot", undefined);
+        } catch {
+          // UI owner may be gone after session replacement.
+        }
+      }, 10000).unref?.();
+    }
   });
 
   // Rebuild index and stats after tree navigation too (branch may have different history)
@@ -843,6 +857,8 @@ export default function (pi: ExtensionAPI) {
     blockRefs.rebuildFrom(indexer.getChainEntries().map((e) => e.blockId));
     statsAccum.reconstructFromSession(ctx);
     diagnostics.reset();
+    supersede.activated.clear();
+    supersede.floor = 0;
     frontier.reconstructFromSession(ctx);
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
@@ -856,8 +872,19 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    computeMetricsSnapshot(ctx);
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+  });
+
+  // Cache is a per-model prefix; these three moments are cold regardless, so
+  // activating every pending supersession here costs no extra cache miss.
+  pi.on("model_select", async () => {
+    supersede.floor = 0;
+  });
+  pi.on("session_compact", async () => {
+    supersede.floor = 0;
+  });
+  pi.on("thinking_level_select", async () => {
+    supersede.floor = 0;
   });
 
   // ── turn_end: capture batch, flush immediately or queue ──────────────────
@@ -876,10 +903,25 @@ export default function (pi: ExtensionAPI) {
 
     let pushedBatch = false;
     if (hasToolResults) {
+      // Live batches must be numbered in the frontier's session-wide domain, not
+      // Pi's run-local event.turnIndex (which resets on agent_start, #16). The
+      // branch at turn_end already holds the just-ended assistant message (pi
+      // persists it at message_end, a strictly earlier event), so the derived
+      // index is the rescan index of this turn.
+      let liveTurnIndex = event.turnIndex;
+      let branch: SessionEntry[] | undefined;
+      try {
+        branch = ctx.sessionManager.getBranch();
+      } catch {
+        // Transient getBranch failure must never block the turn; fall back to
+        // the run-local index (pre-#16 behavior). The flush-time rescan still
+        // recovers the batch.
+      }
+      if (branch) liveTurnIndex = deriveLiveTurnIndex(branch);
       const capturedBatch = captureBatch(
         event.message,
         event.toolResults,
-        event.turnIndex,
+        liveTurnIndex,
         Date.now()
       );
       // Drop user-protected tool/path results so they stay verbatim in context.
@@ -934,13 +976,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Recompute regardless of whether trim produced a batch: a turn whose
-    // toolResults are all protected/spilled/summarized/trimmed-empty still
-    // changes the branch (thinking, open-segment size), so the cache must not
-    // go stale on it. Placed before the pushedBatch/rearmedPending early
-    // return below — a cache write is not gate evaluation.
-    if (hasToolResults) computeMetricsSnapshot(ctx);
-
     // Mirrors main's `if (!batch) return;`: no freshly pushed batch this turn
     // means no gate evaluation, regardless of leftover pendingBatches from an
     // earlier turn — UNLESS a reload probe armed rearmedPending, in which case
@@ -954,24 +989,34 @@ export default function (pi: ExtensionAPI) {
     const usage = ctx.getContextUsage?.();
     const budgetHit = shouldBudgetFlush(usage, currentConfig.value.autoBudgetThreshold);
     const deltaHit = shouldDeltaFlush(usage, previousFraction, currentConfig.value.budgetTurnDelta);
+    // Frontier-gap auto-flush (opt-in): absolute un-pruned tail size, for huge
+    // windows where fractional thresholds never trip. Threshold null (default)
+    // skips the metrics snapshot entirely; a failed snapshot fails closed.
+    const gapThreshold = currentConfig.value.frontierGapThresholdTokens;
+    const gapHit = gapThreshold != null && shouldFrontierGapFlush(computeMetricsSnapshot(ctx), gapThreshold);
     // Update the per-turn baseline; leave it unchanged when tokens is null (e.g.
     // right after a compaction) so the next real reading compares to the last known.
     const f = usageFraction(usage);
     if (f != null) previousFraction = f;
 
     const n = pendingBatches.length;
-    if ((n > 0 || rearmedPending) && !isFlushing && (budgetHit || deltaHit)) {
+    if ((n > 0 || rearmedPending) && !isFlushing && (budgetHit || deltaHit || gapHit)) {
+      const reason = budgetHit ? "context budget reached" : deltaHit ? "context jumped this turn" : "un-pruned tail exceeded frontier gap threshold";
       // Always surface this flush (even when the routine status line is off): it's a
-      // significant, infrequent event — context crossed a threshold or jumped sharply
-      // this turn — and it self-throttles because pendingBatches is drained right after.
+      // significant, infrequent event — context crossed a threshold, jumped sharply
+      // this turn, or the un-pruned tail grew past the gap threshold — and it
+      // self-throttles because pendingBatches is drained right after.
       safeNotify(
         ctx,
         n > 0
-          ? `pruner: ${budgetHit ? "context budget reached" : "context jumped this turn"} — compacting ${n} pending turn${n === 1 ? "" : "s"}`
-          : `pruner: ${budgetHit ? "context budget reached" : "context jumped this turn"} — compacting work recovered after reload`,
+          ? `pruner: ${reason} — compacting ${n} pending turn${n === 1 ? "" : "s"}`
+          : `pruner: ${reason} — compacting work recovered after reload`,
         "info",
       );
-      await flushPending(ctx, { delivery: "session", trigger: n === 0 ? "rearmed" : budgetHit ? "budget" : "delta" });
+      await flushPending(ctx, {
+        delivery: "session",
+        trigger: n === 0 ? "rearmed" : budgetHit ? "budget" : deltaHit ? "delta" : "frontier-gap",
+      });
     }
   });
 
@@ -1002,14 +1047,25 @@ export default function (pi: ExtensionAPI) {
 
   // ── context: prune summarized tool results from next LLM call ─────────────
   pi.on("context", async (event, ctx) => {
-    if (!currentConfig.value.enabled) return undefined;
-
     let messages = event.messages;
     let changed = false;
 
+    // Request-validity guard, independent of `enabled`: a transcript past the
+    // provider's per-request image limit fails every request until trimmed.
+    const imageCap = imageLimitFor(currentConfig.value.maxImagesPerRequest, ctx.model?.api);
+    if (imageCap !== null) {
+      const capped = capImages(messages, imageCap);
+      if (capped) {
+        messages = capped;
+        changed = true;
+      }
+    }
+
+    if (!currentConfig.value.enabled) return changed ? { messages } : undefined;
+
     // pruneMessages is the single source of truth for "is there work to do".
     // It returns the original array reference (pruned: false) only when none of
-    // the four phases changed anything; index/registry emptiness alone does not
+    // the five phases changed anything; index/registry emptiness alone does not
     // imply a no-op, since error-purge (phase 2) prunes independently of them.
     // Calling it unconditionally is safe and avoids a split gate here.
     const result = pruneMessages(
@@ -1020,13 +1076,14 @@ export default function (pi: ExtensionAPI) {
       currentConfig.value,
       currentConfig.value.recoveryGraceTurns,
       diagnostics,
+      { state: supersede, isProtected: protectionPredicate },
     );
     if (result.pruned) {
       messages = result.messages;
       changed = true;
       statsAccum.setLiveReclaim(result.beforeChars, result.afterChars);
     }
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts(), metricsCache);
+    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
 
     if (!changed) return undefined;
     return { messages };
@@ -1037,10 +1094,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Register /pruner command + summary message renderer ────────────
   const compactChains = async (ctx: any) => {
-    const branch = ctx.sessionManager.getBranch();
-    const branchMessages = branch
-      .filter((e: any) => e.type === "message" && e.message)
-      .map((e: any) => e.message);
+    const branchMessages = projectBranchMessages(ctx.sessionManager.getBranch());
     const chains = detectChains(branchMessages, protectionPredicate);
     const inGrace = inGraceRecoveryToolCallIds(branchMessages, currentConfig.value.recoveryGraceTurns);
     const result = await compressEligible(
@@ -1064,6 +1118,7 @@ export default function (pi: ExtensionAPI) {
       inGrace,
     );
     if (result.compressedEntries.length > 0) {
+      lowerFloor(supersede, earliestChainStart(result.compressedEntries));
       statsAccum.addChainsCompressed(result.compressedEntries.length);
       statsAccum.persist(pi);
       emitExternalCost(pi, statsAccum);
@@ -1082,7 +1137,6 @@ export default function (pi: ExtensionAPI) {
     compactChains,
     () => diagnostics.counts(),
     (ctx: any) => computeMetricsSnapshot(ctx) ?? EMPTY_METRICS_SNAPSHOT,
-    () => metricsCache,
     () => rearmedPending,
   );
 }

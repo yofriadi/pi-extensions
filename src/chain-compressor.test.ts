@@ -246,8 +246,31 @@ describe("compressEligible", () => {
         return "FUSED";
       },
     });
+    // Fuser receives unwrapped bodies joined; fused output is wrapped on store.
     expect(fuseCalls).toEqual(["s1\n\ns2"]);
-    expect(result.compressedEntries[0].rangeSummaryText).toBe("FUSED");
+    expect(result.compressedEntries[0].rangeSummaryText).toBe(
+      "<context-prune-summary>\nFUSED\n</context-prune-summary>",
+    );
+  });
+
+  test("strips stray wrapper tags echoed by the fuser before storing", async () => {
+    const chains = [closed(100, ["tc1"]), closed(300), closed(500), closed(700)];
+    const result = await compressEligible(chains, 3, {
+      indexer: makeIndexer({ hasSummary: true, perBatchSummaries: ["s1", "s2"] }),
+      blockRefs: makeBlockRefs(["b1"]),
+      appendEntry: () => {},
+      now: () => 1,
+      ...NOOP_BACKFILL_DEPS,
+      fuseRange: async () =>
+        "<context-prune-summary>\nhalucinated open without close\n</context-prune-summary> middle </context-prune-summary>",
+    });
+    // Stored body contains no stray tag fragments — wrapped exactly once.
+    const stored = result.compressedEntries[0].rangeSummaryText!;
+    expect(stored).toBe(
+      "<context-prune-summary>\n\nhalucinated open without close\n middle \n</context-prune-summary>",
+    );
+    expect(stored.match(/<context-prune-summary>/g)).toHaveLength(1);
+    expect(stored.match(/<\/context-prune-summary>/g)).toHaveLength(1);
   });
 
   test("does not fuse a single per-batch summary", async () => {
@@ -701,13 +724,34 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(result.compressedEntries).toHaveLength(1);
     const entry = result.compressedEntries[0];
     expect(entry.bodySource).toBe("deterministic");
-    expect(entry.rangeSummaryText).toBeTruthy();
+    // Task 3.4 / spec: the deterministic backfill body is wrapped exactly
+    // once when stored, like the LLM-fused path.
+    expect(entry.rangeSummaryText!.startsWith("<context-prune-summary>")).toBe(true);
+    expect(entry.rangeSummaryText!.endsWith("</context-prune-summary>")).toBe(true);
+    expect(entry.rangeSummaryText!.match(/<context-prune-summary>/g)).toHaveLength(1);
     expect(entry.toolRefs).toEqual(["t1", "t2"]);
     expect(fuseCalled).toBe(false);
     expect(backfillCalls).toHaveLength(1);
     expect(backfillCalls[0].records).toHaveLength(1);
     expect(backfillCalls[0].records.map((r) => r.toolCallId)).not.toContain("c2");
     expect(registerChainCalls).toHaveLength(1);
+  });
+
+  test("custom-anchored uncovered chain still compresses deterministically and backfills", async () => {
+    const messages = [
+      { role: "custom", customType: "pi-gauntlet-transition-recovery", timestamp: 1000 },
+      { role: "assistant", timestamp: 1001, content: [{ type: "toolCall", id: "c1", name: "bash", input: { cmd: "a" } }] },
+      { role: "toolResult", toolCallId: "c1", toolName: "bash", timestamp: 1050, isError: false, content: [{ type: "text", text: "out1" }] },
+      { role: "assistant", timestamp: 1002, content: [{ type: "toolCall", id: "c2", name: "read", input: { path: "x" } }] },
+      { role: "toolResult", toolCallId: "c2", toolName: "read", timestamp: 1150, isError: false, content: [{ type: "text", text: "out2" }] },
+      { role: "assistant", timestamp: 1200, content: [{ type: "text", text: "done" }] },
+    ];
+    const { deps, backfillCalls } = makeDeterministicDeps({ messages });
+    const result = await compressEligible([uncoveredChain()], 0, deps as any);
+    expect(result.compressedEntries).toHaveLength(1);
+    expect(result.compressedEntries[0].bodySource).toBe("deterministic");
+    expect(result.compressedEntries[0].startUserTimestamp).toBe(1000);
+    expect(backfillCalls).toHaveLength(1);
   });
 
   test("covered path is untouched: backfill never invoked, entry matches identity pin", async () => {

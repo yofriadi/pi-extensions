@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { globToRegExp, isProtected } from "./protected.js";
+import { globToRegExp, isProtected, normalizePath } from "./protected.js";
+import { DEFAULT_CONFIG } from "./types.js";
 
 describe("globToRegExp", () => {
   test("** crosses path segments", () => {
@@ -33,6 +34,27 @@ describe("globToRegExp", () => {
   });
 });
 
+describe("isProtected defaults", () => {
+  test.each([".pi/gauntlet-overrides.md", "doc/gauntlet-overrides.md"])(
+    "protects reads of %s",
+    (path) => {
+      expect(isProtected("read", { path }, DEFAULT_CONFIG)).toBe(true);
+    },
+  );
+
+  test("protects skill reads", () => {
+    expect(isProtected("read", { path: "/h/skills/x/SKILL.md" }, DEFAULT_CONFIG)).toBe(true);
+  });
+
+  test("does not protect sibling settings reads", () => {
+    expect(isProtected("read", { path: ".pi/settings.json" }, DEFAULT_CONFIG)).toBe(false);
+  });
+
+  test("does not infer paths from bash commands", () => {
+    expect(isProtected("bash", { command: "cat .pi/gauntlet-overrides.md" }, DEFAULT_CONFIG)).toBe(false);
+  });
+});
+
 describe("isProtected", () => {
   const cfg = { protectedTools: ["todowrite"], protectedPaths: ["**/skills/**/*.md"] };
 
@@ -58,5 +80,12 @@ describe("isProtected", () => {
 
   test("empty config protects nothing", () => {
     expect(isProtected("read", { path: "skills/a/SKILL.md" }, { protectedTools: [], protectedPaths: [] })).toBe(false);
+  });
+});
+
+describe("normalizePath", () => {
+  test("normalizePath turns backslashes into forward slashes and nothing else", () => {
+    expect(normalizePath("h\\skills\\x\\SKILL.md")).toBe("h/skills/x/SKILL.md");
+    expect(normalizePath("./a/../b.md")).toBe("./a/../b.md");
   });
 });

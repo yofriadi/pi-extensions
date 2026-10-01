@@ -59,6 +59,20 @@ test "$status" -ne 0
 printf '%s\n' "$remote_collision" | grep -F 'remote tag v2.9.1 already exists on origin' >/dev/null
 ! git rev-parse -q --verify refs/tags/v2.9.1 >/dev/null
 
+# Upstream's CHANGELOG gate: an empty "## [Unreleased]" section stops the release
+# before any mutation. Version 2.9.3 carries no local or remote tag, so the run
+# reaches prepare_changelog instead of failing an earlier check.
+printf '%s\n' '# Changelog' '' '## [Unreleased]' '' '## [2.9.0] - 2026-01-01' > CHANGELOG.md
+printf '%s\n' '{"version":"2.9.3"}' > package.json
+git add CHANGELOG.md package.json
+git commit --quiet -m 'docs: changelog'
+set +e
+empty_unreleased="$(bash .agents/skills/release/scripts/release.sh --skip-tests current 2>&1)"
+status=$?
+set -e
+test "$status" -ne 0
+printf '%s\n' "$empty_unreleased" | grep -F 'Unreleased section is empty' >/dev/null
+
 # A valid release pushes branch and tag in one atomic ref transaction. Stub
 # verification clients so the test never polls external services.
 cat > "$bin/gh" <<'EOF'
@@ -78,11 +92,12 @@ cat > "$bin/curl" <<'EOF'
 exit 0
 EOF
 chmod +x "$bin/gh" "$bin/npm" "$bin/curl"
+printf '%s\n' '# Changelog' '' "## [2.9.2] - $(date +%F)" '' '- release note' '' '## [2.9.0] - 2026-01-01' > CHANGELOG.md
 printf '%s\n' '{"version":"2.9.2"}' > package.json
-git add package.json
+git add package.json CHANGELOG.md
 git commit --quiet -m 'Release 2.9.2'
 PATH="$bin:$PATH" bash .agents/skills/release/scripts/release.sh --skip-tests current >/dev/null
 test "$(git rev-parse refs/tags/v2.9.2)" = "$(git --git-dir="$remote" rev-parse refs/tags/v2.9.2)"
 test "$(git rev-parse local/main)" = "$(git --git-dir="$remote" rev-parse refs/heads/local/main)"
 
-printf '%s\n' 'release helper tag selection, version, remote collision, and atomic push passed'
+printf '%s\n' 'release helper tag selection, version, remote collision, changelog gate, and atomic push passed'

@@ -10,6 +10,7 @@
 2. [What Pruning Does](#what-pruning-does)
 3. [Pruned Data Is Still Available](#pruned-data-is-still-available)
 4. [What Actually Lives in the Pruner Index](#what-actually-lives-in-the-pruner-index)
+   - [Session entry types](#session-entry-types)
 5. [How the Model Re-reads Raw Outputs](#how-the-model-re-reads-raw-outputs)
 6. [How Prefix Caching Works](#how-prefix-caching-works)
 7. [Why Frequent Pruning Busts Cache](#why-frequent-pruning-busts-cache)
@@ -185,7 +186,7 @@ graph TB
 - The `AssistantMessage` tool-call blocks are **kept** (they carry the `toolCallId`s the model uses to reference originals via `context_tree_query`).
 - `ToolResultMessage` entries for summarized tool calls are **replaced with a small stub** (`[Summarized in pruner summary, ref \`tN\`. Use context_tree_query to retrieve full output.]`) carrying`role: "toolResult"`, the original`toolCallId`/`toolName`/`timestamp`, and`isError: false`. The stub preserves role alternation, so pi-ai's`transformMessages.insertSyntheticToolResults` no longer injects a synthetic `{ isError: true, "No result provided" }` for the (no-longer-)orphaned tool call. See [Stub-replace instead of delete](#stub-replace-instead-of-delete).
 - Every pruned tool call is also copied into the pruner's runtime/session index with its `toolCallId`, tool name, args, status, turn index, timestamp, and full `resultText`.
-- A summary message is injected as a `"steer"` (`pi.sendMessage` runtime path) or appended directly via `sessionManager.appendCustomMessageEntry` (session path, used when Pi may already be shutting down). Both deliver before the next LLM call.
+- A summary message is injected as a `"steer"` (`pi.sendMessage` runtime path) or appended directly via `sessionManager.appendCustomMessageEntry` (session path, used when Pi may already be shutting down). Both deliver before the next LLM call. The persisted content is wrapped in a `<context-prune-summary>` ... `</context-prune-summary>` tag pair — a machine-readable marker that tells the model this block is pruner-generated internal context, not a user request. Display surfaces (the expanded renderer view, `/pruner tree`) strip the wrapper before showing it.
 - The session JSONL file retains the original tool-result entries unchanged — pruning only affects what the *next* request sees in active context.
 - **Recovery grace window (`recoveryGraceTurns`, default 3):** after the model recovers a tool call via `context_tree_query`, that tool call's output is rendered **verbatim** (not re-stubbed) for the next N user-turn-groups, then reverts to the normal stub. Without this, the pruner re-prunes its own recovery output on the very next flush, forcing the model into a retrieve -> re-stub -> re-query loop ("fighting the pruner") whenever it keeps referencing the same recovered data across a few turns.
   - Enforced at **render time**, in Phase 1 stub-replace and in chain-compression eligibility — NOT at capture time. Capture-time exclusion would collide with frontier trim: a tool call already past the frontier is dropped forever, so excluding a recovered call from capture would either need to resurrect frontier state or degrade the lifetime bound into permanent verbatim retention for anything ever recovered.
@@ -287,6 +288,21 @@ So after pruning, the model is working with a **two-layer memory**:
 | Indexed tool-call record | **Stored in pruner index** (`context-prune-index` session entry) | Lets the model re-open the original raw output later via `context_tree_query` |
 | Duplicate of an already-indexed record (same toolName + content) | **Aliased to the original; no new summary, no LLM call** (`context-prune-dedup-alias` session entry) | See [Content-hash dedup](#content-hash-dedup) |
 
+### Session entry types
+
+Custom session entry types written by the extension (NOT in LLM context unless noted). Rebuilt on `session_start` where stated; see the `Written by` column for the source.
+
+| customType | Written by | Purpose |
+|---|---|---|
+| `context-prune-index` | `indexer.addBatch`; also `indexer.backfillChainRecords` (uncovered-chain deterministic backfill, `src/chain-compressor.ts`) | One entry per summarized batch; rebuilds the in-memory `ToolCallRecord` map on `session_start`. A backfill-carrier entry additionally sets `backfilled: true` and carries `refs` (the allocated `t<N>` `SummaryToolCallRef[]`) - excluded from content-hash dedup canonical seeding on both the live path and `session_start` reconstruction; `refs` are re-registered via `registerSummaryRefs` on reconstruction since backfilled chains have no summary message to derive aliases from |
+| `context-prune-summary` | `flushPending` (runtime: `pi.sendMessage` steer; session: `appendCustomMessageEntry`) | The summary message itself; IS in LLM context (replaces the pruned raw outputs) |
+| `context-prune-stats` | `statsAccum.persist` | Cumulative summarizer token/cost snapshot |
+| `context-prune-frontier` | `flushPending` | Last attempted prune boundary (advances even on `skipped-oversized` / `skipped-trivial` / `skipped-deduped`) |
+| `context-prune-dedup-alias` | `indexer.registerDuplicate` | One entry per content-hash dedup hit; rebuilt on `session_start` to repopulate `dedupAliasToOriginal` |
+| `context-prune-chain` | `chain-compressor.compressEligible` (called from `flushPending` in `index.ts` and from `/pruner compact`) | One entry per chain that has been range-dropped from LLM context; drops are decided **positionally** by `resolveRange` (`src/chain-range-prune.ts`), not by id. `droppedToolCallIds` is a diagnostic cross-check only (recorded-vs-actual mismatch emits `range-id-mismatch`); `droppedOccurrenceKeys` (optional) is load-bearing - it's what the occurrence-keyed synthetic-body lookup (per-batch summary text/coverage) is keyed against; protected-output text is NOT keyed off it - `src/chain-range-prune.ts` pulls `protectedToolCallIds` live by bare id within the resolved range instead. Also carries optional `rangeSummaryText` (fused LLM range summary) when `fuseRangeSummary` is on, and optional `protectedToolCallIds` (verbatim protected outputs - ids protected by tool name or path glob - are relocated into the synthetic body as `<protected-output>` tags at render time). Optional `bodySource: "deterministic"` marks a chain that had zero per-batch summary coverage: `rangeSummaryText` then holds a zero-LLM stub (call count, tool histogram, span duration, `t<N>` refs) built by the uncovered-chain backfill path in `chain-compressor.ts`, instead of a summarizer-derived body. Rebuilt on `session_start` to repopulate the chain registry. |
+| `context-prune-diagnostic` | `pruneMessages` / `applyChainCompressions` / `chain-compressor.compressEligible` (via `DiagnosticSink.report`, `src/diagnostics.ts`) | One entry per distinct `(kind, dedupKey)` prune-time degradation (`unresolved-range` / `range-id-mismatch` / `orphan-sweep` / `backfill-empty`). Never in LLM context; deduped in-memory; reset on `session_start` and `session_tree`. Surfaced on the footer status widget as `diag u<N>/m<N>/o<N>/b<N>`. See [Diagnostics](#diagnostics). |
+| `context-prune-flush-metrics` | `flushPending` (end of every non-concurrent attempt, single `finally` emit site, outside the chain-compression try/catch) | One entry per flush attempt, all outcomes (incl. `empty`/`error`): trigger, batch counts, `stubCount` (tool calls newly made stub-eligible by the flush: dedup aliases on processed batches plus calls from actually-indexed batches; `0` when nothing was indexed or aliased), and the pre-flush `ContextMetricsSnapshot` (open-cycle thinking, largest-chain share, frontier gap). Append-only observability log - never in LLM context, never reconstructed on `session_start`. |
+
 ## How the Model Re-reads Raw Outputs
 
 The intended recovery flow is:
@@ -296,7 +312,7 @@ The intended recovery flow is:
 3. The model decides the summary is not enough and wants exact raw output.
 4. The model calls `context_tree_query({ toolCallIds: ["t1", ...] })`. The tool accepts short refs and full `toolCallId`s interchangeably (`indexer.resolveToolCallId`).
 5. The tool looks up those IDs in the pruner index.
-6. The tool returns the original stored output back into the current turn.
+6. The tool returns the original stored output back into the current turn. For each `[image returned: ...]` marker in a recovered record, it appends the original image block from the current session branch whose SHA-256 prefix matches; a record with no marker, or whose image is off the branch, returns text only.
 7. The model can now inspect that raw result and continue reasoning.
 
 ### ASCII: end-to-end "prune, then re-read" flow
@@ -567,6 +583,8 @@ graph LR
 captured batches (from turn_end or session scan)
   │
   ├─ 1. Protected-tools/paths filter   (capture-time, see below)
+  │     newest read per protected path stays verbatim; older reads of the same
+  │     path are stubbed at render time once the cache is cold anyway (see § Supersession)
   │     tool calls whose toolName is in protectedTools, OR whose args.path
   │     matches any protectedPaths glob, never enter the batch
   │
@@ -614,15 +632,19 @@ Implementation: `src/pruner.ts` `pruneMessages(messages, indexer)` returns `{ me
 
 ### Protected tools & paths
 
-A tool call is protected if **either** its `toolName` is in `protectedTools` **or** its `args.path` (string) matches any glob in `protectedPaths`. Protected calls are filtered out **at capture time** - they never enter the `pendingBatches` queue, so their raw `ToolResultMessage` stays verbatim in future LLM context.
+A tool call is protected if **either** its `toolName` is in `protectedTools` **or** its `args.path` (string) matches any glob in `protectedPaths`. Protected calls are filtered out **at capture time** - they never enter the `pendingBatches` queue, so their raw `ToolResultMessage` stays verbatim in future LLM context until a newer read of the same path supersedes it (below).
 
 **`protectedTools: string[]`** (default `[]`) - allowlist of tool names. Covers tools whose output is a small handle that must be reused byte-for-byte (e.g. a session-id) or planning tools like `todowrite` / `todoread`.
 
-**`protectedPaths: string[]`** (default `["**/skills/**/*.md"]`) - glob list matched against `args.path`. Designed for skill files that carry multi-step workflow gates; summarizing them is categorically lossy. Non-string or missing `path` arguments never match. Set `[]` to disable. Edit with `/pruner protected-paths`.
+**`protectedPaths: string[]`** (default `["**/skills/**/*.md", "**/gauntlet-overrides.md"]`) - glob list matched against `args.path`. Designed for skill files that carry multi-step workflow gates; summarizing them is categorically lossy. Non-string or missing `path` arguments never match. Set `[]` to disable. Edit with `/pruner protected-paths`.
 
 Glob contract: full-path match against the raw `args.path` string with `\` normalized to `/`. `*` and `?` match within a segment (no `/`); `**` crosses segments; `**/` also matches zero directories (so `**/SKILL.md` matches a bare relative `SKILL.md`). Case-sensitive. All other characters are regex-escaped literals.
 
 **Render-time re-check:** stub replacement runs in-flight on every turn (`pruneMessages`). If a tool call's persisted `args` now satisfy `isProtected` (e.g. a pattern was added mid-session), the stub is skipped and the raw result is left verbatim - this repairs already-summarized records in existing sessions with no schema change. Declared limitation: records inside already-compressed chains (`context-prune-chain` entries) are NOT repaired - their `protectedToolCallIds` set is fixed at compression time (forward-only). Dedup-alias edge: an alias resolving to an unprotected original stays stubbed.
+
+**Supersession (phase 1b, `src/supersede.ts`):** protected calls are never indexed, so content-hash dedup never sees them. Instead, at render time only the **newest** protected occurrence per normalized `args.path` (backslash -> slash; `offset`/`limit` ignored) stays verbatim; every earlier occurrence with a paired result becomes the one-line stub `[Superseded: <path> was read again later in this conversation - see the newer read. Re-read the file if this earlier content is needed.]`. The stub keeps `toolCallId`/`toolName`/`timestamp`, so pi-ai's orphan repair never fires; the assistant `toolCall` block is untouched. A call without a paired result never participates (an aborted call cannot steal the win). Recovery is "re-read the file" - no `t<N>` ref. Provider tool-call ids repeat across turns and an aborted call has no result, so a result is paired only with the same-id call in the immediately preceding assistant message (the per-turn open-set model orphan-sweep uses) - never by a global per-id cursor.
+
+**Cadence (prompt-cache economics):** a superseded read is stubbed only when the pruner is already rewriting at or before its position - `floor` is the earliest result timestamp phase 1 will stub on the next render (indexed batches, plus dedup aliases registered in the pre-flush pass - those are stubbed by phase 1 whatever their batch's outcome; a `skipped-trivial`/`skipped-oversized` batch's own calls set none) or the `startUserTimestamp` of a chain compressed this turn - or on a guaranteed-cold event: `session_start`, `session_tree`, `model_select`, `session_compact`, `thinking_level_select` (`floor = 0`, activate all). Activation is session-sticky (in-memory `occKey` set, cleared on `session_start`/`session_tree`); between those moments a freshly superseded copy stays verbatim on purpose, since a mid-prefix rewrite re-bills the whole tail once. `isProtected` is evaluated live, so a path that stops matching `protectedPaths` drops out of supersession and rejoins the normal pipeline. No config key: supersession is on whenever protection is. Spec: `doc/specs/2026-09-07-protected-path-supersede.md`.
 
 Names and patterns that don't match any captured tool call are silently ignored.
 
@@ -630,7 +652,7 @@ Names and patterns that don't match any captured tool call are silently ignored.
 
 `spillThreshold: number` (default `65536`) is a capture-time safeguard for outsized single tool results (e.g. a 1 MB web fetch, a full binary diff). When a single `ToolResultMessage`'s `resultText.length` reaches the threshold, the result is spilled immediately at `turn_end` — before the pending-queue trim and before any LLM call.
 
-**Sidecar location:** `<sessionDir>/<sessionId>-blobs/<sanitizedToolCallId>.txt`.
+**Sidecar location:** `<sessionDir>/<sessionId>-blobs/<sanitizedToolCallId>.txt`. When that basename would exceed 255 bytes (very long provider tool-call ids), it is capped to exactly 255 bytes as `<first 234 bytes of the sanitized key>.<16-hex sha1 of the unsanitized occurrence key>.txt`; names that already fit are unchanged.
 
 **Index entry:** `addBatch` is called synchronously with the spilled body (no LLM round-trip). The record is immediately `isSummarized = true`; the pruner emits a mechanical file-pointer stub:
 
@@ -668,9 +690,11 @@ Mechanism:
    - Keying by occurrence key, not bare id, means a duplicate is only ever aliased to the specific earlier *occurrence* it matches byte-for-byte - a reused id whose later occurrence has different content is not conflated with the stale one.
    - A `context-prune-dedup-alias` custom entry is persisted so `reconstructFromSession` rebuilds the maps after a restart.
 4. The duplicate is removed from the batch — no summarizer call, no new index entry.
-5. Later, `pruneMessages` stub-replaces the duplicate's `ToolResultMessage` using the original's short ref, and `context_tree_query` returns the original's record whether the model passes the duplicate's id or the original's.
+5. Later, `pruneMessages` stub-replaces the duplicate's `ToolResultMessage` using the original's short ref, and `context_tree_query` returns the original's record whether the model passes the duplicate's id or the original's. An aliased image result recovers the original's image blocks (see [How the Model Re-reads Raw Outputs](#how-the-model-re-reads-raw-outputs)).
 
 Normalization is conservative: `\r\n` → `\n`, per-line trailing whitespace stripping, final `trim()`. Internal whitespace, tabs, and capitalization are preserved so two genuinely different outputs do **not** collide.
+
+Image blocks enter `resultText` as leading marker lines `[image returned: <mimeType> sha256:<8hex>]` (`extractToolResultText`, `src/batch-capture.ts`), so the marker is part of the dedup key and two image results alias only when their base64 data matches to the 8-hex prefix. Results captured before the marker existed carry none.
 
 Typical wins: re-reading an unchanged file, repeated `git status` / `ls`, retries of the same command. v1 only matches against records **already in the indexer** (cross-flush dedup); intra-flush dedup is deferred so canonicals that get skipped as oversized / trivial never produce dangling aliases.
 
@@ -686,12 +710,14 @@ This is rare in practice once `minBatchChars` is on, because the cases where sum
 
 The last attempted prune boundary is persisted as `context-prune-frontier` so `flushPending` knows where the previous attempt left off, even if that attempt was a skip rather than a real summary. Without this, a batch that's been skipped as oversized would be re-attempted (with the same LLM call, the same oversize result, the same skip) on every subsequent flush.
 
+The frontier's `lastAttemptedTurnIndex` uses a session-wide numbering domain: it counts every projected assistant message from the start of the session, matching the rescan rule in `src/batch-capture.ts`. Pi's `event.turnIndex` resets on each `agent_start`, so live `turn_end` capture instead derives this session-wide index from the current session branch via `deriveLiveTurnIndex`. If `getBranch()` throws, capture temporarily falls back to the run-local index. When the branch is healthy at flush time, the rescan re-derives the session-wide index and the fallback value never persists; when branch reads keep failing through the flush, the queued run-local index persists and numbering self-corrects on the next healthy flush. This domain never decreases across compaction because compaction appends entries rather than removing them.
+
 ### Other UI / observability features
 
 - **Tree browser (`/pruner tree`):** interactive, foldable tree of pruned tool calls grouped under their summaries. `Ctrl-O` on a summary node opens the full markdown summary in a bordered overlay.
 - **Configurable summarizer thinking (`summarizerThinking`):** trade summary cost / latency for quality (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`). `default` omits the option entirely so the provider chooses.
 - **Cumulative stats:** `context-prune-stats` entries track input/output tokens and cost of every summarizer call; full detail surfaces in `/pruner stats`. Cost is also emitted on the `cost:external` pi.events channel for external aggregators (cumulative per session, live only).
-- **Live reclaim ratio:** measured once per `pruneMessages` call via `sizeMessages(messages) = JSON.stringify(messages).length`, comparing the input array before pruning to the result after. Estimated tokens = chars / 4. The measurement covers all four phases in a single point (stub-replace, error-purge, chain-range-prune, orphan-sweep); appears on the status line as `│ prune: ON · 92.0k->14.0k (-85%)` once at least one prune has occurred (the leading `│` keeps the segment visually isolated in the shared footer, load-order independent - there is no trailing divider, since the footer's own space-join between segments already provides one).
+- **Live reclaim ratio:** measured once per `pruneMessages` call via `sizeMessages(messages)` = the sum of `charsOf(message)` (`src/context-metrics.ts`): whole-message JSON chars with each image block priced at a flat 1,600 tokens (6,400 chars) instead of its base64 length, the same estimate the frontier-gap trigger uses. This compares the input array before pruning to the result after. Estimated tokens = chars / 4. The measurement covers all five phases in a single point (stub-replace, supersede, error-purge, chain-range-prune, orphan-sweep); appears on the status line as `│ prune: ON · 92.0k->14.0k (-85%)` once at least one prune has occurred (the leading `│` keeps the segment visually isolated in the shared footer, load-order independent - there is no trailing divider, since the footer's own space-join between segments already provides one).
 - **Live progress for `/pruner now`:** an `aboveEditor` widget shows one row per pending batch with braille spinner, streamed summary-char count, and ✓ / ⚠ status.
 
 ### Summarizer outage fallback
@@ -848,6 +874,14 @@ Use case: a single enormous tool result can jump context usage by 20–30 percen
 
 `null` = off (default).
 
+### Frontier-gap flush trigger
+
+`frontierGapThresholdTokens: number | null` (default `null`) is a third flush trigger, ORed with `autoBudgetThreshold` and `budgetTurnDelta` at `turn_end` (precedence within that handler: budget, then delta, then frontier-gap - only the first that fires flushes that turn). Unlike the other two, which measure a *fraction* of the context window, this one is an absolute token count against `frontierGapTokens` (the un-pruned tail past the persisted prune frontier, same metric as `/pruner status` and `computeContextMetrics`). Rationale: a window-fraction trigger becomes unreachable on a large enough advertised window (the same problem `MAX_BUDGET_WINDOW` addresses for the level form) long before the un-pruned tail is actually a problem in tokens - this trigger is the absolute-token complement, independent of window size.
+
+It only evaluates at `turn_end`, same call site as the other two triggers, and is self-throttling: `frontierGapTokens` is measured against the persisted prune frontier, which advances on every processed flush outcome (summarized and skipped-* alike, including one this trigger itself causes) - an attempt that finds zero capturable batches does not advance it, and rewrites nothing, so it cannot churn the cache - so under normal operation it cannot fire again until the un-pruned tail regrows by another threshold-worth of tokens; on a mid-flush summarizer failure the frontier advances only to the persisted prefix, so the next gated turn may re-fire while consuming the remaining backlog, making the bound amortized (one extra prefix rewrite per threshold-worth of new tail growth) rather than per-turn-exact under failures. Recommended starting value `80000` - well above the ~5k-15k tokens a session typically accumulates per flush, so it only fires when flushes stop happening for an unusually long stretch (e.g. a long auto-continued run). Config-file-only - no `/pruner settings` row.
+
+`null` = off (default).
+
 ---
 
 ## Chain Compression
@@ -856,7 +890,7 @@ Chain compression is a second layer on top of the per-batch tool-result stub pru
 
 ### What a closed chain is
 
-A **closed chain** is a span of messages from one user message through any number of tool-using assistant turns and their results, ending in a final text-only assistant reply:
+A **closed chain** is a span of messages from one user message - or a non-pruner custom message (`role: "custom"` with a `customType` not prefixed `context-prune-`), the latter only accepted as a chain start while the chain detector is idle (mid-chain, a non-pruner custom is passthrough, not a new anchor) - through any number of tool-using assistant turns and their results, ending in a final text-only assistant reply:
 
 ```
 [user msg]                         ← chain start (kept raw)
@@ -871,7 +905,7 @@ A **closed chain** is a span of messages from one user message through any numbe
 
 | Part | After chain compression |
 |---|---|
-| Start user message | **Kept raw** |
+| Start user message (or idle-anchored custom message) | **Kept raw** |
 | Middle assistant turns (all) | **Dropped** — assistant thinking + signatures + toolCall argument blocks |
 | Middle tool results (all) | **Dropped** — already stub-replaced by the per-batch pruner; now fully removed |
 | Per-batch summary message(s) for this chain | **Suppressed** — replaced by the chain-level synthetic |
@@ -886,6 +920,7 @@ A **closed chain** is a span of messages from one user message through any numbe
 raw messages from session
   │
   ├─ [1] tool-result stub-replace   (per-batch; existing)
+  ├─ [1b] supersede                (older protected reads of a re-read path -> stub; see § Supersession)
   ├─ [2] error-purge                (phase 2)
   ├─ [3] chain-range-prune          (runs AFTER stubs)
   │        resolve each entry to a positional index range
@@ -941,6 +976,7 @@ The injected user message body:
 By default (`chainCompression.fuseRangeSummary`, default `true`) a compressed chain's per-batch summaries are fused into ONE cohesive summary by a single summarizer call at compression time, persisted as `rangeSummaryText` on the `context-prune-chain` entry and used as the synthetic body. This is recursive summarization (summary-of-summaries): the input is the already-pruned per-batch summary text, so it never re-sends raw tool output.
 
 - **Gate:** only spans with >= 2 distinct per-batch summaries are fused (nothing to fuse otherwise); single-summary spans use that summary directly.
+- **Wrapper handling:** stored `rangeSummaryText` (fused and deterministic-backfill bodies alike) is wrapped in the same `<context-prune-summary>` tag pair as per-batch summaries. The fuser receives the per-batch bodies *unwrapped* (it sees plain text); the renderer unwraps again before embedding the body into the `<compressed-chain>` block, so no tag pair ever nests inside it.
 - **Non-fatal:** if the fusion call fails or returns empty, the entry stores no `rangeSummaryText` and the renderer falls back to the per-batch concatenation — the chain still compresses.
 - **Cost:** one extra summarizer call per multi-batch span, charged to the same summarizer model and folded into the usage stats (`rangesSummarized` counter). Set `fuseRangeSummary: false` to keep the zero-LLM concatenation.
 - **Recovery:** unchanged — the span's tool outputs stay in `context-prune-index` and are recoverable via `context_tree_query`; the raw span text stays in the session JSONL.
@@ -967,6 +1003,8 @@ Chain compression does not delete data from the session JSONL. The original tool
 ```
 
 The protected output is relocated (moved), not copied — the original `ToolResultMessage` is dropped with the rest of the middle turns. The text stays in LLM context because it is embedded in the surviving synthetic block. It is NOT registered in the tool-call index and is NOT recoverable via `context_tree_query`; it does not need to be, because it is present verbatim.
+
+Relocation reads the array **after** phase 1b, so a protected read that has been superseded relocates as its one-line stub, not the verbatim body - the verbatim copy is the newer read elsewhere in context.
 
 The `context-prune-chain` session entry carries the matching `protectedToolCallIds` array so `session_start` reconstruction can re-embed the outputs on reload.
 
@@ -1005,7 +1043,7 @@ Phase 1 (per-batch summarization) is unaffected by chain closure and remains the
 
 Neither knob makes a chain close; they just keep Phase 1 flushing on schedule so raw toolResults do not pile up unsummarized for the whole run.
 
-**Observability metrics** (`src/context-metrics.ts`, `computeContextMetrics`) exist precisely to make this shape of session visible instead of silently reporting `calls: 1` the way the triggering incident did. All three are chars/4 token estimates (`Math.round`, same convention as the reclaim footer) and surface on `/pruner status` (a `--- context ---` block), the footer status line (a compact suffix, shown only when the frontier gap is non-zero), and a `context-prune-flush-metrics` session entry written once per flush attempt regardless of outcome:
+**Observability metrics** (`src/context-metrics.ts`, `computeContextMetrics`) exist precisely to make this shape of session visible instead of silently reporting `calls: 1` the way the triggering incident did. All three are chars/4 token estimates (`Math.round`, same convention as the reclaim footer) and surface on `/pruner status` (a `--- context ---` block) and a `context-prune-flush-metrics` session entry written once per flush attempt regardless of outcome:
 
 | Metric | Definition |
 |---|---|
@@ -1091,7 +1129,7 @@ Error purge replaces those arg bodies with compact stubs after the error has coo
 **Transform position:** Error purge runs in Phase 2, after stub-replace and before chain range prune.
 
 ```
-[stub-replace] → [error-purge] → [chain-range-prune] → [orphan-sweep]
+[stub-replace] → [supersede] → [error-purge] → [chain-range-prune] → [orphan-sweep]
 ```
 
 **Config keys:**
@@ -1106,11 +1144,11 @@ Error purge replaces those arg bodies with compact stubs after the error has coo
 
 ## Orphan Sweep
 
-`pruneMessages` ends with an unconditional structural pass, `sweepOrphanToolResults` (`src/orphan-sweep.ts`): a `toolResult` message whose id was not opened by the immediately preceding assistant turn is removed. It runs after every other phase, over whatever the previous three produced, as a final post-condition rather than a targeted fix for one code path.
+`pruneMessages` ends with an unconditional structural pass, `sweepOrphanToolResults` (`src/orphan-sweep.ts`): a `toolResult` message whose id is not open is removed, where "open" means: opened by the most recent `assistant` message and not interrupted by any barrier since. It runs after every other phase, over whatever the previous three produced, as a final post-condition rather than a targeted fix for one code path.
 
 **Why it exists.** pi-ai's auto-repair (`insertSyntheticToolResults`) only fills in a missing `toolResult` for an orphaned `toolCall` - it has no equivalent repair for the opposite shape, an orphaned `toolResult` with no matching `toolCall`. Providers reject that shape outright (Anthropic: `unexpected tool_use_id found in tool_result blocks`; Kimi K3: a tool message needs a resolvable preceding tool_call). An orphaned `toolResult` can appear from any combination of id reuse, an unresolved chain range, or a bug in an upstream phase; the sweep is the last line of defense regardless of cause, and it is intentionally not keyed to any provider's specific error string - the fix is structural ("does this id have an open call"), not reactive to how one provider happens to phrase rejection.
 
-**Per-turn, not cumulative, open-call tracking.** The sweep does one forward pass over the message array. Each `assistant` message **replaces** the current "open" id set with its own `toolCall` ids; each `toolResult` message either consumes (removes) a matching id from that set or, if its id is not open, is swept. A cumulative seen-set across the whole array would be wrong here: it would let an id used validly by an early turn license a *later* genuine orphan under the same reused id - exactly the collision scenario this exists to catch. Per-turn tracking means only the immediately preceding assistant turn can vouch for a `toolResult`'s id.
+**Per-turn, not cumulative, open-call tracking.** The sweep does one forward pass over the message array. Each `assistant` message **replaces** the current "open" id set with its own `toolCall` ids; each `toolResult` message either consumes (removes) a matching id from that set or, if its id is not open, is swept. Any message that is neither `assistant` nor `toolResult` is a **barrier** that clears the open set. This tracks the post-`convertToLlm` flush points of pi-ai's `insertSyntheticToolResults` - `convertToLlm` maps `custom`, `branchSummary`, `compactionSummary`, and `bashExecution` to `role: "user"`, and pi-ai flushes synthetic tool results at both `assistant` and `user` boundaries - **plus** a deliberate conservative over-sweep: `bashExecution` with `excludeFromContext: true` and unknown roles are dropped by `convertToLlm` and strictly need not be barriers, but a role allowlist would have to track an open interface for zero observed benefit. Not an exact mirror, and not an allowlist. Trade-off: a foreign message spliced mid-cycle now costs one tool output - the interleaved real result is swept and pi-ai injects its repairable `{isError: true, "No result provided"}` synthetic - converting an unrepairable provider shape (duplicate `tool_use_id`, permanent Anthropic 400) into a visible-but-recoverable tool failure. See `doc/specs/2026-08-18-gh-11-orphan-sweep-barrier.md`. A cumulative seen-set across the whole array would be wrong here: it would let an id used validly by an early turn license a *later* genuine orphan under the same reused id - exactly the collision scenario this exists to catch. Per-turn tracking means only the most recent assistant turn, uninterrupted by a barrier, can vouch for a `toolResult`'s id.
 
 **Provider-agnostic and reference-preserving.** The sweep has no knowledge of which provider is in play; it operates purely on message shape. When nothing is swept it returns the **same array reference** it was given, so a clean render is a true no-op and the no-op / prompt-cache-prefix invariant of `doc/specs/2026-08-04-pruner-noop-serialization.md` holds - the sweep never forces a cache bust on a session where nothing is actually orphaned.
 

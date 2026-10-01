@@ -559,6 +559,35 @@ describe("applyChainCompressions", () => {
     expect(synthetic.content[0].text).not.toContain("<protected-output");
   });
 
+  test("custom-anchored range: drops interior and relocates protected output, same as the user-anchored equivalent", () => {
+    const e = {
+      blockId: "b1",
+      startUserTimestamp: 1,
+      droppedToolCallIds: ["tc-read", "tc-todo"],
+      protectedToolCallIds: ["tc-todo"],
+      finalAssistantTimestamp: 9,
+      toolRefs: ["t1", "t2"],
+      compressedAt: 100,
+    };
+    const messages = [
+      { role: "custom", customType: "pi-gauntlet-transition-recovery", timestamp: 1 },
+      { role: "assistant", timestamp: 2, content: [
+        { type: "toolCall", id: "tc-read", name: "read" },
+        { type: "toolCall", id: "tc-todo", name: "todowrite" },
+      ] },
+      { role: "toolResult", toolCallId: "tc-read", toolName: "read", content: [{ type: "text", text: "FILE" }] },
+      { role: "toolResult", toolCallId: "tc-todo", toolName: "todowrite", content: [{ type: "text", text: "PLAN-STATE" }] },
+      { role: "assistant", timestamp: 9, content: [{ type: "text", text: "done" }] },
+    ];
+    const out = applyChainCompressions(messages, [e] as any, () => "SUMMARY", false);
+    expect(out.find((m: any) => m.role === "toolResult" && m.toolCallId === "tc-todo")).toBeUndefined();
+    expect(out.find((m: any) => m.role === "assistant" && m.timestamp === 2)).toBeUndefined();
+    const synthetic = out.find((m: any) => typeof m.content?.[0]?.text === "string" && m.content[0].text.startsWith("<compressed-chain"));
+    expect(synthetic.content[0].text).toContain('<protected-output tool="todowrite">');
+    expect(synthetic.content[0].text).toContain("PLAN-STATE");
+    expect(synthetic.content[0].text).not.toContain("FILE");
+  });
+
   test("blockSummaryLookup: missing lookup leaves placeholder literal", () => {
     const msgs = [
       userMsg(100),
@@ -635,6 +664,60 @@ describe("resolveRange", () => {
     ];
     const range = resolveRange({ startUserTimestamp: 100, finalAssistantTimestamp: 200 }, messages);
     expect(range).toEqual({ startIndex: 0, endIndex: 1 });
+  });
+
+  function customAnchor(timestamp: number, customType = "pi-gauntlet-transition-recovery"): any {
+    return { role: "custom", customType, timestamp };
+  }
+
+  test("resolves when the start anchor is an eligible non-pruner custom message", () => {
+    const messages = [
+      customAnchor(100),
+      assistantWithTools(200, ["tc1"]),
+      toolResult(300, "tc1"),
+      assistantText(400),
+    ];
+    const range = resolveRange(entry({ startUserTimestamp: 100, finalAssistantTimestamp: 400 }), messages);
+    expect(range).toEqual({ startIndex: 0, endIndex: 3 });
+  });
+
+  test("returns null when a user message and an eligible custom message collide at the same start timestamp", () => {
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
+      customAnchor(100),
+      assistantWithTools(200, ["tc1"]),
+      toolResult(300, "tc1"),
+      assistantText(400),
+    ];
+    const range = resolveRange(entry({ startUserTimestamp: 100, finalAssistantTimestamp: 400 }), messages);
+    expect(range).toBeNull();
+  });
+
+  test("returns null when two eligible custom messages share the start timestamp", () => {
+    const messages = [
+      customAnchor(100),
+      customAnchor(100, "other-extension"),
+      assistantWithTools(200, ["tc1"]),
+      toolResult(300, "tc1"),
+      assistantText(400),
+    ];
+    const range = resolveRange(entry({ startUserTimestamp: 100, finalAssistantTimestamp: 400 }), messages);
+    expect(range).toBeNull();
+  });
+
+  test("user-anchored resolution is unaffected by the custom-anchor widening (regression pin)", () => {
+    expect(resolveRange(entry(), base())).toEqual({ startIndex: 0, endIndex: 3 });
+  });
+
+  test("a context-prune-summary custom at the start timestamp does not count as a start match", () => {
+    const messages = [
+      summaryMsg(100, ["tc0"]),
+      assistantWithTools(200, ["tc1"]),
+      toolResult(300, "tc1"),
+      assistantText(400),
+    ];
+    const range = resolveRange(entry({ startUserTimestamp: 100, finalAssistantTimestamp: 400 }), messages);
+    expect(range).toBeNull();
   });
 });
 
@@ -795,6 +878,13 @@ describe("applyChainCompressions - positional", () => {
         const msgs = incident();
         msgs[3] = { ...msgs[3], content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "done 1" }] } as any;
         return applyChainCompressions(msgs, entries as any, summaryFor, true);
+      }],
+      ["a context-prune-summary after a completed cycle", () => {
+        const msgs = incident();
+        msgs.splice(8, 0, { role: "custom", customType: CUSTOM_TYPE_SUMMARY, content: "batch summary", timestamp: 2250 } as any);
+        const out = applyChainCompressions(msgs, entries as any, summaryFor, false);
+        expect(out.some((m: any) => m.customType === CUSTOM_TYPE_SUMMARY)).toBe(true);
+        return out;
       }],
       ["skips an entry whose start falls strictly inside another entry's range", () => {
         const wide = { blockId: "b8", startUserTimestamp: 1000, droppedToolCallIds: [], finalAssistantTimestamp: 2200, toolRefs: [], compressedAt: 9002 };

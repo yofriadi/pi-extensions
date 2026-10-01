@@ -393,7 +393,7 @@ export class ToolCallIndexer {
 
   /**
    * Stores summary body text keyed by the toolCallIds it covers.
-   * Called after a successful flush so `getPerBatchSummaryTextForToolCallIds`
+   * Called after a successful flush so `getPerBatchSummariesForToolCallIds`
    * can serve chain summaries without re-scanning session entries.
    */
   registerSummaryBody(toolCallIds: string[], text: string): void {
@@ -426,15 +426,6 @@ export class ToolCallIndexer {
       }
     }
     return texts;
-  }
-
-  /**
-   * Returns the concatenated summary text for all per-batch summaries whose
-   * toolCallIds overlap the given set, joined with "\n\n".
-   * Used by chain-range-prune to build the synthetic chain message body.
-   */
-  getPerBatchSummaryTextForToolCallIds(toolCallIds: string[]): string {
-    return this.getPerBatchSummariesForToolCallIds(toolCallIds).join("\n\n");
   }
 
   /**

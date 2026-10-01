@@ -1,5 +1,15 @@
 import { describe, it, expect, mock } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Command handlers persist through src/config.ts, which resolves the settings
+// path lazily from PI_CODING_AGENT_DIR; point it at a scratch dir so no test
+// ever touches the developer's real settings.json.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-condense-commands-test-"));
+
 import { pruneStatusText, setPruneStatusWidget, registerCommands } from "./commands.js";
+import { settingsPath } from "./config.js";
 import type { ContextPruneConfig, ContextMetricsSnapshot, SummarizerStats } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 
@@ -11,10 +21,9 @@ function captureStatus(
   config: ContextPruneConfig,
   value?: Parameters<typeof setPruneStatusWidget>[2],
   diagnostics?: Parameters<typeof setPruneStatusWidget>[3],
-  metrics?: Parameters<typeof setPruneStatusWidget>[4],
 ): string | undefined {
   let captured: string | undefined;
-  setPruneStatusWidget({ ui: { setStatus: (_id, text) => { captured = text; } } }, config, value, diagnostics, metrics);
+  setPruneStatusWidget({ ui: { setStatus: (_id, text) => { captured = text; } } }, config, value, diagnostics);
   return captured;
 }
 
@@ -27,6 +36,7 @@ function setupPrunerCommand(overrides: {
   flushPending?: (ctx: any, options?: any) => Promise<any>;
   getRearmed?: () => boolean;
   getContextMetrics?: (ctx: any) => ContextMetricsSnapshot;
+  save?: (config: ContextPruneConfig) => Promise<void>;
 } = {}) {
   let handler: (args: string, ctx: any) => Promise<void>;
   const notifications: { message: string; type?: string }[] = [];
@@ -59,8 +69,8 @@ function setupPrunerCommand(overrides: {
     async () => ({ compressedEntries: [], skipped: 0 }),
     undefined,
     overrides.getContextMetrics,
-    undefined,
     overrides.getRearmed,
+    overrides.save,
   );
 
   const ctx: any = {
@@ -68,6 +78,7 @@ function setupPrunerCommand(overrides: {
       notify(message: string, type?: string) {
         notifications.push({ message, type });
       },
+      setStatus() {},
     },
   };
 
@@ -75,6 +86,7 @@ function setupPrunerCommand(overrides: {
     run: (args: string) => handler(args, ctx),
     notifications,
     flushCalls,
+    currentConfig,
   };
 }
 
@@ -178,6 +190,41 @@ describe("setPruneStatusWidget", () => {
   });
 });
 
+describe("/pruner off with a rejecting save (#15)", () => {
+  it("keeps the in-memory change, notifies an error naming the settings path, and raises no unhandledRejection", async () => {
+    const unhandled: unknown[] = [];
+    const recorder = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", recorder);
+    try {
+      const { run, notifications, currentConfig } = setupPrunerCommand({
+        save: () => Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" })),
+      });
+
+      await run("off");
+
+      // The error toast lands after the handler returns; wait for it with a
+      // bounded poll rather than a microtask hop.
+      const deadline = Date.now() + 2000;
+      while (!notifications.some((n) => n.type === "error") && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await new Promise((r) => setImmediate(r));
+
+      const errorIdx = notifications.findIndex((n) => n.type === "error");
+      const successIdx = notifications.findIndex((n) => n.message === "Context pruning disabled.");
+      expect(errorIdx).toBeGreaterThan(-1);
+      expect(successIdx).toBeGreaterThan(-1);
+      expect(successIdx).toBeLessThan(errorIdx);
+      expect(notifications[errorIdx].message).toContain(settingsPath());
+      expect(notifications[errorIdx].message).toContain("EACCES");
+      expect(currentConfig.value.enabled).toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", recorder);
+    }
+  });
+});
+
 describe("diagnostic counters on the status line", () => {
   const zeroDiag = { "unresolved-range": 0, "range-id-mismatch": 0, "orphan-sweep": 0 } as const;
   const mixedDiag = { "unresolved-range": 2, "range-id-mismatch": 0, "orphan-sweep": 1 } as const;
@@ -213,28 +260,3 @@ describe("diagnostic counters on the status line", () => {
   });
 });
 
-describe("context metrics suffix on the status line", () => {
-  const metrics: ContextMetricsSnapshot = {
-    openCycleThinkingTokens: 12000,
-    largestChainSharePct: 62,
-    frontierGapTokens: 195000,
-  };
-
-  it("appends a compact think/gap/chain segment when frontierGapTokens > 0", () => {
-    const text = pruneStatusText(cfg(true), undefined, undefined, metrics);
-    expect(text).toContain("\u00b7 think 12.0k \u00b7 gap 195.0k \u00b7 chain 62%");
-  });
-
-  it("omits the suffix when frontierGapTokens is 0", () => {
-    const withZeroGap = { ...metrics, frontierGapTokens: 0 };
-    expect(pruneStatusText(cfg(true), undefined, undefined, withZeroGap)).toBe(
-      pruneStatusText(cfg(true)),
-    );
-  });
-
-  it("composes after the diag suffix when both are present", () => {
-    const mixedDiag = { "unresolved-range": 2, "range-id-mismatch": 0, "orphan-sweep": 1 } as const;
-    const text = pruneStatusText(cfg(true), undefined, mixedDiag, metrics);
-    expect(text).toBe("prune: ON \u00b7 diag u2/o1 \u00b7 think 12.0k \u00b7 gap 195.0k \u00b7 chain 62%");
-  });
-});

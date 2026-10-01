@@ -5,10 +5,6 @@ description: Use when asked to release, publish, bump the version, or cut a tag 
 
 # Release
 
-Use this skill when asked to release this package.
-
-## Overview
-
 `@yofriadi/pi-condense` publishes to **npm** (public, scoped); the `pi-package` keyword
 lists it on `https://pi.dev/packages/@yofriadi/pi-condense`. Users install with
 `pi install npm:@yofriadi/pi-condense`.
@@ -21,27 +17,20 @@ flow only assigns the version and atomically pushes branch + tag; **never run `n
 
 Releases are cut only from `local/main`, the fork's default branch; never release the upstream-tracking `main` branch.
 
-All mechanics live in `.agents/skills/release/scripts/release.sh`. This skill is
-the judgment layer around it: propose the level, get approval, then run the
-script. Its configuration records this fork's scoped npm identity and
-`local/main` publication branch.
+All mechanics live in `.agents/skills/release/scripts/release.sh`. Its configuration
+records this fork's scoped npm identity and `local/main` publication branch.
 
 ## Boundaries
 
 - Reads: git log/tags, `package.json`, `CHANGELOG.md`, pi `settings.json` files.
-- Writes (only when you run the matching command): `package.json` version, a
-  release commit, the `vX.Y.Z` tag, and - only with an explicit `--apply` and a
-  separate approval - `settings.json` pins.
-- Does NOT: run `npm publish`, edit consumer project files, or rewrite
-  `~/.pi/**/settings.json` without a distinct approval for that action.
-
-## Tag scheme
-
-`v<major>.<minor>.<patch>` - plain semver, matching the workflow filter
-`v[0-9]+.[0-9]+.[0-9]+`. `package.json` `version` mirrors the tag without the
-leading `v`.
+- Writes: `CHANGELOG.md` heading, `package.json` version, one `Release X.Y.Z`
+  commit, the `vX.Y.Z` tag; `settings.json` pins only via `sync-presets --apply`.
+- Never: `npm publish`, consumer project files, `~/.pi/**/settings.json`
+  without `--apply` being authorized.
 
 ## Bump policy
+
+`v<major>.<minor>.<patch>`; `package.json` `version` mirrors the tag without `v`.
 
 | Level | When |
 |---|---|
@@ -51,7 +40,13 @@ leading `v`.
 
 ## Process
 
-### 1. Propose the level - require explicit approval
+**Level named in the request** ("release patch") - that is the approval. Run
+step 2 directly; no proposal, no re-confirmation. An explicit version ("cut
+6.1.0"): set `package.json` to it, commit, run `current`.
+
+**Level not named** - step 1 once, then step 2 with the level the user picks.
+
+### 1. Propose
 
 ```bash
 bash .agents/skills/release/scripts/release.sh propose
@@ -59,46 +54,54 @@ bash .agents/skills/release/scripts/release.sh propose
 
 Present commits since the nearest reachable SemVer release tag (`vX.Y.Z`), the
 heuristic level, and the resulting `X.Y.Z` with a one-line rationale tied to those commits.
-Baseline tags such as `subtree-v2.9.0+local` are intentionally ignored. Stop and wait for the user to accept or override.
+Baseline tags such as `subtree-v2.11.2+local` are intentionally ignored. Wait for the pick.
 
-### 2. Move the CHANGELOG entry
+### 2. Release
 
-Promote the `## [Unreleased]` notes into a new `## [X.Y.Z] - <date>` heading for
-the agreed version (Keep-a-Changelog format). Draft one if none exist.
-
-### 3. Bump, tag, push - require explicit approval of the exact command
-
-```bash
-bash .agents/skills/release/scripts/release.sh minor     # or patch / major
-bash .agents/skills/release/scripts/release.sh current    # version already hand-set + committed
-bash .agents/skills/release/scripts/release.sh --dry-run minor   # preview, no changes
-```
-
-The script verifies `local/main`, a clean tree, a plain `X.Y.Z` package version, and
-absence of the tag locally and on `origin`; it bumps `package.json`, runs
-`bun run typecheck && bun test src/`, creates the annotated tag, and atomically pushes
-`local/main` + the tag. `current` tags the already committed plain version.
-
-### 4. Verification (the script runs this automatically after a push)
-
-To re-run standalone:
+Release notes must already sit under `## [Unreleased]` in `CHANGELOG.md`,
+committed. If missing, write them from the commits since the last tag
+(Keep-a-Changelog: `### Added` / `### Changed` / `### Fixed` / `### Removed`,
+`(#N)` on ticket-linked bullets), commit, then run:
 
 ```bash
-bash .agents/skills/release/scripts/release.sh verify           # current package.json version
-bash .agents/skills/release/scripts/release.sh verify 1.5.0
+bash .agents/skills/release/scripts/release.sh patch      # or minor / major
+bash .agents/skills/release/scripts/release.sh --dry-run patch
+bash .agents/skills/release/scripts/release.sh current    # package.json already set; still promotes Unreleased
 ```
 
-It watches the release workflow to a terminal state (`gh` if present), polls
+The script requires `local/main`, a clean tree, a plain `X.Y.Z` package version, and
+absence of the target tag both locally and on `origin`; it promotes `## [Unreleased]` to
+`## [X.Y.Z] - <date>`, sets `package.json`, commits `Release X.Y.Z`, runs
+`bun run typecheck && bun test src/`, creates the annotated tag, atomically pushes
+`local/main` + the tag, then runs `verify`. `current` tags the already committed plain
+version. Any failed check exits with the reason - report it, don't work around it.
+
+### 3. Verify
+
+Runs automatically after the push. Standalone:
+
+```bash
+bash .agents/skills/release/scripts/release.sh verify           # package.json version
+bash .agents/skills/release/scripts/release.sh verify 2.10.4
+```
+
+Watches the release workflow to a terminal state, polls
 `npm view @yofriadi/pi-condense@X.Y.Z version` until live, then checks the pi.dev catalog.
-Only claim success once `npm view` prints the new version. pi.dev lags npm by
-minutes to hours - report crawl lag, do not loop on it.
+Success means `npm view` printed the version. pi.dev lags npm by minutes to
+hours - report crawl lag, do not loop on it.
 
-### 5. Optional - propose preset pin sync
+### 4. Follow-ups named in the same instruction
 
-Offer only when relevant. Requires its own explicit approval before `--apply`.
+Run after step 3 prints the version, no further confirmation:
+
+- close a ticket: `gh issue close <n> --comment "<text>"` - "relevant ticket"
+  is the `(#N)` ref in the promoted CHANGELOG section; the comment is that
+  section plus the npm version line. Stop only if several refs are present and
+  none is named.
+- `sync-presets --apply` when the instruction asks for it; otherwise report-only:
 
 ```bash
-bash .agents/skills/release/scripts/release.sh sync-presets            # report only
+bash .agents/skills/release/scripts/release.sh sync-presets            # report
 bash .agents/skills/release/scripts/release.sh sync-presets --apply    # rewrite same-form npm pins
 ```
 
@@ -107,28 +110,27 @@ pins (`npm:@yofriadi/pi-condense@<old>`) are bumped by `--apply`; versioned unsc
 pins (`npm:pi-condense@<old>` and `npm:pi-context-prune@<old>`) migrate to the scoped
 package under `--apply`. Git pins are reported for manual migration.
 
-## Safety checks
+## Safety checks (enforced by the script)
 
-Refuse to proceed unless ALL hold; report which failed, do not silently fix:
-
-- working tree clean (for `current`, commit feature work first)
-- releasing from `local/main`
-- the target `vX.Y.Z` tag does not already exist (the script enforces this)
-- `bun run typecheck && bun test src/` passes (the script's pre-flight; also the CI gate)
-- the target tag is absent both locally and on `origin` before any release mutation
+- clean working tree, on `local/main`
+- plain `X.Y.Z` version in `package.json`
+- `## [Unreleased]` present and non-empty, or top heading already `X.Y.Z`
+- target `vX.Y.Z` tag absent locally and on `origin`
+- `bun run typecheck && bun test src/` passes
 
 ## Red Flags - STOP
 
-- about to run `npm publish` locally - push the tag, let CI publish
-- picked the bump level without user confirmation
+- about to run `npm publish` locally
+- picked a level the user neither named nor approved
 - reported success without `npm view @yofriadi/pi-condense@X.Y.Z` printing the version
-- retrying the pi.dev fetch "until it appears" - that's crawl lag, not failure
+- retrying the pi.dev fetch "until it appears"
+- `sync-presets --apply` without the instruction asking for it
 - editing a `~/.pi/**/settings.json` without its own explicit approval
 - `package.json` version and the tag are not the identical `X.Y.Z` string
+- working around a failed safety check instead of reporting it
 
-## First-time npm setup (one-off, not per release)
+## First-time npm setup (one-off)
 
-`@yofriadi/pi-condense` must be registered once as a **trusted publisher** on npmjs.com:
-Settings -> Trusted Publishing -> GitHub Actions publisher for repo
-`yofriadi/pi-condense`, workflow `release.yml`. Until it exists the publish step
-cannot authenticate (403).
+Register `@yofriadi/pi-condense` as a trusted publisher on npmjs.com: Settings -> Trusted
+Publishing -> GitHub Actions publisher for repo `yofriadi/pi-condense`, workflow
+`release.yml`. Until then the publish step fails with 403.

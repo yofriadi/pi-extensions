@@ -24,13 +24,13 @@ import {
   DEFAULT_CONFIG,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { saveConfig } from "./config.js";
+import { saveConfig, persistConfig } from "./config.js";
 import { MAX_BUDGET_WINDOW } from "./budget.js";
 import { formatTokens, formatCost, formatCharProgress, formatCompactCount } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
-import { normalizeSummaryToolCallRefs } from "./summary-refs.js";
+import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
 
 /**
@@ -65,7 +65,6 @@ export function pruneStatusText(
   config: ContextPruneConfig,
   reclaim?: LiveReclaim,
   diagnostics?: Record<DiagnosticKind, number>,
-  metrics?: ContextMetricsSnapshot,
 ): string {
   if (!config.enabled) return "prune: OFF";
   const diag = diagnostics
@@ -77,14 +76,11 @@ export function pruneStatusText(
       ].filter(Boolean)
     : [];
   const suffix = diag.length > 0 ? ` \u00b7 diag ${diag.join("/")}` : "";
-  const metricsSuffix = metrics && metrics.frontierGapTokens > 0
-    ? ` \u00b7 think ${formatCompactCount(metrics.openCycleThinkingTokens)} \u00b7 gap ${formatCompactCount(metrics.frontierGapTokens)} \u00b7 chain ${metrics.largestChainSharePct}%`
-    : "";
-  if (!reclaim || reclaim.beforeChars <= 0) return `prune: ON${suffix}${metricsSuffix}`;
+  if (!reclaim || reclaim.beforeChars <= 0) return `prune: ON${suffix}`;
   const beforeTok = Math.round(reclaim.beforeChars / 4);
   const afterTok = Math.round(reclaim.afterChars / 4);
   const reduction = Math.max(0, Math.round((1 - afterTok / beforeTok) * 100));
-  return `prune: ON \u00b7 ${formatCompactCount(beforeTok)}->${formatCompactCount(afterTok)} (-${reduction}%)${suffix}${metricsSuffix}`;
+  return `prune: ON \u00b7 ${formatCompactCount(beforeTok)}->${formatCompactCount(afterTok)} (-${reduction}%)${suffix}`;
 }
 
 export function setPruneStatusWidget(
@@ -92,13 +88,12 @@ export function setPruneStatusWidget(
   config: ContextPruneConfig,
   value?: LiveReclaim | string,
   diagnostics?: Record<DiagnosticKind, number>,
-  metrics?: ContextMetricsSnapshot,
 ): void {
   if (!config.showPruneStatusLine) {
     ctx.ui.setStatus(STATUS_WIDGET_ID, undefined);
     return;
   }
-  const text = typeof value === "string" ? value : pruneStatusText(config, value, diagnostics, metrics);
+  const text = typeof value === "string" ? value : pruneStatusText(config, value, diagnostics);
   // Leading-only separator: the footer joins extension status segments with a
   // single space, so a trailing divider collides with the next segment's leading
   // one and renders doubled. One leading bar yields single dividers between
@@ -269,7 +264,7 @@ function protectedToolsDescription(config: ContextPruneConfig): string {
 }
 
 function protectedPathsDescription(config: ContextPruneConfig): string {
-  return `Glob patterns matched against a tool call's \`args.path\`; matching outputs are NEVER pruned. Currently: ${protectedToolsDisplay(config.protectedPaths)}. Edit via \`/pruner protected-paths\` (interactive) or \`/pruner protected-paths <comma-separated globs>\`. Set to 'none' to disable (kill switch). Default protects skill files: **/skills/**/*.md`;
+  return `Glob patterns matched against a tool call's \`args.path\`; matching outputs are NEVER pruned. Currently: ${protectedToolsDisplay(config.protectedPaths)}. Edit via \`/pruner protected-paths\` (interactive) or \`/pruner protected-paths <comma-separated globs>\`. Set to 'none' to disable (kill switch). Default protects skill files and per-repo gauntlet overrides: **/skills/**/*.md, **/gauntlet-overrides.md`;
 }
 
 const HELP_TEXT = `pruner — automatically summarizes tool-call outputs to keep context lean.
@@ -489,8 +484,8 @@ export function registerCommands(
   compactChains: (ctx: ExtensionCommandContext) => Promise<{ compressedEntries: ChainCompressionEntry[]; skipped: number }>,
   getDiagnosticCounts?: () => Record<DiagnosticKind, number>,
   getContextMetrics?: (ctx: ExtensionCommandContext) => ContextMetricsSnapshot,
-  getCachedMetrics?: () => ContextMetricsSnapshot | undefined,
   getRearmed?: () => boolean,
+  save: (config: ContextPruneConfig) => Promise<void> = saveConfig,
 ): void {
   // Register the /pruner command
   pi.registerCommand("pruner", {
@@ -850,8 +845,8 @@ export function registerCommands(
               };
             }
             currentConfig.value = newConfig;
-            saveConfig(newConfig);
-            setPruneStatusWidget(ctx, newConfig, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
+            void persistConfig((m, t) => ctx.ui.notify(m, t), newConfig, save);
+            setPruneStatusWidget(ctx, newConfig, getLiveReclaim(), getDiagnosticCounts?.());
             settingsList?.invalidate();
           };
 
@@ -884,18 +879,18 @@ export function registerCommands(
         // ── /pruner on ──
         case "on": {
           currentConfig.value = { ...currentConfig.value, enabled: true };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify("Context pruning enabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
           break;
         }
 
         // ── /pruner off ──
         case "off": {
           currentConfig.value = { ...currentConfig.value, enabled: false };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify("Context pruning disabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
           break;
         }
 
@@ -971,7 +966,7 @@ export function registerCommands(
               summarizerModel: parsed.model,
               summarizerThinking: parsed.thinking ?? currentConfig.value.summarizerThinking,
             };
-            saveConfig(currentConfig.value);
+            void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
             const thinkingText = parsed.thinking ? ` with thinking ${parsed.thinking}` : "";
             ctx.ui.notify(`Summarizer model set to: ${parsed.model}${thinkingText}`);
           }
@@ -999,7 +994,7 @@ export function registerCommands(
             );
             return;
           }
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(`Summarizer thinking set to: ${currentConfig.value.summarizerThinking}`);
           break;
         }
@@ -1017,8 +1012,8 @@ export function registerCommands(
           } else {
             currentConfig.value = { ...currentConfig.value, pruneOn: modeArg as ContextPruneConfig["pruneOn"] };
           }
-          saveConfig(currentConfig.value);
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
           break;
         }
 
@@ -1041,7 +1036,7 @@ export function registerCommands(
             }
             currentConfig.value = { ...currentConfig.value, batchingMode: batchArg as ContextPruneConfig["batchingMode"] };
           }
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
           break;
         }
@@ -1120,7 +1115,7 @@ export function registerCommands(
 
           // Remove the widget and restore the normal footer status.
           clearWidget();
-          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.(), getCachedMetrics?.());
+          setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
@@ -1192,7 +1187,7 @@ export function registerCommands(
           }
 
           currentConfig.value = { ...currentConfig.value, protectedTools: nextList };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(`Protected tools: ${protectedToolsDisplay(nextList)}`);
           break;
         }
@@ -1225,7 +1220,7 @@ export function registerCommands(
           }
 
           currentConfig.value = { ...currentConfig.value, protectedPaths: nextList };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(`Protected paths: ${protectedToolsDisplay(nextList)}`);
           break;
         }
@@ -1249,7 +1244,7 @@ export function registerCommands(
             break;
           }
           currentConfig.value = { ...currentConfig.value, minBatchChars: parsed };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(
             parsed === 0
               ? "minBatchChars set to 0 — pre-flush trivial-batch skipping disabled."
@@ -1272,7 +1267,7 @@ export function registerCommands(
             break;
           }
           currentConfig.value = { ...currentConfig.value, recoveryGraceTurns: parsed };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(
             parsed === 0
               ? "recovery-grace set to 0 - context_tree_query output stubs immediately."
@@ -1297,7 +1292,7 @@ export function registerCommands(
           }
           const next = arg === "on" || arg === "true";
           currentConfig.value = { ...currentConfig.value, dedupByContentHash: next };
-          saveConfig(currentConfig.value);
+          void persistConfig((m, t) => ctx.ui.notify(m, t), currentConfig.value, save);
           ctx.ui.notify(`Content-hash dedup turned ${next ? "ON" : "OFF"}.`);
           break;
         }
@@ -1328,7 +1323,7 @@ export function registerCommands(
     const toolCount = normalizeSummaryToolCallRefs(details).length;
     const header = theme.fg("accent", `[pruner] Turn ${turnIndex} summary (${toolCount} tool${toolCount === 1 ? "" : "s"})`);
     if (expanded) {
-      return new Text(header + "\n" + message.content, 0, 0);
+      return new Text(header + "\n" + unwrapSummaryForDisplay(message.content), 0, 0);
     }
     return new Text(header, 0, 0);
   });

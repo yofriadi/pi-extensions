@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { charsOf } from "./context-metrics.js";
 import type { ToolCallIndexer } from "./indexer.js";
 import type { ChainCompressionConfig, ErrorPurgeConfig } from "./types.js";
+import { unwrapSummaryForDisplay } from "./summary-refs.js";
 import { isProtected, type ProtectionConfig } from "./protected.js";
 import { applyChainCompressions } from "./chain-range-prune.js";
 import { purgeErroredArgs } from "./error-purge.js";
@@ -8,19 +10,20 @@ import { inGraceRecoveryToolCallIds } from "./recovery-grace.js";
 import { occKey } from "./occurrence-key.js";
 import { sweepOrphanToolResults } from "./orphan-sweep.js";
 import type { DiagnosticSink } from "./diagnostics.js";
+import { applySupersede, type SupersedeState } from "./supersede.js";
 
 /**
- * Estimate of a message array's context weight. Serializing the whole array
- * (not just visible text) is deliberate: it counts tool-call argument bodies
- * (error-purge) and tool-result arrays (stub-replace / chain-range) so all
- * reclaim mechanisms register.
+ * Estimate of a message array's context weight: whole-message JSON chars
+ * (tool-call arguments, tool-result arrays, hidden blocks) so every reclaim
+ * mechanism registers, with image blocks at the flat estimate `charsOf`
+ * shares with the frontier-gap trigger.
  */
 export function sizeMessages(messages: any[]): number {
-  return JSON.stringify(messages).length;
+  return messages.reduce((sum, message) => sum + charsOf(message), 0);
 }
 
 /**
- * Transforms the `context` event message array in four phases:
+ * Transforms the `context` event message array in five phases:
  *
  * Phase 1 — stub-replace: ToolResultMessages for summarized tool calls are
  * replaced with short stubs pointing the model at `context_tree_query`.
@@ -37,6 +40,13 @@ export function sizeMessages(messages: any[]): number {
  *     to recovery is present on the toolResult itself, not only in the
  *     separate summary message.
  *
+ * Phase 1b — supersede: protected reads (never indexed) whose `args.path`
+ * is read again later in the same context are replaced with a one-line
+ * "superseded" stub, but only once `SupersedeState.floor` says the pruner
+ * is rewriting at/before their position anyway (or the cache is cold).
+ * See src/supersede.ts. Runs before phase 3 so a superseded read inside a
+ * compressed chain relocates as the stub, not the verbatim body.
+ *
  * Phase 2 — error purge: replaces failed toolCall arg bodies with stubs after a
  * cooldown, reclaiming context from large `write`/`edit` arguments that will
  * never succeed. The toolResult error message stays visible.
@@ -47,10 +57,11 @@ export function sizeMessages(messages: any[]): number {
  * Only runs when `chainCompression.enabled` and chain entries exist.
  *
  * Phase 4 — orphan sweep: structural post-condition run unconditionally over
- * the final array. Removes any toolResult whose matching toolCall id was not
- * opened by the immediately preceding assistant turn (per-turn open set, not
- * cumulative — see src/orphan-sweep.ts). Reference-preserving when nothing is
- * swept, so a clean render still returns the identical input array.
+ * the final array. Removes any toolResult whose matching toolCall id is not
+ * open: opened by the most recent assistant turn and uninterrupted by a
+ * barrier (any non-assistant/non-toolResult message) — see
+ * src/orphan-sweep.ts. Reference-preserving when nothing is swept, so a
+ * clean render still returns the identical input array.
  *
  * Return shape:
  *   - `pruned: true`  — at least one change happened; the returned
@@ -77,6 +88,7 @@ export function pruneMessages(
   protection?: ProtectionConfig,
   recoveryGraceTurns: number = 0,
   diagnostics?: DiagnosticSink,
+  supersede?: { state: SupersedeState; isProtected: (toolName: string, args: unknown) => boolean },
 ): { messages: any[]; pruned: boolean; beforeChars: number; afterChars: number } {
   // Phase 1: stub-replace summarized tool results
   let pruned = false;
@@ -135,6 +147,15 @@ export function pruneMessages(
 
   let current: any[] = pruned ? next : messages;
 
+  // Phase 1b: supersede older protected reads of a re-read path
+  if (supersede) {
+    const afterSupersede = applySupersede(current, supersede.state, supersede.isProtected);
+    if (afterSupersede !== current) {
+      current = afterSupersede;
+      pruned = true;
+    }
+  }
+
   // Phase 2: error purge — replace failed toolCall arg bodies after cooldown
   if (errorPurge?.enabled) {
     const afterPurge = purgeErroredArgs(current, errorPurge);
@@ -150,9 +171,18 @@ export function pruneMessages(
     if (chainEntries.length > 0) {
       // Prefer the cohesive LLM range summary (B) when present; fall back to the
       // per-batch concatenation for spans compressed before fusion / on failure.
+      // Both paths unwrap the summary-context wrapper: stored range summaries
+      // and per-batch bodies are wrapped (D2/D3), and a single outer unwrap
+      // on a joined string would leave N-1 embedded tag pairs — so unwrap each
+      // body before joining. The <compressed-chain> block must not nest
+      // <context-prune-summary> tags.
       const chainSummaryText = (entry: typeof chainEntries[number]): string =>
-        entry.rangeSummaryText ??
-        indexer.getPerBatchSummaryTextForToolCallIds(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds);
+        entry.rangeSummaryText
+          ? unwrapSummaryForDisplay(entry.rangeSummaryText)
+          : indexer
+              .getPerBatchSummariesForToolCallIds(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds)
+              .map(unwrapSummaryForDisplay)
+              .join("\n\n");
       const blockSummaryLookup = (blockId: string): string | undefined => {
         const entry = indexer.findChainEntryByBlockId(blockId);
         if (!entry) return undefined;
