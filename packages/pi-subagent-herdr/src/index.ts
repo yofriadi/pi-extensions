@@ -137,11 +137,15 @@ const SubagentParams = Type.Object({
 		description:
 			"Canonical agent ID. Resolves trusted project `.pi/agents/<id>.md`, then the global Pi agent directory.",
 	}),
-	task: Type.String({ description: "Task/prompt for the sub-agent" }),
+	task: Type.String({
+		description:
+			"Task/prompt for the sub-agent. On resume, a short continuation instruction suffices — the transcript already carries the original task.",
+	}),
 	label: Type.Optional(Type.String({ description: "Presentation-only run label; never changes agent authority" })),
 	session: Type.Optional(
 		Type.String({
-			description: "Path to an owned existing subagent session log to resume instead of starting a new session",
+			description:
+				"Path to an owned existing subagent session log to resume instead of starting a new session. Pair with a short continuation task — the transcript already carries the original task.",
 		}),
 	),
 	blocking: Type.Optional(
@@ -1116,7 +1120,7 @@ function registerSubagentTool(pi: ExtensionAPI): void {
 			"Spawn a sub-agent in a dedicated herdr surface (pane or tab). " +
 			"Default is async (fire-and-forget): the call returns immediately and the harness steers the result back when the child finishes. " +
 			"Pass blocking: true to await the child's final text as the tool result instead of a steer. " +
-			"Pass session: <path> to resume a previously failed run's session (the failed session path is handed to you in its failure delivery) instead of starting fresh. " +
+			'Pass session: <path> to resume a previously failed run\'s session (the failed session path is handed to you in its failure delivery) instead of starting fresh. On resume, pass a short continuation task (e.g. "continue the task from where it failed") — the transcript already carries the original task, so do not resend it. ' +
 			"The child auto-exits on normal completion; a settled failure closes its surface (pre-settlement or unknown-outcome panes may remain open) and always opens a real surface. " +
 			"DO NOT fabricate results. After an async spawn, end your turn or work on other independent tasks.",
 		promptSnippet:
