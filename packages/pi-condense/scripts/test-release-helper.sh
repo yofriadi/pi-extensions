@@ -71,9 +71,24 @@ empty_unreleased="$(bash .agents/skills/release/scripts/release.sh --skip-tests 
 status=$?
 set -e
 test "$status" -ne 0
-printf '%s\n' "$empty_unreleased" | grep -F 'Unreleased section is empty' >/dev/null
+grep -F 'Unreleased section is empty' <<<"$empty_unreleased" >/dev/null
+! git rev-parse -q --verify refs/tags/v2.9.3 >/dev/null
 
-# A valid release pushes branch and tag in one atomic ref transaction. Stub
+# The same stop through prepare_changelog's other guard clause: an Unreleased
+# heading immediately followed by the next version heading, whose body lines are
+# not Unreleased content. The release must stop without tagging.
+printf '%s\n' '# Changelog' '' '## [Unreleased]' '' '## [2.9.0] - 2026-01-01' '' '- old note' > CHANGELOG.md
+git add CHANGELOG.md
+git commit --quiet -m 'docs: changelog body only under the next heading'
+set +e
+guarded_unreleased="$(bash .agents/skills/release/scripts/release.sh --skip-tests current 2>&1)"
+status=$?
+set -e
+test "$status" -ne 0
+grep -F 'Unreleased section is empty' <<<"$guarded_unreleased" >/dev/null
+! git rev-parse -q --verify refs/tags/v2.9.3 >/dev/null
+
+# A valid release pushes branch and tag in one run (`git push --atomic`). Stub
 # verification clients so the test never polls external services.
 cat > "$bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -98,6 +113,7 @@ git add package.json CHANGELOG.md
 git commit --quiet -m 'Release 2.9.2'
 PATH="$bin:$PATH" bash .agents/skills/release/scripts/release.sh --skip-tests current >/dev/null
 test "$(git rev-parse refs/tags/v2.9.2)" = "$(git --git-dir="$remote" rev-parse refs/tags/v2.9.2)"
+test "$(git rev-parse 'refs/tags/v2.9.2^{commit}')" = "$(git rev-parse HEAD)"
 test "$(git rev-parse local/main)" = "$(git --git-dir="$remote" rev-parse refs/heads/local/main)"
 
 # The promotion path: a non-empty "## [Unreleased]" is rewritten to the version
@@ -109,10 +125,12 @@ git commit --quiet -m 'docs: release notes for 2.9.4'
 PATH="$bin:$PATH" bash .agents/skills/release/scripts/release.sh --skip-tests current >/dev/null
 test "$(git log -1 --format=%s)" = 'Release 2.9.4'
 test "$(git show --name-only --format= HEAD)" = 'CHANGELOG.md'
-git show HEAD:CHANGELOG.md | grep -qF "## [2.9.4] - $(date +%F)"
-git show HEAD:CHANGELOG.md | grep -qF -- '- promoted note'
-! git show HEAD:CHANGELOG.md | grep -qF '## [Unreleased]'
+promoted="$(git show HEAD:CHANGELOG.md)"
+grep -Eq '^## \[2\.9\.4\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' <<<"$promoted"
+grep -qF -- '- promoted note' <<<"$promoted"
+! grep -qF '## [Unreleased]' <<<"$promoted"
+test "$(git rev-parse 'refs/tags/v2.9.4^{commit}')" = "$(git rev-parse HEAD)"
 test "$(git rev-parse refs/tags/v2.9.4)" = "$(git --git-dir="$remote" rev-parse refs/tags/v2.9.4)"
 test "$(git rev-parse local/main)" = "$(git --git-dir="$remote" rev-parse refs/heads/local/main)"
 
-printf '%s\n' 'release helper tag selection, version, remote collision, changelog gate, promotion, and atomic push passed'
+printf '%s\n' 'release helper tag selection, version, remote collision, changelog gate, promotion, tag targeting, and same-run push passed'
