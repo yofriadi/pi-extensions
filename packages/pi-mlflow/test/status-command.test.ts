@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SERVER_WAIT_GRACE_MS } from "../src/constants.ts";
 import { createInitialState } from "../src/state.ts";
 import { buildStatusLines } from "../src/status-command.ts";
 
@@ -89,5 +90,58 @@ describe("buildStatusLines", () => {
 		expect(text).toContain("tracking URI: (none)");
 		expect(text).toContain("experiment: (none)");
 		expect(text).not.toMatch(/\(id:/);
+	});
+});
+
+describe("degraded flush line (bound-settle-flush-latency)", () => {
+	const activeState = (flushWaitExceeded: boolean) => {
+		const state = createInitialState({
+			trackingUri: "http://localhost:5000",
+			experimentName: "pi",
+			captureContent: true,
+		});
+		state.enabled = true;
+		state.flushWaitExceeded = flushWaitExceeded;
+		return state;
+	};
+
+	it("renders the degraded line while tracing is active (2.2/3.7)", () => {
+		const lines = buildStatusLines(activeState(true));
+		const text = lines.join("\n");
+
+		expect(text).toContain("status: active");
+		expect(text).toContain(
+			`last flush wait exceeded the ${SERVER_WAIT_GRACE_MS}ms bound (export continuing in background)`,
+		);
+		// Exactly one degraded line — not one per degradation or attempt.
+		expect(lines.filter((line) => line.includes("last flush wait"))).toHaveLength(1);
+		// Content-exclusion contract: config/status fields only, never captured
+		// trace content (tool arguments, payloads, prompts, span bodies).
+		expect(text).not.toMatch(/tool arg|payload|span content|user prompt/i);
+		expect(text).not.toMatch(/\binputs\b|\boutputs\b/i);
+	});
+
+	it("renders no degraded line while active without degradation (3.7)", () => {
+		const text = buildStatusLines(activeState(false)).join("\n");
+
+		expect(text).toContain("status: active");
+		expect(text).not.toMatch(/last flush|bound|background/i);
+		expect(text).not.toMatch(/tool arg|payload|span content|user prompt/i);
+	});
+
+	it("never renders the degraded line while disabled, even with a stale flag set (2.2/3.7)", () => {
+		const state = activeState(true);
+		state.enabled = false;
+		state.disabledReason = "tracking server unreachable or misconfigured at startup (connect ECONNREFUSED)";
+		const lines = buildStatusLines(state);
+		const text = lines.join("\n");
+
+		expect(text).toContain(
+			"status: disabled (tracking server unreachable or misconfigured at startup (connect ECONNREFUSED))",
+		);
+		expect(text).not.toContain("status: active");
+		expect(text).not.toMatch(/last flush|bound|background/i);
+		// Disabled output is exactly status + reason: no active-style fields.
+		expect(lines).toHaveLength(5);
 	});
 });

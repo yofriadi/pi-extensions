@@ -430,6 +430,7 @@ describe.runIf(reachable)("real MLflow server verification (tasks 6.1–6.7)", (
 				turnCounter: 0,
 				attemptIndex: 0,
 				finalCycleStatus: mlflow.SpanStatusCode.OK,
+				flushWaitExceeded: false,
 			});
 			expect(lines.join("\n")).toMatch(/status: disabled/);
 			expect(lines.join("\n")).not.toMatch(/status: active/);

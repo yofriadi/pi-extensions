@@ -5,9 +5,14 @@ import type { PiMlflowConfig } from "./config.ts";
 export type DisabledReason = string;
 
 /**
- * Process-lifetime tracing state. One instance per pi process (per extension
- * factory invocation), not per session — matches the "resolve once" design
- * decision (D8) and the "no retry" silent-disable decision (D9).
+ * Per-extension-instance tracing state: one instance per extension *factory
+ * invocation*, and pi re-runs that factory for every session runtime — so
+ * this object is rebuilt on every session switch (`/new`, `/resume`,
+ * `/fork`, session import), extension `/reload`, and cwd change. Only the
+ * *setup result* is process-global (`src/setup.ts`'s `Symbol.for` cache),
+ * which is what the "resolve once" design decision (D8) and the "no retry"
+ * silent-disable decision (D9) actually apply to: a rebuilt instance reuses
+ * the resolved config/experiment instead of re-initializing the SDK.
  */
 export interface TracingState {
 	config: PiMlflowConfig;
@@ -127,6 +132,36 @@ export interface TracingState {
 	 * Cleared only in cycle reset after the root ends.
 	 */
 	lastAssistantError?: string;
+
+	/**
+	 * Normalized (never-rejecting) promise for a flush attempt that outlived
+	 * its `SERVER_WAIT_GRACE_MS` wait, retained so the *next* flush attempt
+	 * re-awaits that abandoned work instead of forgetting it. It is the
+	 * aggregate of the retained-previous + current flush of the attempt that
+	 * set it, so consecutive degraded cycles nest one layer deeper until an
+	 * attempt completes within the bound and clears it.
+	 *
+	 * Per extension-instance state. Unlike the span/summary fields above it
+	 * survives root-cycle reset, and lives until the retained work completes
+	 * or a later attempt supersedes it — but a session switch, `/reload`, or
+	 * cwd change rebuilds `TracingState` and discards it. The abandoned SDK
+	 * export keeps running in the background either way (accepted no-WAL loss
+	 * window).
+	 *
+	 * Wait-only: no lifecycle, span-status, retry, or setup/silent-disable
+	 * decision may read it.
+	 */
+	pendingFlush?: Promise<void>;
+	/**
+	 * True when the most recent flush attempt exceeded `SERVER_WAIT_GRACE_MS`
+	 * and the extension stopped waiting on it (the export continues in the
+	 * background). Reset by the next attempt that completes within the bound.
+	 * A boolean rather than a timestamp because nothing renders *when*
+	 * degradation happened — `/mlflow` only needs to know that the latest
+	 * attempt exceeded it. Rendered only while tracing is active, and never
+	 * read by any lifecycle/setup decision.
+	 */
+	flushWaitExceeded: boolean;
 }
 
 export function createInitialState(config: PiMlflowConfig): TracingState {
@@ -137,5 +172,6 @@ export function createInitialState(config: PiMlflowConfig): TracingState {
 		turnCounter: 0,
 		attemptIndex: 0,
 		finalCycleStatus: SpanStatusCode.OK,
+		flushWaitExceeded: false,
 	};
 }

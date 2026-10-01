@@ -71,6 +71,8 @@ This is a personal, local-only observability add-on: it does not manage the `mlf
 ## `/mlflow` command
 
 Shows the configured tracking URI (with any embedded userinfo redacted), resolved experiment (name + id), capture-content mode (including that it controls Sessions conversation text as well as child span bodies), and whether tracing is active or disabled (with the reason).
+While tracing is active it can also report a degraded flush wait — the most recent flush outlived its 5-second grace period and the export is continuing in the background — alongside `status: active`.
+That line is omitted entirely while tracing is disabled, which keeps reporting only the disabled status and reason.
 Never displays captured trace content.
 
 ## Data durability and recovery
@@ -94,8 +96,14 @@ Combining two stores with colliding experiment/artifact IDs requires an MLflow/A
 ## Known limitations
 
 - No write-ahead-log-style durability: a tracking-server outage during a flush can lose that turn-cycle's trace batch.
-  Flushing is awaited at `agent_settled` (so a crash after settlement cannot lose a finished cycle) and again at `session_shutdown` (orphan-span sweep + final flush).
-  Export failures remain accepted without a local WAL.
+  Flushing is awaited at `agent_settled` (so a crash after settlement cannot lose a finished cycle) and again at `session_shutdown` (orphan-span sweep + final flush), but each **flush wait is bounded at 5 seconds**: past that the extension stops waiting, `/mlflow` reports the degraded wait, and the export keeps running in the background.
+  Export failures remain accepted without a local WAL, and background exports still in flight when pi exits are lost the same way.
+- A mid-session tracking-server outage (a blackholed or hung server; a *killed* one fails fast instead) used to cost ~30 s per settle, up to ~60 s when only the artifact upload hangs, because the awaited flush blocked on the SDK's own request timeout.
+  It now costs at most the 5 s grace period per cycle.
+  The git-provenance lookup awaited before the flush is additive and separately bounded per command (2 s each, up to ~4 s worst case), so a slow-but-working git puts the worst-case settle near ~9 s.
+  `MLFLOW_HTTP_REQUEST_TIMEOUT` controls the SDK's per-request abort timeout (default 30 s) independently of this extension-level wait bound; lowering it makes stalled exports fail — and flushes return — sooner.
+- `session_shutdown` also fires on `/new`, `/resume`, `/fork`, session import, and extension `/reload`, so each teardown pays the same bounded wait, not just quit.
+  pi re-runs the extension factory per session runtime, so any session switch, reload, or cwd change discards the degraded-flush flag and any retained background-flush reference; only the process-global setup result survives.
 - Process-global setup cache / OTel singleton: config changes and tracking-server switches require restarting the pi process; `/reload` alone is not enough.
 - No session-level aggregate/timeline trace view; sessions are browsable only via the `mlflow.trace.session` metadata tag and MLflow's trace search.
 - Cost tracking uses the `mlflow.llm.cost` span attribute manually, since MLflow's TypeScript SDK does not yet compute cost automatically (see [MLflow's token usage & cost docs](https://mlflow.org/docs/latest/genai/tracing/token-usage-cost/)).

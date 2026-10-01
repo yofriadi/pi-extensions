@@ -15,6 +15,7 @@ import type {
 import { context as otelContext, trace as otelTrace, ROOT_CONTEXT } from "@opentelemetry/api";
 import type { LiveSpan } from "mlflow-tracing";
 import * as mlflow from "mlflow-tracing";
+import { SERVER_WAIT_GRACE_MS } from "./constants.ts";
 import { resolveGitProvenance } from "./git.ts";
 import { COST_ATTRIBUTE_KEY, gateContent, TOKEN_USAGE_ATTRIBUTE_KEY, TRACE_METADATA_KEYS } from "./metadata.ts";
 import type { TracingState } from "./state.ts";
@@ -152,9 +153,13 @@ async function safelyAsync(fn: () => Promise<void>): Promise<void> {
  * repositories keep branch/commit metadata; each underlying git command has
  * its own timeout and cannot stall settlement indefinitely.
  *
- * After the root ends, settle awaits the real `mlflow.flushTraces()`
- * completion so a crash immediately after settlement cannot lose a finished
- * cycle. Failures are still accepted (no WAL durability).
+ * After the root ends, settle awaits `mlflow.flushTraces()` for at most
+ * `SERVER_WAIT_GRACE_MS`, so a crash immediately after settlement cannot lose
+ * a finished cycle that flushes in time while a slow or unreachable tracking
+ * server cannot stall pi's settle path indefinitely. Work still outstanding
+ * when the bound elapses is not cancelled: it continues in the background and
+ * the next attempt re-awaits it. Failures are still accepted (no WAL
+ * durability).
  */
 async function onAgentStart(pi: ExtensionAPI, state: TracingState, ctx: ExtensionContext): Promise<void> {
 	// Re-entrant agent_start (retry/continue within the same turn-cycle): keep
@@ -301,10 +306,13 @@ async function endRootCycle(state: TracingState): Promise<void> {
 	state.lastAssistantError = undefined;
 	state.finalCycleStatus = mlflow.SpanStatusCode.OK;
 
-	// Await real flush completion so the finished cycle is exported before
-	// settle/shutdown returns. A crash after settlement must not lose the
-	// completed cycle; export failures remain accepted (no WAL).
-	await flushTracesBestEffort();
+	// Bounded flush: wait for the finished cycle to be exported before
+	// settle/shutdown returns, but only for SERVER_WAIT_GRACE_MS. A crash after
+	// settlement must not lose a cycle that flushes in time, and a dead or hung
+	// server must not stall this path for the SDK's own ~30 s request timeouts.
+	// The *wait* is abandoned when the bound elapses, never the *work* — see
+	// flushTracesBestEffort.
+	await flushTracesBestEffort(state);
 }
 
 function onTurnStart(state: TracingState, _event: TurnStartEvent): void {
@@ -552,16 +560,92 @@ async function onSessionShutdown(state: TracingState): Promise<void> {
 }
 
 /**
- * Await the SDK exporter so a finished cycle is durable before settle/shutdown
- * returns. Export failures are swallowed — best-effort observability with no
- * WAL, per design.
+ * Start `mlflow.flushTraces()` and normalize its outcome, so no flush attempt
+ * can surface as an unhandled promise rejection — including one that settles
+ * *after* the grace-period race in `flushTracesBestEffort` has already
+ * returned and left this promise reachable only through `state.pendingFlush`.
+ *
+ * Must be called synchronously in the same job as the root-span end; see the
+ * note in `flushTracesBestEffort`.
  */
-async function flushTracesBestEffort(): Promise<void> {
+function startFlush(): Promise<void> {
+	// A synchronous throw is an accepted export failure, exactly like an
+	// asynchronous one (`flushTraces` is `async`, so today it can only reject).
+	let raw: Promise<void>;
 	try {
-		await mlflow.flushTraces();
+		raw = mlflow.flushTraces();
 	} catch {
-		// Best-effort flush; a failed flush means that batch may be lost,
-		// consistent with the accepted durability trade-off (no WAL).
+		raw = Promise.resolve();
+	}
+	// Attached in the same turn as the SDK call, so a late rejection can never
+	// become unhandled. Accepted no-WAL loss; never a crash.
+	return raw.catch(() => undefined);
+}
+
+/**
+ * Await the SDK exporter so a finished cycle is durable before settle/shutdown
+ * returns — but for at most `SERVER_WAIT_GRACE_MS`.
+ *
+ * pi awaits extension `agent_settled` handlers *before* it emits the UI settle
+ * event, and `session_shutdown` fires on quit *and* on `/new`, `/resume`,
+ * `/fork`, session import, and extension `/reload`. An unbounded wait here
+ * therefore freezes the UI after every prompt for as long as the SDK's own
+ * request timeouts take (~30 s against a blackholed server), contradicting the
+ * "no noticeable latency" goal. So: bound the *wait*, never the *work*.
+ *
+ * - The current `mlflow.flushTraces()` is started **synchronously in the same
+ *   job as the root-span end** — `endRootCycle` just ended the root, so that
+ *   export is already in the SDK's `_pendingExports`, and the chain
+ *   `flushTraces` → `processor.forceFlush` → the exporter's
+ *   `Object.values(_pendingExports)` snapshot runs synchronously. The snapshot
+ *   must happen before any previously-abandoned flush can resolve and *wipe*
+ *   that map, or the fresh flush would snapshot nothing, resolve immediately,
+ *   and report a completed cycle it never awaited. Do NOT insert an `await`
+ *   here "for clarity": that reopens the premature-"completed" window
+ *   (design D1/D6).
+ * - Any retained previous attempt is awaited alongside it, so abandoned work
+ *   is not forgotten within this extension instance's lifetime.
+ * - If the combined work exceeds the bound, the normalized aggregate is
+ *   retained on `state.pendingFlush` and `state.flushWaitExceeded` is set for
+ *   `/mlflow` to surface; otherwise both are cleared. The SDK operation is
+ *   never cancelled and keeps running in the background.
+ *
+ * Export failures are swallowed — best-effort observability with no WAL, per
+ * design. Both state fields written here are observational/wait-only: no
+ * lifecycle, span-status, retry, or setup/silent-disable decision reads them.
+ */
+async function flushTracesBestEffort(state: TracingState): Promise<void> {
+	const previous = state.pendingFlush ?? Promise.resolve();
+	const current = startFlush();
+	// Both inputs are already normalized; this rejection handler is defensive,
+	// keeping the aggregate non-rejecting even if a future writer of
+	// state.pendingFlush violates that rule.
+	const combined = Promise.all([previous, current]).then(
+		() => undefined,
+		() => undefined,
+	);
+
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<"timed_out">((resolve) => {
+		timeoutId = setTimeout(() => resolve("timed_out"), SERVER_WAIT_GRACE_MS);
+	});
+	const completed = combined.then(() => "completed" as const);
+
+	try {
+		// Explicit tagged outcome: no second timer, no elapsed-time guess, no
+		// mutable module-level marker.
+		const outcome = await Promise.race([completed, timeout]);
+		if (outcome === "timed_out") {
+			state.pendingFlush = combined;
+			state.flushWaitExceeded = true;
+		} else {
+			state.pendingFlush = undefined;
+			state.flushWaitExceeded = false;
+		}
+	} finally {
+		// Mirror fetchWithTimeout (src/experiment.ts): a fast flush must not
+		// leave a live grace timer holding the event loop or delaying exit.
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
 	}
 }
 

@@ -12,6 +12,7 @@
  */
 
 import { resolveTrackingRequestHeaders } from "./auth.ts";
+import { SERVER_WAIT_GRACE_MS } from "./constants.ts";
 
 interface GetByNameResponse {
 	experiment?: { experiment_id?: string };
@@ -25,15 +26,6 @@ interface ErrorResponse {
 	error_code?: string;
 	message?: string;
 }
-
-/**
- * Bound setup-path fetches tightly so a blackholed tracking server cannot
- * stall `session_start` for tens of seconds before silent-disable. Longer
- * than a healthy local `mlflow server` round-trip, short enough to keep pi
- * startup snappy. (mlflow-tracing's own client default is 30s — too long for
- * an optional observability add-on on the session-start critical path.)
- */
-const DEFAULT_TIMEOUT_MS = 5_000;
 
 /**
  * Resolve `experimentName` to a numeric experiment ID, creating the experiment
@@ -140,15 +132,17 @@ function isAlreadyExistsError(status: number, body: ErrorResponse | undefined): 
  * `fetch` with a bounded timeout so a blackholed/hanging tracking-server
  * connection can't stall `session_start` indefinitely — it instead surfaces
  * as a normal setup failure and flows through the silent-disable path (D9).
+ * The bound is the extension-wide `SERVER_WAIT_GRACE_MS` (`src/constants.ts`),
+ * shared with the settle/shutdown flush wait so the two cannot drift.
  */
 async function fetchWithTimeout(url: string | URL, init: RequestInit): Promise<Response> {
 	const controller = new AbortController();
-	const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+	const timeoutId = setTimeout(() => controller.abort(), SERVER_WAIT_GRACE_MS);
 	try {
 		return await fetch(url, { ...init, signal: controller.signal });
 	} catch (error) {
 		if (error instanceof Error && error.name === "AbortError") {
-			throw new Error(`Request to ${url.toString()} timed out after ${DEFAULT_TIMEOUT_MS}ms`);
+			throw new Error(`Request to ${url.toString()} timed out after ${SERVER_WAIT_GRACE_MS}ms`);
 		}
 		throw error;
 	} finally {

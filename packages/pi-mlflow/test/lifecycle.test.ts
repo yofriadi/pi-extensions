@@ -2,6 +2,7 @@ import * as mlflow from "mlflow-tracing";
 import { InMemoryTraceManager } from "mlflow-tracing/dist/core/trace_manager.js";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PiMlflowConfig } from "../src/config.ts";
+import { SERVER_WAIT_GRACE_MS } from "../src/constants.ts";
 import { extractAssistantText, registerLifecycleHandlers } from "../src/lifecycle.ts";
 import { createInitialState } from "../src/state.ts";
 
@@ -1317,5 +1318,298 @@ describe("root chat turn summary (Sessions bubbles)", () => {
 		expect(state.lastAssistantText).toBeUndefined();
 		expect(state.lastAssistantError).toBeUndefined();
 		await pi.fire("agent_settled", { type: "agent_settled" });
+	});
+});
+
+describe("bounded flush wait (bound-settle-flush-latency)", () => {
+	/** Register handlers on a fresh fake pi + enabled state, ready to fire events. */
+	function setup() {
+		const pi = new FakeExtensionAPI();
+		const state = createInitialState(makeConfig(false));
+		state.enabled = true;
+		registerLifecycleHandlers(pi as never, state);
+		return { pi, state };
+	}
+
+	/**
+	 * Drain the microtask queue: `setImmediate` callbacks run only after every pending
+	 * microtask continuation has settled, without advancing (faked) time.
+	 */
+	function flushMicrotasks(): Promise<void> {
+		return new Promise<void>((resolve) => setImmediate(resolve));
+	}
+
+	/** Run real event-loop turns so background socket I/O can settle. */
+	async function flushMacrotasks(rounds = 25): Promise<void> {
+		for (let i = 0; i < rounds; i++) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	}
+
+	/**
+	 * Poll until the fake-timer count stops changing, then return it: the real SDK
+	 * export fired at root end arms its own 30 s abort timer, which only clears once
+	 * the real socket failure settles, so reading the count at a fixed point would race
+	 * that background cleanup. Task 3.6 requires a before/after delta, not a bare
+	 * zero-count assertion, for exactly this reason.
+	 */
+	async function stableTimerCount(): Promise<number> {
+		let last = -1;
+		let stable = 0;
+		for (let round = 0; round < 500 && stable < 25; round++) {
+			const count = vi.getTimerCount();
+			stable = count === last ? stable + 1 : 0;
+			last = count;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		return last;
+	}
+
+	it("returns from agent_settled only after the grace period when the flush never resolves (3.1)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const flushSpy = vi.spyOn(mlflow, "flushTraces").mockImplementation(() => new Promise<void>(() => {}));
+		// The file-level spy accumulates calls across tests (only some restore
+		// it); clear the history so count assertions are local to this test.
+		flushSpy.mockClear();
+		try {
+			const { pi, state } = setup();
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+			let settled = false;
+			const settlePromise = pi.fire("agent_settled", { type: "agent_settled" }).then(() => {
+				settled = true;
+			});
+			// The flush was started and the race is pending on the grace timer alone.
+			await flushMicrotasks();
+			expect(flushSpy).toHaveBeenCalledTimes(1);
+			expect(settled).toBe(false);
+
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS - 1);
+			expect(settled).toBe(false);
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settled).toBe(true);
+			await settlePromise;
+			expect(state.flushWaitExceeded).toBe(true);
+			expect(state.pendingFlush).toBeDefined();
+		} finally {
+			vi.useRealTimers();
+			flushSpy.mockRestore();
+		}
+	});
+
+	it("never surfaces a flush rejection that arrives after the bound as an unhandledRejection (3.2)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		// Stubbed on purpose, not a shortcut: the pinned SDK's export path cannot
+		// reject (mlflow-tracing@0.1.3 dist/exporters/mlflow.js wraps every export
+		// in .catch(console.error)), so this is forward-defense for the
+		// extension's own normalization and would pass vacuously against the SDK.
+		let rejectFlush!: (error: Error) => void;
+		const flushSpy = vi.spyOn(mlflow, "flushTraces").mockImplementation(
+			() =>
+				new Promise<void>((_resolve, reject) => {
+					rejectFlush = reject;
+				}),
+		);
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const { pi, state } = setup();
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+
+			const settlePromise = pi.fire("agent_settled", { type: "agent_settled" });
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS);
+			await settlePromise;
+			expect(state.flushWaitExceeded).toBe(true);
+
+			// The abandoned flush rejects only now — after the race already returned,
+			// reachable only through the retained state.pendingFlush.
+			rejectFlush(new Error("late export failure"));
+			await flushMacrotasks();
+			expect(unhandled).toEqual([]);
+
+			// Nothing propagated into pi's settle path: the next attempt runs
+			// normally and completes within the bound.
+			flushSpy.mockResolvedValue(undefined);
+			let settledAgain = false;
+			const settleAgain = pi.fire("agent_settled", { type: "agent_settled" }).then(() => {
+				settledAgain = true;
+			});
+			await flushMicrotasks();
+			expect(settledAgain).toBe(true);
+			await settleAgain;
+			expect(state.flushWaitExceeded).toBe(false);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			vi.useRealTimers();
+			flushSpy.mockRestore();
+		}
+	});
+
+	it("marks the flush degraded after the bound and clears it on the next in-bound attempt (3.3)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		let releaseFirst!: () => void;
+		const firstFlush = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		const flushSpy = vi
+			.spyOn(mlflow, "flushTraces")
+			.mockImplementationOnce(() => firstFlush)
+			.mockResolvedValue(undefined);
+		try {
+			const { pi, state } = setup();
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+
+			const settlePromise = pi.fire("agent_settled", { type: "agent_settled" });
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS);
+			await settlePromise;
+			expect(state.flushWaitExceeded).toBe(true);
+			expect(state.pendingFlush).toBeDefined();
+
+			// The abandoned work settles; the next attempt then completes within
+			// the bound (no timer advance needed) and clears both fields.
+			releaseFirst();
+			await flushMicrotasks();
+			let settledAgain = false;
+			const settleAgain = pi.fire("agent_settled", { type: "agent_settled" }).then(() => {
+				settledAgain = true;
+			});
+			await flushMicrotasks();
+			expect(settledAgain).toBe(true);
+			await settleAgain;
+			expect(state.flushWaitExceeded).toBe(false);
+			expect(state.pendingFlush).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+			flushSpy.mockRestore();
+		}
+	});
+
+	it("re-awaits retained abandoned work: an instant flush alone cannot complete the next attempt (3.4)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		let openGate!: () => void;
+		const heldFlush = new Promise<void>((resolve) => {
+			openGate = resolve;
+		});
+		const flushSpy = vi
+			.spyOn(mlflow, "flushTraces")
+			.mockImplementationOnce(() => heldFlush) // #1: gate-held
+			.mockImplementationOnce(() => Promise.resolve()) // #2: instant
+			.mockResolvedValue(undefined); // #3+: instant
+		flushSpy.mockClear();
+		try {
+			const { pi, state } = setup();
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+
+			const settleOne = pi.fire("agent_settled", { type: "agent_settled" });
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS);
+			await settleOne;
+			expect(state.flushWaitExceeded).toBe(true);
+			expect(flushSpy).toHaveBeenCalledTimes(1);
+
+			// Attempt 2: its own flush resolves instantly, but the retained promise
+			// from attempt 1 is still open, so the attempt must still hit the bound
+			// rather than report a bogus completion.
+			let settledTwo = false;
+			const settleTwo = pi.fire("agent_settled", { type: "agent_settled" }).then(() => {
+				settledTwo = true;
+			});
+			await flushMicrotasks();
+			expect(flushSpy).toHaveBeenCalledTimes(2);
+			expect(settledTwo).toBe(false);
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS - 1);
+			expect(settledTwo).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settledTwo).toBe(true);
+			await settleTwo;
+			expect(state.flushWaitExceeded).toBe(true);
+			expect(state.pendingFlush).toBeDefined();
+
+			// Once the gate opens, the retained work settles and attempt 3
+			// completes within the bound, clearing the degraded state.
+			openGate();
+			await flushMicrotasks();
+			let settledThree = false;
+			const settleThree = pi.fire("agent_settled", { type: "agent_settled" }).then(() => {
+				settledThree = true;
+			});
+			await flushMicrotasks();
+			expect(settledThree).toBe(true);
+			await settleThree;
+			expect(state.flushWaitExceeded).toBe(false);
+			expect(state.pendingFlush).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+			flushSpy.mockRestore();
+		}
+	});
+
+	it("cleans up the grace timer on both race outcomes (3.6)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const flushSpy = vi.spyOn(mlflow, "flushTraces").mockResolvedValue(undefined);
+		try {
+			const { pi, state } = setup();
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+
+			// Fast completion: the race resolves "completed" and the finally clears
+			// the grace timer before agent_settled returns.
+			const before = vi.getTimerCount();
+			const settlePromise = pi.fire("agent_settled", { type: "agent_settled" });
+			await settlePromise;
+			expect(state.flushWaitExceeded).toBe(false);
+			expect((await stableTimerCount()) - before).toBe(0);
+
+			// Timed-out wait: the grace timer has fired (a fired timer is no longer
+			// counted) and the finally's clearTimeout is a no-op — still no residue.
+			flushSpy.mockImplementation(() => new Promise<void>(() => {}));
+			await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+			const beforeTwo = vi.getTimerCount();
+			const settleTwo = pi.fire("agent_settled", { type: "agent_settled" });
+			await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS);
+			await settleTwo;
+			expect((await stableTimerCount()) - beforeTwo).toBe(0);
+		} finally {
+			vi.useRealTimers();
+			flushSpy.mockRestore();
+		}
+	});
+
+	describe.each([["quit"], ["resume"]])("session_shutdown bounded teardown (reason: %s)", (reason) => {
+		it("returns within the grace period on a hung flush and leaves no pending timer (3.8)", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const flushSpy = vi.spyOn(mlflow, "flushTraces").mockImplementation(() => new Promise<void>(() => {}));
+			flushSpy.mockClear();
+			try {
+				const { pi, state } = setup();
+				await pi.fire("agent_start", { type: "agent_start" }, makeCtx());
+				const before = vi.getTimerCount();
+
+				let shutdownDone = false;
+				const shutdownPromise = pi.fire("session_shutdown", { type: "session_shutdown", reason }).then(() => {
+					shutdownDone = true;
+				});
+				await flushMicrotasks();
+				expect(flushSpy).toHaveBeenCalledTimes(1);
+				expect(shutdownDone).toBe(false);
+
+				// Teardown is not delayed by the unreachable server: bounded return.
+				await vi.advanceTimersByTimeAsync(SERVER_WAIT_GRACE_MS - 1);
+				expect(shutdownDone).toBe(false);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(shutdownDone).toBe(true);
+				await shutdownPromise;
+
+				// The cycle was closed and the wait abandoned, not the work.
+				expect(state.rootSpan).toBeUndefined();
+				expect(state.flushWaitExceeded).toBe(true);
+				expect(state.pendingFlush).toBeDefined();
+				expect((await stableTimerCount()) - before).toBe(0);
+			} finally {
+				vi.useRealTimers();
+				flushSpy.mockRestore();
+			}
+		});
 	});
 });
